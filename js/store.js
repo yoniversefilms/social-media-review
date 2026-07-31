@@ -223,6 +223,22 @@ class SupabaseDriver {
     return this.update('sm_posts', `board_key=eq.${enc(this.board)}&id=eq.${enc(post_id)}`, fields);
   }
 
+  // Direct collaborative editing (v1.5): PATCH the shared slides JSON.
+  // expected_updated_at is the optimistic guard — it rides as an eq filter,
+  // so a concurrent write (different updated_at) matches zero rows and we
+  // throw a distinguishable conflict error the caller can rebase on.
+  async savePostSlides(post_id, slides, expected_updated_at, me) {
+    let filter = `board_key=eq.${enc(this.board)}&id=eq.${enc(post_id)}`;
+    if (expected_updated_at) filter += `&updated_at=eq.${enc(expected_updated_at)}`;
+    const row = await this.update('sm_posts', filter, { slides, updated_by: me.name });
+    if (!row) {
+      const e = new Error('הפוסט עודכן בינתיים על ידי מישהו נוסף');
+      e.conflict = true;
+      throw e;
+    }
+    return row; // fresh row incl. the new updated_at (touch trigger)
+  }
+
   async fetchBoardName() {
     const rows = await this.select('sm_boards', `select=name&board_key=eq.${enc(this.board)}`);
     return rows && rows[0] ? rows[0].name : '';
@@ -254,6 +270,85 @@ class SupabaseDriver {
     return { url, row };
   }
 
+  // ---- drafts (sm_drafts, v1.3) ----
+  // Upsert via PostgREST merge-duplicates on the composite pk
+  // (board_key, post_id, author_id) — ALL pk columns ride in the row.
+  // keepalive:true so the pagehide flush survives the page going away.
+  async saveDraft(post_id, payload, me) {
+    const res = await fetch(this.rest + 'sm_drafts', {
+      method: 'POST',
+      headers: this.headers({
+        'Content-Type': 'application/json',
+        Prefer: 'resolution=merge-duplicates,return=representation',
+      }),
+      keepalive: true,
+      body: JSON.stringify({
+        board_key: this.board,
+        post_id,
+        author_id: me.author_id,
+        author: me.name || null,
+        payload, // updated_at: column default on insert, touch trigger on merge
+      }),
+    });
+    if (!res.ok) throw new Error(await errText(res));
+    const rows = await res.json().catch(() => null);
+    return Array.isArray(rows) ? rows[0] : rows;
+  }
+
+  async loadDraft(post_id, me) {
+    const rows = await this.select('sm_drafts',
+      `select=payload,updated_at,author&board_key=eq.${enc(this.board)}` +
+      `&post_id=eq.${enc(post_id)}&author_id=eq.${enc(me.author_id)}`);
+    return rows && rows[0] ? rows[0] : null;
+  }
+
+  async deleteDraft(post_id, me) {
+    return this.remove('sm_drafts',
+      `board_key=eq.${enc(this.board)}&post_id=eq.${enc(post_id)}&author_id=eq.${enc(me.author_id)}`);
+  }
+
+  async listDrafts(me) {
+    return this.select('sm_drafts',
+      `select=post_id,payload,updated_at,author&board_key=eq.${enc(this.board)}` +
+      `&author_id=eq.${enc(me.author_id)}&order=updated_at.desc`) || [];
+  }
+
+  // ---- post versions (sm_post_versions, v1.7) ----
+  // Insert-only snapshots. (board_key, post_id, vnum) is unique, so a second
+  // stamp of the same vnum (two tabs ending an editing session at once) must
+  // NOT throw — it resolves to the row that is already there.
+  async saveVersion(row) {
+    const res = await fetch(this.rest + 'sm_post_versions', {
+      method: 'POST',
+      headers: this.headers({
+        'Content-Type': 'application/json',
+        Prefer: 'return=representation',
+      }),
+      body: JSON.stringify({ ...row, board_key: this.board }),
+    });
+    if (res.ok) {
+      const rows = await res.json().catch(() => null);
+      return Array.isArray(rows) ? rows[0] : rows;
+    }
+    if (res.status === 409) { // unique violation — hand back the winner
+      const rows = await this.select('sm_post_versions',
+        `select=*&board_key=eq.${enc(this.board)}&post_id=eq.${enc(row.post_id)}` +
+        `&vnum=eq.${enc(row.vnum)}`);
+      if (rows && rows[0]) return rows[0];
+    }
+    throw new Error(await errText(res));
+  }
+
+  listVersions(post_id) {
+    return this.select('sm_post_versions',
+      `select=*&board_key=eq.${enc(this.board)}&post_id=eq.${enc(post_id)}&order=vnum.desc`);
+  }
+
+  listAllVersions() {
+    return this.select('sm_post_versions',
+      `select=*&board_key=eq.${enc(this.board)}&order=post_id.asc,vnum.desc`);
+  }
+
   // Realtime via supabase-js from jsDelivr; ANY failure -> 10s polling.
   // Even with realtime up, a slow 60s safety poll runs (realtime + RLS with
   // header-based board_key can silently deliver nothing in some setups).
@@ -264,7 +359,8 @@ class SupabaseDriver {
         global: { headers: { 'x-board-key': this.board } },
       });
       const ch = client.channel('smr-' + this.board);
-      const tables = ['sm_posts', 'sm_votes', 'sm_pins', 'sm_replies', 'sm_edits', 'sm_publish'];
+      const tables = ['sm_posts', 'sm_votes', 'sm_pins', 'sm_replies', 'sm_edits',
+                      'sm_publish', 'sm_post_versions'];
       for (const table of tables) {
         ch.on('postgres_changes',
           { event: '*', schema: 'public', table, filter: `board_key=eq.${this.board}` },
@@ -354,6 +450,22 @@ class LocalDriver {
     return this.patch('posts', post_id, fields);
   }
 
+  // v1.5 direct collaborative editing — serve.mjs has no conditional PATCH,
+  // so the optimistic guard is a fresh-state compare just before the write.
+  async savePostSlides(post_id, slides, expected_updated_at, me) {
+    if (expected_updated_at) {
+      this.invalidate();
+      const s = await this.state();
+      const cur = (s.posts || []).find((p) => p.id === post_id);
+      if (cur && cur.updated_at && cur.updated_at !== expected_updated_at) {
+        const e = new Error('הפוסט עודכן בינתיים על ידי מישהו נוסף');
+        e.conflict = true;
+        throw e;
+      }
+    }
+    return this.patch('posts', post_id, { slides, updated_by: me.name });
+  }
+
   async fetchBoardName() {
     const s = await this.state();
     return (s.board && s.board.name) || '';
@@ -369,6 +481,62 @@ class LocalDriver {
       author: me.name,
       dataUrl,
     });
+  }
+
+  // ---- drafts (serve.mjs /api/drafts, v1.3) ----
+  async saveDraft(post_id, payload, me) {
+    // not this.req(): keepalive lets the pagehide flush complete
+    let res;
+    try {
+      res = await fetch(this.api + '/drafts', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        keepalive: true,
+        body: JSON.stringify({
+          post_id, author_id: me.author_id, author: me.name || null, payload,
+        }),
+      });
+    } catch {
+      throw new Error('השרת המקומי לא רץ — node scripts/serve.mjs');
+    }
+    if (!res.ok) throw new Error(await errText(res));
+    return res.json().catch(() => null);
+  }
+
+  async loadDraft(post_id, me) {
+    const row = await this.req('GET',
+      `/drafts?post_id=${enc(post_id)}&author_id=${enc(me.author_id)}`);
+    return row || null;
+  }
+
+  deleteDraft(post_id, me) {
+    return this.req('DELETE',
+      `/drafts?post_id=${enc(post_id)}&author_id=${enc(me.author_id)}`);
+  }
+
+  async listDrafts(me) {
+    return (await this.req('GET', `/drafts?author_id=${enc(me.author_id)}`)) || [];
+  }
+
+  // ---- post versions (v1.7) — serve.mjs /api/versions ----
+  // Writes go through the route (so the unique (post_id, vnum) guard lives in
+  // one place); reads come off the cached /api/state payload, which already
+  // carries `versions` — the gallery asks for every version row on every
+  // refresh and must not pay a round-trip for it.
+  saveVersion(row) {
+    return this.req('POST', '/versions', row);
+  }
+
+  async listVersions(post_id) {
+    const s = await this.state();
+    return (s.versions || [])
+      .filter((v) => v.post_id === post_id)
+      .sort((a, b) => Number(b.vnum) - Number(a.vnum));
+  }
+
+  async listAllVersions() {
+    return [...((await this.state()).versions || [])].sort((a, b) =>
+      String(a.post_id).localeCompare(String(b.post_id)) || Number(b.vnum) - Number(a.vnum));
   }
 
   startNotifications(fire) {
@@ -446,6 +614,14 @@ export async function listReplies(pin_id) {
   return d.select('sm_replies', `select=*&board_key=eq.${enc(boardKey)}&pin_id=eq.${enc(pin_id)}&order=created_at.asc`);
 }
 
+// ALL reply rows for the board in one request (discussions hub) — mirrors
+// listAllPins; fetching per pin would be O(pins) round-trips per refresh.
+export async function listAllReplies() {
+  const d = need();
+  if (isLocal) return [...((await d.state()).replies || [])].sort(byCreatedAsc);
+  return d.select('sm_replies', `select=*&board_key=eq.${enc(boardKey)}&order=created_at.asc`);
+}
+
 export async function listEdits(post_id) {
   const d = need();
   if (isLocal) return ((await d.state()).edits || []).filter((e) => e.post_id === post_id).sort(byCreatedAsc);
@@ -462,6 +638,14 @@ export async function listPhotos(post_id) {
   const d = need();
   if (isLocal) return ((await d.state()).photos || []).filter((p) => p.post_id === post_id).sort(byCreatedAsc);
   return d.select('sm_photos', `select=*&board_key=eq.${enc(boardKey)}&post_id=eq.${enc(post_id)}&order=created_at.asc`);
+}
+
+// ALL photo rows for the board in one request (discussions hub shows photos
+// attached to any pin) — same shape as listAllPins/listAllReplies.
+export async function listAllPhotos() {
+  const d = need();
+  if (isLocal) return [...((await d.state()).photos || [])].sort(byCreatedAsc);
+  return d.select('sm_photos', `select=*&board_key=eq.${enc(boardKey)}&order=created_at.asc`);
 }
 
 export async function listQueue() {
@@ -519,6 +703,32 @@ export async function addReply({ pin_id, body }) {
   });
 }
 
+// v1.5 direct collaborative editing — the post page's primary write path.
+// PATCHes sm_posts.slides (shared truth, everyone sees it) and returns the
+// fresh row so the caller can track the new updated_at. Pass the updated_at
+// the caller last saw as expected_updated_at; on a concurrent write the
+// promise rejects with err.conflict === true (re-fetch, re-apply, retry).
+export async function savePostSlides(post_id, slides, { expected_updated_at } = {}) {
+  const me = await ensureName();
+  return need().savePostSlides(post_id, slides || [], expected_updated_at || null, me);
+}
+
+// The audit/learning row for a direct write: same field/old/new format as
+// proposals, but status 'applied' — it IS the record, not a request.
+export async function logEdit({ post_id, field, old_text, new_text }) {
+  const me = await ensureName();
+  return need().insert(isLocal ? 'edits' : 'sm_edits', {
+    post_id, field,
+    old_text: old_text || '',
+    new_text: new_text || '',
+    author: me.name,
+    author_id: me.author_id,
+    status: 'applied',
+  });
+}
+
+// Kept for backward compatibility (older flows / external tools). The post
+// page no longer proposes — it writes directly via savePostSlides + logEdit.
 export async function proposeEdit({ post_id, field, old_text, new_text }) {
   const me = await ensureName();
   return need().insert(isLocal ? 'edits' : 'sm_edits', {
@@ -540,6 +750,16 @@ export async function setEditStatus(id, status) {
 export async function setStage(post_id, stage) {
   const me = await ensureName();
   return need().updatePost(post_id, { stage, updated_by: me.name });
+}
+
+// Shared manual arrangement (gallery «סידור ידני»): batch-write sm_posts.sort
+// for the rows whose position changed. entries: [{id, sort}] — the caller
+// diffs and passes ONLY changed rows. Both drivers route through updatePost.
+export async function savePostOrder(entries) {
+  const me = await ensureName();
+  const d = need();
+  return Promise.all((entries || []).map(({ id, sort }) =>
+    d.updatePost(id, { sort, updated_by: me.name })));
 }
 
 // Updates sm_posts.caption AND inserts an sm_edits audit row
@@ -603,6 +823,96 @@ export async function setQueueStatus(id, status) {
   const d = need();
   if (isLocal) return d.patch('publish', id, { status, updated_by: me.name });
   return d.update('sm_publish', `board_key=eq.${enc(boardKey)}&id=eq.${enc(id)}`, { status, updated_by: me.name });
+}
+
+// ---------------------------------------------------------------- drafts (v1.3)
+// Continuous autosave of working state — one row per (post, author): the
+// unsent designs / in-place text / builder deck, upserted on every editing
+// step so a refresh or another device picks up exactly where the reviewer
+// left off. Identity is whoAmI() (never ensureName — autosave must not pop
+// the name modal). post_id is the post being edited, or the builder draft's
+// pre-minted id.
+
+export async function saveDraft(post_id, payload) {
+  return need().saveDraft(post_id, payload || {}, whoAmI());
+}
+
+// -> {payload, updated_at, author} | null (own row only)
+export async function loadDraft(post_id) {
+  return need().loadDraft(post_id, whoAmI());
+}
+
+export async function deleteDraft(post_id) {
+  return need().deleteDraft(post_id, whoAmI());
+}
+
+// own unfinished drafts, newest first (builder resume list)
+export async function listDrafts() {
+  return need().listDrafts(whoAmI());
+}
+
+// ------------------------------------------------ derived templates (v1.4)
+// Hand-crafted slides saved as reusable templates: base studio template +
+// design overrides + the slide's vars as the sample (PLAN «Derived templates»).
+// Supabase table sm_templates; LocalDriver mirrors via serve.mjs /api/templates.
+
+// the board's derived templates, newest first
+export async function listTemplates() {
+  const d = need();
+  if (isLocal) return (await d.req('GET', '/templates')) || [];
+  return d.select('sm_templates',
+    `select=*&board_key=eq.${enc(boardKey)}&order=created_at.desc`);
+}
+
+export async function saveTemplate({ name, base_template, design, sample_vars, source_post }) {
+  const me = await ensureName();
+  return need().insert(isLocal ? 'templates' : 'sm_templates', {
+    name: name || '',
+    base_template,
+    design: design || null,
+    sample_vars: sample_vars || {},
+    source_post: source_post || null,
+    author: me.name,
+    author_id: me.author_id,
+  });
+}
+
+export async function deleteTemplate(id) {
+  const d = need();
+  if (isLocal) return d.remove('templates', id);
+  return d.remove('sm_templates', `board_key=eq.${enc(boardKey)}&id=eq.${enc(id)}`);
+}
+
+// ------------------------------------------------ post versions (v1.7)
+// Snapshots of the shared slides + caption, stamped when an editing session
+// that actually changed a post ends (post.js). Numbering CONTINUES the
+// studio's: a post shipped as studio v4 gets board v5, v6, … The table is
+// insert-only — nothing rewrites or deletes a snapshot — and a repeat stamp
+// of an existing vnum resolves to the existing row instead of throwing.
+// Supabase table sm_post_versions; LocalDriver mirrors via serve.mjs
+// /api/versions (+ the `versions` array in /api/state).
+
+export async function saveVersion({ post_id, vnum, slides, caption }) {
+  const me = await ensureName();
+  return need().saveVersion({
+    post_id,
+    vnum: Number(vnum),
+    slides: slides || [],
+    caption: caption || '',
+    author: me.name,
+    author_id: me.author_id,
+  });
+}
+
+// one post's snapshots, newest first (vnum desc)
+export async function listVersions(post_id) {
+  return (await need().listVersions(post_id)) || [];
+}
+
+// EVERY version row on the board in one request — the gallery needs version
+// badges for 100+ cards and must not fan out per post.
+export async function listAllVersions() {
+  return (await need().listAllVersions()) || [];
 }
 
 // ---------------------------------------------------------------- subscribe

@@ -30,6 +30,11 @@
 .g-search:focus{outline:2px solid var(--accent);outline-offset:1px}
 .g-sort{padding:7px 10px;border:1px solid var(--line);border-radius:10px;
   background:var(--paper);color:var(--ink);font:inherit;cursor:pointer}
+.g-arrange{padding:7px 12px;border:1px solid var(--line);border-radius:999px;
+  background:var(--paper);color:var(--ink);font:inherit;cursor:pointer;
+  white-space:nowrap}
+.g-arrange:hover{border-color:var(--accent)}
+.g-arrange.is-on{background:var(--accent);border-color:var(--accent);color:#fff}
 
 /* progress strip */
 .g-progress{display:flex;align-items:center;gap:12px;padding:14px 2px 4px}
@@ -69,6 +74,56 @@
   color:var(--ink-soft);flex-wrap:wrap}
 .g-meta__votes{display:flex;gap:8px}
 .g-meta__votes .is-zero{opacity:.4}
+.g-when{margin-inline-start:auto;font-size:.78rem;opacity:.7;white-space:nowrap}
+
+/* arrange mode (unlocked manual order) */
+.g-grid.is-arranging .g-card{cursor:grab;user-select:none;touch-action:none;
+  outline:2px dashed var(--line);outline-offset:2px}
+.g-grid.is-arranging .g-card:hover{transform:none}
+.g-card.is-dragging{opacity:.88;transform:rotate(2deg) scale(1.04)!important;
+  box-shadow:0 14px 34px rgba(36,29,32,.28);z-index:5;cursor:grabbing}
+
+/* live-composed cover (edited posts only) — the composed slide 0 lies over
+   the rendered PNG, which stays underneath as the placeholder until it lands */
+.g-live{position:absolute;inset:0;overflow:hidden}
+.g-live iframe{border:0}
+/* once the compose has landed the stale PNG must not show through */
+.g-cover.is-live img{visibility:hidden}
+.g-cover--edited::after{content:"";position:absolute;top:8px;inset-inline-start:8px;
+  z-index:2;width:8px;height:8px;border-radius:999px;background:var(--accent);
+  box-shadow:0 0 0 2px rgba(255,253,249,.9)}
+
+/* version badge + dropdown */
+.g-ver{position:relative;z-index:2;appearance:none;border:none;font:inherit;
+  font-size:.8rem;font-weight:600;cursor:pointer;
+  background:rgba(36,29,32,.06);color:var(--ink-soft)}
+.g-ver:hover{background:rgba(36,29,32,.12);color:var(--ink)}
+/* :hover outranks a plain class — the previewing state must still win */
+.g-ver--past,.g-ver--past:hover{background:var(--accent);color:#fff}
+.g-ver__n{direction:ltr}
+.g-ver__caret{font-size:.7em;opacity:.75}
+/* Anchored to the badge (bottom of the card), not to the ⋯ button. The
+   compound selector is deliberate: .g-pop is declared further down and would
+   otherwise win on source order and re-pin the list to top:50px. */
+.g-pop.g-verlist{top:auto;bottom:68px;min-width:210px;
+  max-height:min(320px,52vh);overflow:auto;gap:2px}
+.g-verlist__item{display:flex;flex-direction:column;align-items:flex-start;gap:1px;
+  appearance:none;border:none;background:none;font:inherit;cursor:pointer;
+  text-align:start;width:100%;padding:6px 8px;border-radius:8px;color:var(--ink)}
+.g-verlist__item:hover{background:rgba(36,29,32,.07)}
+.g-verlist__item.is-on{background:var(--accent);color:#fff}
+.g-verlist__item b{direction:ltr;unicode-bidi:plaintext;font-size:.9rem}
+.g-verlist__meta{font-size:.72rem;opacity:.72}
+
+/* “viewing an older version” hint, pinned inside the cover */
+.g-verhint{position:absolute;inset-inline:8px;bottom:8px;z-index:2;
+  display:flex;align-items:center;gap:8px;justify-content:space-between;
+  padding:5px 9px;border-radius:10px;font-size:.74rem;
+  background:rgba(36,29,32,.82);color:#fff}
+.g-verhint__reset{appearance:none;border:none;background:rgba(255,255,255,.22);
+  color:#fff;font:inherit;font-size:.72rem;padding:2px 8px;border-radius:999px;
+  cursor:pointer;white-space:nowrap}
+.g-verhint__reset:hover{background:rgba(255,255,255,.38)}
 
 /* per-card overflow menu */
 .g-menu-btn{position:absolute;top:16px;inset-inline-end:16px;z-index:2;
@@ -116,12 +171,16 @@
         <input class="g-search" id="search" type="search"
                placeholder="חיפוש בכותרת או בקפשן…" autocomplete="off">
         <select class="g-sort" id="sort" aria-label="מיון">
+          <option value="manual" selected>סידור ידני</option>
+          <option value="activity">פעילות אחרונה</option>
+          <option value="rated">הכי מדורג</option>
           <option value="new">חדש ביותר</option>
           <option value="yes">הכי הרבה 👍</option>
           <option value="no">הכי הרבה 👎</option>
           <option value="talk">הכי מדובר</option>
           <option value="unvoted">טרם הצבעתי</option>
         </select>
+        <button class="g-arrange" id="arrange" type="button" hidden>🔓 סידור חופשי</button>
       </div>
     </div>
     <div class="g-tabs" id="stage-tabs" role="tablist"></div>

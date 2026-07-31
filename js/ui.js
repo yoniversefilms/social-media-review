@@ -161,6 +161,7 @@ export const STAGES = [
 ];
 
 export const CATEGORIES = [
+  { key: 'meet',    label: 'הכירות' },
   { key: 'par',     label: 'הורות' },
   { key: 'cpl',     label: 'זוגיות' },
   { key: 'rel',     label: 'רילוקיישן' },
@@ -217,7 +218,9 @@ export function navBar(active) {
   const links = [
     { key: 'index', href: 'index.html' + q, label: 'הגלריה' },
     { key: 'build', href: 'build.html' + q, label: 'בונים פוסט' },
+    { key: 'discuss', href: 'discuss.html' + q, label: 'שיחות' },
     { key: 'queue', href: 'queue.html' + q, label: 'תור פרסום' },
+    { key: 'backend', href: 'backend.html' + q, label: 'Backend' },
   ];
 
   const boardName = () => localStorage.getItem('smr:bname') || 'לוח ביקורת';

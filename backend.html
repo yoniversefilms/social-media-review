@@ -1,0 +1,607 @@
+<!doctype html>
+<html dir="ltr" lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<meta name="robots" content="noindex, nofollow">
+<title>Backend — developer docs</title>
+<link rel="icon" href="data:,">
+<link rel="stylesheet" href="./css/app.css">
+<style>
+/* ── page-specific: developer docs (LTR English island in an RTL app) ── */
+.bk-body{direction:ltr;text-align:left}
+.bk-wrap{max-width:980px;margin:0 auto;padding:0 clamp(16px,4vw,36px) 80px}
+
+.bk-head{padding:34px 0 6px;border-bottom:1px solid var(--line);margin-bottom:8px}
+.bk-head h1{font-size:1.7rem;margin-bottom:.35em}
+.bk-head p{color:var(--ink-soft);max-width:64ch;margin-bottom:1em}
+.bk-toc{display:flex;flex-wrap:wrap;gap:6px;padding:10px 0 18px}
+.bk-toc a{display:inline-flex;align-items:center;min-height:30px;padding:2px 12px;
+  border:1px solid var(--line);border-radius:999px;background:var(--paper);
+  color:var(--ink-soft);font-size:.85rem;font-weight:600}
+.bk-toc a:hover{color:var(--accent);text-decoration:none;border-color:var(--accent)}
+
+.bk-sec{padding:30px 0 6px;border-bottom:1px solid var(--line)}
+.bk-sec:last-of-type{border-bottom:none}
+.bk-sec h2{font-size:1.28rem;margin-bottom:.7em}
+.bk-sec h2 .bk-n{color:var(--accent);font-variant-numeric:tabular-nums;margin-right:.45em}
+.bk-sec h3{font-size:1.02rem;margin:1.3em 0 .5em}
+.bk-sec p{max-width:72ch}
+.bk-sec ul,.bk-sec ol{max-width:72ch;padding-left:1.3em;margin:0 0 .9em}
+.bk-sec li{margin-bottom:.35em}
+.bk-muted{color:var(--ink-soft)}
+.bk-planned{display:inline-block;padding:1px 8px;border-radius:999px;font-size:.72rem;
+  font-weight:700;letter-spacing:.03em;background:rgba(179,153,93,.16);color:#7a6633;
+  border:1px solid rgba(179,153,93,.4);vertical-align:2px}
+.bk-done{display:inline-block;padding:1px 8px;border-radius:999px;font-size:.72rem;
+  font-weight:700;letter-spacing:.03em;background:rgba(46,125,79,.12);color:var(--yes);
+  border:1px solid rgba(46,125,79,.35);vertical-align:2px}
+
+/* code */
+.bk-body code{font-family:ui-monospace,SFMono-Regular,Menlo,Consolas,monospace;
+  font-size:.86em;background:rgba(36,29,32,.06);border-radius:5px;padding:1px 5px;
+  direction:ltr;unicode-bidi:embed}
+.bk-code{font-family:ui-monospace,SFMono-Regular,Menlo,Consolas,monospace;
+  font-size:.82rem;line-height:1.6;background:#241d20;color:#f2ece2;
+  border-radius:10px;padding:14px 18px;overflow-x:auto;margin:0 0 1em;
+  direction:ltr;text-align:left;white-space:pre}
+.bk-code .c{color:#9d8f94}
+.bk-code code{background:none;padding:0;color:inherit;font-size:inherit}
+
+/* tables */
+.bk-tblwrap{overflow-x:auto;margin:0 0 1em}
+.bk-tbl{border-collapse:collapse;width:100%;font-size:.9rem;background:var(--paper);
+  border:1px solid var(--line);border-radius:10px;overflow:hidden}
+.bk-tbl th,.bk-tbl td{text-align:left;vertical-align:top;padding:9px 12px;
+  border-bottom:1px solid var(--line)}
+.bk-tbl th{background:rgba(36,29,32,.04);font-size:.8rem;letter-spacing:.02em;
+  text-transform:uppercase;color:var(--ink-soft)}
+.bk-tbl tr:last-child td{border-bottom:none}
+.bk-tbl td code{white-space:nowrap}
+
+/* flow diagrams */
+.bk-flow{display:flex;flex-direction:column;align-items:stretch;margin:18px 0 22px}
+.bk-node{background:var(--paper);border:1px solid var(--line);border-radius:12px;
+  padding:12px 16px;box-shadow:var(--shadow)}
+.bk-node--app{border-color:rgba(131,0,81,.45);border-width:1.5px}
+.bk-node__t{font-weight:700;font-size:.95rem}
+.bk-node__d{color:var(--ink-soft);font-size:.85rem;margin-top:2px}
+.bk-node__d code{font-size:.9em}
+.bk-arrow{display:flex;flex-direction:column;align-items:center;gap:1px;
+  padding:7px 0;color:var(--accent)}
+.bk-arrow svg{display:block}
+.bk-arrow__cmd{font-family:ui-monospace,SFMono-Regular,Menlo,Consolas,monospace;
+  font-size:.78rem;background:rgba(131,0,81,.08);color:var(--accent);
+  border-radius:6px;padding:2px 9px;text-align:center;max-width:100%;
+  overflow-wrap:anywhere}
+.bk-arrow__note{font-size:.76rem;color:var(--ink-soft)}
+.bk-split{display:grid;grid-template-columns:1fr 1fr;gap:14px}
+.bk-split__col{display:flex;flex-direction:column}
+.bk-lane-label{font-size:.78rem;font-weight:700;letter-spacing:.06em;
+  text-transform:uppercase;color:var(--ink-soft);margin:4px 0 6px}
+.bk-loop{display:flex;align-items:center;gap:10px;margin-top:10px;
+  border:1px dashed rgba(131,0,81,.5);border-radius:12px;padding:10px 16px;
+  color:var(--accent);font-size:.85rem;background:rgba(131,0,81,.04)}
+.bk-loop b{font-size:1.1rem}
+@media (max-width:640px){.bk-split{grid-template-columns:1fr}}
+
+/* step walk (section 5) */
+.bk-steps{counter-reset:bk;list-style:none;padding:0;margin:14px 0 18px;max-width:none}
+.bk-steps>li{position:relative;padding:0 0 16px 46px;margin:0}
+.bk-steps>li::before{counter-increment:bk;content:counter(bk);
+  position:absolute;left:0;top:0;width:28px;height:28px;border-radius:999px;
+  background:var(--accent);color:#fff;font-weight:700;font-size:.85rem;
+  display:flex;align-items:center;justify-content:center}
+.bk-steps>li::after{content:"";position:absolute;left:13.5px;top:32px;bottom:2px;
+  width:1px;background:var(--line)}
+.bk-steps>li:last-child::after{display:none}
+.bk-steps .bk-code{margin-top:.5em}
+</style>
+</head>
+<body class="bk-body">
+<div id="nav" dir="rtl"></div>
+
+<div class="bk-wrap">
+
+<header class="bk-head">
+  <h1>The Backend</h1>
+  <p>Developer documentation for the Social Media Review tool: what runs where,
+     how content and feedback flow, and every command that drives the pipeline.
+     This page is a static part of the app — nothing here reads or writes data.</p>
+  <nav class="bk-toc">
+    <a href="#what">1 · What this is</a>
+    <a href="#stack">2 · Stack</a>
+    <a href="#flow">3 · Data flow</a>
+    <a href="#model">4 · Data model</a>
+    <a href="#edits">5 · Edited files</a>
+    <a href="#new-posts">6 · Adding posts</a>
+    <a href="#publishing">7 · Publishing</a>
+    <a href="#git">8 · Git &amp; repos</a>
+    <a href="#runbook">9 · Runbook</a>
+  </nav>
+</header>
+
+<!-- ═══════════════════════════════ 1 ═══════════════════════════════ -->
+<section class="bk-sec" id="what">
+  <h2><span class="bk-n">1</span>What this is</h2>
+  <p>A no-login review tool for social content libraries — built first for the
+     JFCS / Bayit Ba'Valley 100-carousel library, generic by design (board = client).
+     Reviewers open one secret capability URL and vote, pin comments onto slides,
+     propose text and design edits with a pixel-true live preview, upload photos,
+     build new posts from the studio's templates, and queue approved posts for
+     publishing. Everything they do flows back to the content factory as structured,
+     fenced feedback briefs. The app is static files with no build step; a handful of
+     local Node scripts move content in and feedback out.</p>
+</section>
+
+<!-- ═══════════════════════════════ 2 ═══════════════════════════════ -->
+<section class="bk-sec" id="stack">
+  <h2><span class="bk-n">2</span>The stack</h2>
+  <div class="bk-tblwrap"><table class="bk-tbl">
+    <thead><tr><th>Piece</th><th>What it does here</th><th>Why this choice</th></tr></thead>
+    <tbody>
+      <tr>
+        <td><b>Supabase</b><br><span class="bk-muted">project <code>vfdhlrikxcdturtvyxel</code>, shared with the Website&nbsp;review tool</span></td>
+        <td>Postgres + PostgREST (the REST API the browser talks to) + Storage
+            (buckets <code>sm-assets</code>, <code>sm-photos</code>) + Realtime.
+            All of this tool's objects are prefixed <code>sm_</code> so the two
+            tools share one database without touching each other.</td>
+        <td>No server to run or maintain; RLS turns the board key into a
+            capability (the link is the password); one existing project, zero
+            new accounts.</td>
+      </tr>
+      <tr>
+        <td><b>GitHub Pages</b><br><span class="bk-muted"><code>yoniversefilms/social-media-review</code></span></td>
+        <td>Hosts the static app (<code>app/</code> only). The public repo holds
+            tool code and the browser-safe publishable key — no client content;
+            all JFCS material lives behind the board key in Supabase.</td>
+        <td>Free static hosting, mirrors the Website review setup exactly.</td>
+      </tr>
+      <tr>
+        <td><b>The studio</b><br><span class="bk-muted"><code>../Claude_JFCS/New_Workflow/studio</code></span></td>
+        <td>The content factory: Node + headless Chrome renderer
+            (<code>render.mjs</code>, puppeteer-core). HTML/SVG templates +
+            content JSONs → 1080×1350 PNG slides. Read-only from this tool
+            except <code>content/captions/</code>.</td>
+        <td>The browser IS the render engine — which is why the app's in-browser
+            previews (<code>compose.js</code>) are pixel-identical to the final
+            PNGs by construction.</td>
+      </tr>
+      <tr>
+        <td><b>Meta Graph API</b><br><span class="bk-muted">v23.0</span></td>
+        <td>Publishing: IG carousels and FB Page posts, driven by
+            <code>scripts/publish-meta.mjs</code> on the operator's machine only.</td>
+        <td>Publishes carousels natively from public image URLs (which
+            <code>sm-assets</code> already provides); Hootsuite's bulk composer
+            can't do carousels at all.</td>
+      </tr>
+      <tr>
+        <td><b>No build step</b></td>
+        <td>Vanilla JS ES modules, plain HTML/CSS, Node-stdlib scripts. The only
+            external browser script is <code>@supabase/supabase-js@2</code> from
+            jsDelivr, for realtime, with a graceful fallback to 10s polling.</td>
+        <td>Anyone can read the whole thing top to bottom; nothing to compile,
+            nothing to break.</td>
+      </tr>
+    </tbody>
+  </table></div>
+</section>
+
+<!-- ═══════════════════════════════ 3 ═══════════════════════════════ -->
+<section class="bk-sec" id="flow">
+  <h2><span class="bk-n">3</span>The data flow</h2>
+  <p>One loop moves content out to reviewers and feedback back to the factory.
+     A second, smaller lane moves approved posts to Instagram / Facebook.
+     Every arrow is a command you run.</p>
+
+  <div class="bk-lane-label">Lane 1 — content out, feedback back</div>
+  <div class="bk-flow">
+    <div class="bk-node">
+      <div class="bk-node__t">Studio content + renders</div>
+      <div class="bk-node__d"><code>studio/content/&lt;id&gt;.vN.json</code> (the source slides JSON)
+        and <code>studio/out/png/*.png</code> (rendered slides) in
+        <code>../Claude_JFCS/New_Workflow/studio</code></div>
+    </div>
+    <div class="bk-arrow">
+      <span class="bk-arrow__cmd">node scripts/ingest.mjs --local&nbsp;|&nbsp;--update</span>
+      <svg width="14" height="18" viewBox="0 0 14 18"><path d="M7 0v13M2 10l5 6 5-6" fill="none" stroke="currentColor" stroke-width="1.6"/></svg>
+      <span class="bk-arrow__note">scans the studio read-only, picks each post's highest version that has renders</span>
+    </div>
+    <div class="bk-node">
+      <div class="bk-node__t">Local board</div>
+      <div class="bk-node__d"><code>assets-local/local/**</code> (mirrored renders, studio assets, manifest)
+        + <code>assets-local/state.json</code> (the full local backend state)</div>
+    </div>
+    <div class="bk-arrow">
+      <svg width="14" height="14" viewBox="0 0 14 14"><path d="M7 0v9M2 6l5 6 5-6" fill="none" stroke="currentColor" stroke-width="1.6"/></svg>
+    </div>
+    <div class="bk-split">
+      <div class="bk-split__col">
+        <div class="bk-lane-label">Dev path</div>
+        <div class="bk-arrow">
+          <span class="bk-arrow__cmd">node scripts/serve.mjs</span>
+          <svg width="14" height="14" viewBox="0 0 14 14"><path d="M7 0v9M2 6l5 6 5-6" fill="none" stroke="currentColor" stroke-width="1.6"/></svg>
+        </div>
+        <div class="bk-node">
+          <div class="bk-node__t">localhost:8907</div>
+          <div class="bk-node__d">serves <code>app/</code>, assets from
+            <code>assets-local/</code>, and a full <code>/api</code> backend.
+            Nothing leaves the machine.</div>
+        </div>
+      </div>
+      <div class="bk-split__col">
+        <div class="bk-lane-label">Live path</div>
+        <div class="bk-arrow">
+          <span class="bk-arrow__cmd">node scripts/go-live.mjs</span>
+          <svg width="14" height="14" viewBox="0 0 14 14"><path d="M7 0v9M2 6l5 6 5-6" fill="none" stroke="currentColor" stroke-width="1.6"/></svg>
+        </div>
+        <div class="bk-node">
+          <div class="bk-node__t">Supabase</div>
+          <div class="bk-node__d">assets → bucket <code>sm-assets</code> under
+            <code>boards/&lt;board-key&gt;/…</code>; posts upserted into
+            <code>sm_posts</code> (stages + in-app captions preserved)</div>
+        </div>
+      </div>
+    </div>
+    <div class="bk-arrow">
+      <svg width="14" height="14" viewBox="0 0 14 14"><path d="M7 0v9M2 6l5 6 5-6" fill="none" stroke="currentColor" stroke-width="1.6"/></svg>
+    </div>
+    <div class="bk-node bk-node--app">
+      <div class="bk-node__t">The app — reviewers work</div>
+      <div class="bk-node__d">index / post / build / queue pages. Votes, pins,
+        replies, direct edits (shared slides + audit rows), photo uploads → the <code>sm_</code> tables
+        (via <code>store.js</code>, the app's only network module)</div>
+    </div>
+    <div class="bk-arrow">
+      <span class="bk-arrow__cmd">node scripts/sync.mjs</span>
+      <svg width="14" height="18" viewBox="0 0 14 18"><path d="M7 0v13M2 10l5 6 5-6" fill="none" stroke="currentColor" stroke-width="1.6"/></svg>
+      <span class="bk-arrow__note">every reviewer string fenced as untrusted data</span>
+    </div>
+    <div class="bk-node">
+      <div class="bk-node__t">Feedback briefs</div>
+      <div class="bk-node__d"><code>New_Workflow/feedback/&lt;YYYY-MM-DD&gt;/</code> —
+        a README with totals + ranked shortlist, one markdown brief per post,
+        and <code>feedback.json</code> for scripts</div>
+    </div>
+    <div class="bk-arrow">
+      <span class="bk-arrow__cmd">Claude factory session&nbsp;·&nbsp;node scripts/apply-edits.mjs</span>
+      <svg width="14" height="18" viewBox="0 0 14 18"><path d="M7 0v13M2 10l5 6 5-6" fill="none" stroke="currentColor" stroke-width="1.6"/></svg>
+      <span class="bk-arrow__note">board-edited slides become the next content version (--from-board); judgment calls stay human/AI</span>
+    </div>
+    <div class="bk-node">
+      <div class="bk-node__t">Next content version</div>
+      <div class="bk-node__d"><code>studio/content/&lt;id&gt;.v&lt;N+1&gt;.json</code>
+        — never overwrites an existing version file</div>
+    </div>
+    <div class="bk-arrow">
+      <span class="bk-arrow__cmd">node render.mjs --only &lt;id&gt;</span>
+      <svg width="14" height="18" viewBox="0 0 14 18"><path d="M7 0v13M2 10l5 6 5-6" fill="none" stroke="currentColor" stroke-width="1.6"/></svg>
+      <span class="bk-arrow__note">run inside the studio dir — headless Chrome screenshots at exactly 1080×1350</span>
+    </div>
+    <div class="bk-loop"><b>↺</b>
+      <span><code>node scripts/ingest.mjs --update</code> &amp;&amp;
+        <code>node scripts/go-live.mjs</code> — the board refreshes with the new
+        version and all feedback intact. The loop closes.</span>
+    </div>
+  </div>
+
+  <div class="bk-lane-label">Lane 2 — approved → published</div>
+  <div class="bk-flow">
+    <div class="bk-node bk-node--app">
+      <div class="bk-node__t">Post reaches stage <code>approved</code> (מאושר)</div>
+      <div class="bk-node__d">someone adds it to the queue on <code>queue.html</code>:
+        channel (Instagram / Facebook / both), optional note and schedule</div>
+    </div>
+    <div class="bk-arrow">
+      <svg width="14" height="14" viewBox="0 0 14 14"><path d="M7 0v9M2 6l5 6 5-6" fill="none" stroke="currentColor" stroke-width="1.6"/></svg>
+    </div>
+    <div class="bk-node">
+      <div class="bk-node__t"><code>sm_publish</code> row, status <code>queued</code></div>
+      <div class="bk-node__d">the app never posts anything itself — publishing is
+        a deliberate, local, operator-run step</div>
+    </div>
+    <div class="bk-arrow">
+      <span class="bk-arrow__cmd">node scripts/publish-meta.mjs&nbsp;→&nbsp;--live</span>
+      <svg width="14" height="18" viewBox="0 0 14 18"><path d="M7 0v13M2 10l5 6 5-6" fill="none" stroke="currentColor" stroke-width="1.6"/></svg>
+      <span class="bk-arrow__note">dry-run by default: prints the exact plan, publishes nothing</span>
+    </div>
+    <div class="bk-node">
+      <div class="bk-node__t">Instagram / Facebook</div>
+      <div class="bk-node__d">Meta fetches the slides from their public
+        <code>sm-assets</code> URLs; the queue row is updated in place
+        (<code>status</code> → published/failed, <code>result</code> → Meta ids
+        or errors) so the queue page shows the outcome live</div>
+    </div>
+  </div>
+</section>
+
+<!-- ═══════════════════════════════ 4 ═══════════════════════════════ -->
+<section class="bk-sec" id="model">
+  <h2><span class="bk-n">4</span>The data model</h2>
+  <p>Eight tables, all prefixed <code>sm_</code>, all defined in
+     <code>schema.sql</code> (idempotent — safe to re-run):</p>
+  <div class="bk-tblwrap"><table class="bk-tbl">
+    <thead><tr><th>Table</th><th>One line</th></tr></thead>
+    <tbody>
+      <tr><td><code>sm_boards</code></td><td>One row per review board; <code>board_key</code> is the secret UUID capability. Provisioned service-role only — anon can read only its own row.</td></tr>
+      <tr><td><code>sm_posts</code></td><td>One row per carousel: category, Hebrew title, caption, stage, <code>origin</code> (factory | builder), <code>asset_prefix</code> into storage — and the full source <code>slides</code> JSON.</td></tr>
+      <tr><td><code>sm_votes</code></td><td>Append-only yes / no / maybe + a reason; the newest row per (post, author) is that person's vote.</td></tr>
+      <tr><td><code>sm_pins</code></td><td>A comment anchored to a point on a slide (0-based slide index, fractional x,y); status open / resolved; the one table with anon DELETE (mistake-fixing).</td></tr>
+      <tr><td><code>sm_replies</code></td><td>Threaded under a pin; append-only.</td></tr>
+      <tr><td><code>sm_edits</code></td><td>The audit/learning log: every direct edit lands as a row with <code>field</code> (<code>caption</code>, <code>title</code>, <code>slides.&lt;i&gt;.&lt;var&gt;</code>, or <code>slides.&lt;i&gt;.design</code>), exact old→new, status <code>applied</code>. Legacy proposal rows keep their proposed/accepted/rejected statuses.</td></tr>
+      <tr><td><code>sm_photos</code></td><td>Reviewer upload metadata; the bytes live in the <code>sm-photos</code> bucket (public read, image-only anon inserts ≤ 8&nbsp;MB, path-scoped to <code>boards/&lt;board-key&gt;/…</code>).</td></tr>
+      <tr><td><code>sm_publish</code></td><td>The publish queue: channel instagram / facebook / both, status queued / published / failed / canceled, <code>scheduled_for</code>, and a <code>result</code> jsonb the publisher fills in.</td></tr>
+    </tbody>
+  </table></div>
+
+  <h3>Three principles the whole model hangs on</h3>
+  <ul>
+    <li><b>The board key is the capability.</b> The link IS the password. Every
+      request carries an <code>x-board-key</code> header and RLS scopes every row
+      to it. No login, ever; the browser holds only the publishable key.</li>
+    <li><b>Feedback is append-only.</b> Changing your vote = inserting a new row
+      (latest per author wins). Post <em>slides</em> are the one deliberate
+      exception (v1.5): reviewers write them directly, and every write leaves
+      an applied <code>sm_edits</code> audit row — so the record of who changed
+      what survives even though the slides themselves are live.</li>
+    <li><b>Posts carry their source <code>slides</code> JSON</b> — the same JSON
+      the studio renders from. That single decision enables the live edit
+      preview, the in-app builder, and factory rebuilds from feedback.</li>
+  </ul>
+</section>
+
+<!-- ═══════════════════════════════ 5 ═══════════════════════════════ -->
+<section class="bk-sec" id="edits">
+  <h2><span class="bk-n">5</span>Where edited files are stored</h2>
+  <p>Reviewer edits write <b>directly into the shared post</b> (v1.5): every
+     committed change — in-place text, side-panel fields, design mutations —
+     PATCHes <code>sm_posts.slides</code>, so all devices see it live. Each
+     write also inserts an <code>sm_edits</code> audit row (<code>field</code>,
+     exact <code>old_text</code>/<code>new_text</code>, status
+     <code>applied</code>) — the read-only «היסטוריית עריכות» list and the
+     learning loop feed on it. One edit, end to end:</p>
+  <ol class="bk-steps">
+    <li>A reviewer edits a slide's text (or its design) on <code>post.html</code>.
+      The app saves the change into <code>sm_posts.slides</code> for everyone
+      («נשמר לכולם ✓») and logs an <code>sm_edits</code> row:
+      <code>field: "slides.2.p1"</code>, <code>old_text</code>,
+      <code>new_text</code>, status <code>applied</code>. Concurrent edits are
+      guarded optimistically: a save that lost the race re-fetches, re-applies
+      on top, and saves again.</li>
+    <li>On the operator's machine:
+      <pre class="bk-code">node scripts/apply-edits.mjs            <span class="c"># --from-board (default): board slides → next version</span>
+node scripts/apply-edits.mjs --dry-run  <span class="c"># show what would change, write nothing</span>
+node scripts/apply-edits.mjs --replay   <span class="c"># legacy: replay individual accepted edit rows</span></pre>
+      The default mode compares each factory post's board
+      <code>slides</code> against the studio's highest
+      <code>content/&lt;id&gt;[.vN].json</code> (canonical JSON); when they
+      differ it writes <code>content/&lt;id&gt;.v&lt;N+1&gt;.json</code>
+      carrying the board's slides verbatim — a <b>new file in the studio</b>,
+      never overwriting an existing version.</li>
+    <li>Re-render just the changed posts, from the studio dir:
+      <pre class="bk-code">node render.mjs --only &lt;id&gt;</pre></li>
+    <li>Refresh the board:
+      <pre class="bk-code">node scripts/ingest.mjs --update &amp;&amp; node scripts/go-live.mjs</pre>
+      Reviewers now see the new version; their votes, pins, and stages survive.</li>
+  </ol>
+
+  <h3>The caption exception</h3>
+  <p>Captions are the one field applied <b>immediately</b>: the app writes
+     straight to <code>sm_posts.caption</code> and inserts an <code>sm_edits</code>
+     audit row (<code>field: "caption"</code>, <code>status: "applied"</code>).
+     <code>apply-edits.mjs</code> later reconciles those live captions back into
+     the studio's source of truth, <code>content/captions/&lt;cat&gt;.json</code>
+     — the one place this tool is allowed to write inside the studio.</p>
+
+  <h3>Design overrides ride the same path</h3>
+  <p>The direct-manipulation editor (fonts, sizes, palette colors, drag offsets,
+     illustration/photo extras, backgrounds) writes <code>slide.design</code>
+     into the shared slides like any other change, and its audit row uses
+     <code>field: "slides.&lt;i&gt;.design"</code> with the whole design object
+     as canonical JSON (<code>''</code> means deleted). Since the board slides
+     travel verbatim in <code>--from-board</code>, designs need no special
+     handling on intake. The invariant: <code>compose.js</code> in the browser
+     and the studio's <code>render.mjs</code> apply <code>design</code>
+     identically, so what previews in the app is what the final PNG shows.</p>
+</section>
+
+<!-- ═══════════════════════════════ 6 ═══════════════════════════════ -->
+<section class="bk-sec" id="new-posts">
+  <h2><span class="bk-n">6</span>Adding new posts</h2>
+
+  <h3>Route A — AI / factory posts (the main road)</h3>
+  <p>A factory session drops a content JSON into the studio, renders it, and the
+     next ingest picks it up automatically. <code>ingest.mjs</code> scans
+     <code>studio/content/*.json</code>, groups by base id, and publishes each
+     post's <b>highest version that has renders</b> in
+     <code>studio/out/png/</code> (a JSON with no matching PNGs is reported as a
+     problem and skipped).</p>
+  <p>Id conventions (they drive categorization):</p>
+  <ul>
+    <li><code>par</code> / <code>cpl</code> / <code>rel</code> / <code>fam</code> /
+      <code>ind</code> prefixes → הורות / זוגיות / רילוקיישן / משפחה / טיפול פרטני
+      (e.g. <code>par01-bedtime-hour</code>)</li>
+    <li><code>svc*</code> ids and the five intro posts
+      (<code>p10-what-is-bayit</code>, <code>p11</code>–<code>p14-intro-*</code>)
+      → הכירות (meet)</li>
+    <li>other <code>p</code>-series originals → ליבה (orig)</li>
+    <li>versions are sibling files: <code>&lt;id&gt;.v2.json</code>,
+      <code>&lt;id&gt;.v3.json</code>, … with renders named
+      <code>&lt;id&gt;-v2-01.png</code>, <code>-02.png</code>, …</li>
+  </ul>
+  <p>A minimal content JSON (<code>studio/content/par26-example.json</code>):</p>
+  <pre class="bk-code">{
+  "id": "par26-example",
+  "title": "Internal English working title",
+  "slides": [
+    { "template": "cover-ill",
+      "vars": { "kicker": "…", "display": "כותרת בעברית", "ill": "lamp-table" } },
+    { "template": "essay",
+      "vars": { "eyebrow": "…", "p1": "…", "p2": "…", "p3": "…",
+                "mark": "…", "ill": "clock-face" } }
+  ]
+}</pre>
+  <p>Then:</p>
+  <pre class="bk-code"><span class="c"># in the studio dir:</span>
+node render.mjs --only par26-example
+<span class="c"># back in the tool root:</span>
+node scripts/ingest.mjs --update &amp;&amp; node scripts/go-live.mjs</pre>
+
+  <h3>Route B — the in-app builder</h3>
+  <p>Reviewers build posts on <code>build.html</code>: pick a curated template,
+     fill the fields, watch it compose live, save. That inserts an
+     <code>sm_posts</code> row with <code>origin: "builder"</code>, category
+     <code>builder</code>, and an empty <code>asset_prefix</code> — the post has
+     <b>no PNGs</b>, only its <code>slides</code> JSON, and displays compose-only
+     until a factory session adopts it into the studio (writes the content JSON,
+     renders it, re-ingests). Builder posts can't be published before that —
+     <code>publish-meta.mjs</code> refuses posts without public renders.</p>
+
+  <h3>Route C — captions</h3>
+  <p>Captions live per category in
+     <code>studio/content/captions/&lt;cat&gt;.json</code>
+     (<code>par.json</code>, <code>cpl.json</code>, <code>rel.json</code>,
+     <code>fam.json</code>, <code>ind.json</code>, <code>meet.json</code>,
+     <code>orig.json</code>) as a flat <code>{ "&lt;base-id&gt;": "caption…" }</code>
+     map. Ingest attaches them to posts by base id; in-app caption edits flow
+     back per section 5.</p>
+</section>
+
+<!-- ═══════════════════════════════ 7 ═══════════════════════════════ -->
+<section class="bk-sec" id="publishing">
+  <h2><span class="bk-n">7</span>Publishing route &amp; the plan</h2>
+
+  <h3>Where the accounts actually stand <span class="bk-muted">(verified 2026-07-28/31)</span></h3>
+  <div class="bk-tblwrap"><table class="bk-tbl">
+    <thead><tr><th>Asset</th><th>State</th><th>Gate</th></tr></thead>
+    <tbody>
+      <tr><td>Bayit FB Page</td>
+        <td><b>Exists</b> — facebook.com/BayitBaValley, 785 followers</td>
+        <td>Admin is Naama's personal profile; Yonatan needs admin (or Naama runs the token step once)</td></tr>
+      <tr><td>Bayit Instagram</td>
+        <td><b>Does not exist yet</b> <span class="bk-planned">planned</span></td>
+        <td>Create as Professional/Business + link to the Page; until then IG queue rows can't publish</td></tr>
+      <tr><td>JFCS Meta Business Portfolio</td>
+        <td>Unconfirmed (open question for Bo)</td>
+        <td>Not required for API publishing; wanted long-term for clean team access</td></tr>
+    </tbody>
+  </table></div>
+  <p><b>What works today once tokens land: Facebook-only publishing</b>
+     (<code>channel: facebook</code> in the queue) — the Page is real. Instagram
+     unlocks the moment the account is created and linked. A dev-mode Meta app
+     can publish to accounts whose admins have a role on the app — no App Review
+     needed for the trial runs.</p>
+
+  <h3>Why Graph API direct, not Hootsuite</h3>
+  <p>Hootsuite's bulk composer can't schedule carousels (text + one image only) —
+     and this library is ~100 <em>carousel</em> posts. The Graph API publishes
+     carousels natively from public image URLs, which the <code>sm-assets</code>
+     bucket already serves. Hootsuite stays as a manual fallback for one-offs.</p>
+
+  <h3>One-time setup <span class="bk-planned">planned — waiting on account access</span></h3>
+  <ol>
+    <li>Create a <b>Business app</b> at developers.facebook.com.</li>
+    <li>IG account must be Professional and linked to the FB Page.</li>
+    <li>Permissions: <code>instagram_basic</code>,
+      <code>instagram_content_publish</code>, <code>pages_manage_posts</code>,
+      <code>pages_read_engagement</code>, <code>business_management</code>.</li>
+    <li>Exchange a short-lived Graph Explorer token for a long-lived (~60-day)
+      token; fetch the IG user id via
+      <code>GET /&lt;PAGE_ID&gt;?fields=instagram_business_account</code>.</li>
+    <li>Values go in <code>.env</code> only: <code>META_IG_USER_ID</code>,
+      <code>META_PAGE_ID</code>, <code>META_ACCESS_TOKEN</code>.</li>
+  </ol>
+
+  <h3>The flow (built and dry-run testable today)</h3>
+  <pre class="bk-code">node scripts/publish-meta.mjs            <span class="c"># DRY RUN — prints the exact plan, posts nothing</span>
+node scripts/publish-meta.mjs --live     <span class="c"># actually publishes, updates the queue rows</span></pre>
+  <p>IG carousels: one <code>POST /{ig}/media</code> per slide, a
+     <code>CAROUSEL_ALBUM</code> container, poll until <code>FINISHED</code>,
+     then <code>media_publish</code>. FB: unpublished Page photos +
+     <code>attached_media</code> on <code>/feed</code>. Guardrails: the script
+     stops after 20 IG publishes per run (IG allows ~50/24h); trial batches stay
+     ≤ 10/day; <code>scheduled_for</code> rows wait until their time; the ~60-day
+     token expiry shows up as every row failing with an OAuth error. No Stories,
+     no TikTok/LinkedIn through this pipeline.</p>
+</section>
+
+<!-- ═══════════════════════════════ 8 ═══════════════════════════════ -->
+<section class="bk-sec" id="git">
+  <h2><span class="bk-n">8</span>Git &amp; repos</h2>
+  <ul>
+    <li><b>Current state:</b> only <code>app/</code> is a git repo, pushed to the
+      <b>public</b> Pages repo <code>yoniversefilms/social-media-review</code>.
+      That's safe by construction: the app holds tool code and the publishable
+      key only — no client content, no secrets.</li>
+    <li><b>Recommended <span class="bk-planned">planned</span>:</b> make the tool
+      root a git repo pushed to a <b>private</b> repo, so scripts, schema, and
+      docs get history too. The root <code>.gitignore</code> already excludes
+      <code>.env</code>, <code>node_modules/</code>, <code>assets-local/</code>,
+      and <code>*.local.json</code>.</li>
+    <li><b>Separate concern:</b> the studio and all content JSONs live in the
+      client project (<code>Claude_JFCS</code>), not here.</li>
+    <li><b>Never committed, anywhere:</b> <code>.env</code> (secret key + Meta
+      tokens), board keys in docs or code, and <code>assets-local/</code>
+      (client renders on disk).</li>
+  </ul>
+</section>
+
+<!-- ═══════════════════════════════ 9 ═══════════════════════════════ -->
+<section class="bk-sec" id="runbook">
+  <h2><span class="bk-n">9</span>Runbook</h2>
+  <p>All commands run from the tool root
+     (<code>~/Documents/social media review</code>) unless noted.</p>
+  <div class="bk-tblwrap"><table class="bk-tbl">
+    <thead><tr><th>Command</th><th>When to run it</th></tr></thead>
+    <tbody>
+      <tr><td><code>node scripts/ingest.mjs --local</code></td>
+        <td>Fresh local board build from the studio (first run, or when you want
+          a clean slate — resets local feedback state).</td></tr>
+      <tr><td><code>node scripts/ingest.mjs --update</code></td>
+        <td>Refresh posts / captions / assets from the studio, <b>preserving</b>
+          feedback and stages. Run after any studio change.</td></tr>
+      <tr><td><code>node scripts/serve.mjs</code></td>
+        <td>Local dev server on port 8907: the app + assets + the
+          <code>/api</code> backend (state in
+          <code>assets-local/state.json</code>).</td></tr>
+      <tr><td>apply <code>schema.sql</code> <span class="bk-done">done 2026-07-31</span></td>
+        <td>Operator-run, once (idempotent — re-run when <code>schema.sql</code>
+          changes): Management-API curl per <code>docs/SETUP.md</code> §1, or
+          dashboard SQL editor paste.</td></tr>
+      <tr><td><code>node scripts/go-live.mjs</code> <span class="bk-muted">(<code>--dry-run</code>)</span></td>
+        <td>Provision the board (secret UUID key), upload assets to
+          <code>sm-assets</code>, seed <code>sm_posts</code>. Idempotent; re-run
+          after every <code>ingest --update</code>. <b>Prints the real board
+          key</b> and the reviewer URL.</td></tr>
+      <tr><td><code>node scripts/apply-edits.mjs</code> <span class="bk-muted">(<code>--replay</code> · <code>--all</code> · <code>--local</code> · <code>--dry-run</code>)</span></td>
+        <td>Default <code>--from-board</code>: posts whose board slides differ from
+          the studio's latest version become the next studio content versions
+          (<code>--replay</code> = legacy per-row replay). Then render → ingest → go-live.</td></tr>
+      <tr><td><code>node scripts/sync.mjs</code> <span class="bk-muted">(<code>--local</code>)</span></td>
+        <td>Pull all boards' feedback into fenced factory briefs at
+          <code>New_Workflow/feedback/&lt;date&gt;/</code>. Weekly, or before any
+          factory session.</td></tr>
+      <tr><td><code>node scripts/publish-meta.mjs</code> <span class="bk-muted">(<code>--live</code> · <code>--post &lt;id&gt;</code> · <code>--include-future</code> · <code>--local</code> · <code>--assume-public</code>)</span></td>
+        <td>Consume queued <code>sm_publish</code> rows. Dry-run by default;
+          <code>--live</code> only on the operator's say-so.</td></tr>
+      <tr><td><code>node render.mjs</code> <span class="bk-muted">(<code>--only &lt;substr&gt;</code> · <code>--templates</code> · <code>--content</code>)</span></td>
+        <td>Studio renderer — run <b>inside the studio dir</b>
+          (<code>../Claude_JFCS/New_Workflow/studio</code>) after content
+          changes.</td></tr>
+    </tbody>
+  </table></div>
+
+  <h3>URLs</h3>
+  <pre class="bk-code"><span class="c"># local (dev):</span>
+http://localhost:8907/?board=local&amp;local=1
+<span class="c"># live (reviewers) — the real key is printed by go-live.mjs; never write it into docs:</span>
+https://yoniversefilms.github.io/social-media-review/?board=&lt;board-key&gt;</pre>
+</section>
+
+</div>
+
+<noscript><p style="text-align:center;padding:40px">This page renders without JavaScript; only the shared nav bar needs it.</p></noscript>
+<script src="./config.js"></script>
+<script type="module" src="./js/backend.js"></script>
+</body>
+</html>

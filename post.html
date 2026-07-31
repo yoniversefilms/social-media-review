@@ -11,9 +11,16 @@
 
 .pv-wrap { max-width: 1240px; margin: 0 auto; padding: 16px 20px 64px; }
 
-.pv-head { display: flex; align-items: baseline; gap: 12px; flex-wrap: wrap; margin: 10px 0 18px; }
+.pv-head { display: flex; align-items: center; gap: 12px; flex-wrap: wrap; margin: 10px 0 18px; }
 .pv-head h1 { font-size: 1.35rem; margin: 0; color: var(--ink); font-weight: 700; }
 .pv-head .pv-tags { display: flex; gap: 8px; align-items: center; flex-wrap: wrap; }
+
+/* post-to-post navigation (v1.7) — the ONE place it lives; the פרטים tab used
+   to carry a duplicate row of the same links and no longer does. */
+.pv-nav { display: flex; align-items: center; gap: 6px; flex-wrap: wrap; margin-inline-start: auto; }
+.pv-navbtn { min-height: 36px; padding: 5px 12px; font-size: .88rem; white-space: nowrap; }
+.pv-navbtn.is-off { opacity: .34; pointer-events: none; }
+@media (max-width: 620px) { .pv-nav { margin-inline-start: 0; width: 100%; } }
 
 /* two columns: viewer inline-start (RIGHT in RTL), panel inline-end */
 .pv-main { display: grid; grid-template-columns: minmax(320px, 600px) minmax(320px, 1fr); gap: 28px; align-items: start; }
@@ -23,29 +30,88 @@
 .pv-viewer { position: sticky; top: 12px; }
 @media (max-width: 920px) { .pv-viewer { position: static; } }
 
-.pv-tools { display: flex; align-items: center; justify-content: space-between; gap: 10px; margin-bottom: 10px; flex-wrap: wrap; }
+.pv-tools { display: flex; align-items: center; justify-content: space-between; gap: 10px; margin-bottom: 14px; flex-wrap: wrap; }
+.pv-tools__group { display: flex; align-items: center; gap: 8px; flex-wrap: wrap; }
+/* action bar (v1.6): everything action-like lives ABOVE the slide, never on it */
+.pv-actionbar { justify-content: flex-end; }
+.pv-actionbar .hist-btn { min-width: 38px; padding: 5px 10px; font-size: 1rem; line-height: 1; }
+.pv-actionbar .smr-edadd { display: inline-flex; gap: 6px; flex-wrap: wrap; }
+.pv-actionbar .smr-edadd .btn { padding: 5px 10px; font-size: .8rem; }
 
 .pv-pinbtn { transition: box-shadow .15s ease; }
 .pv-pinbtn.on { background: var(--accent); color: #fff; box-shadow: 0 0 0 3px color-mix(in srgb, var(--accent) 30%, transparent); }
 
-.pv-switch { display: inline-flex; align-items: center; gap: 8px; cursor: pointer; user-select: none; color: var(--ink-soft); font-size: .92rem; }
-.pv-switch input { position: absolute; opacity: 0; pointer-events: none; }
-.pv-switch .knob { width: 38px; height: 22px; border-radius: 22px; background: var(--line); position: relative; transition: background .15s ease; flex: none; }
-.pv-switch .knob::after { content: ''; position: absolute; top: 2px; inset-inline-start: 2px; width: 18px; height: 18px; border-radius: 50%; background: var(--paper); box-shadow: 0 1px 3px rgba(0,0,0,.25); transition: transform .15s ease; }
-.pv-switch input:checked + .knob { background: var(--accent); }
-.pv-switch input:checked + .knob::after { transform: translateX(-16px); } /* RTL: knob travels left */
 
-.pv-frame { position: relative; width: 100%; max-width: 560px; aspect-ratio: 4 / 5; margin: 0 auto; background: var(--paper); border: 1px solid var(--line); border-radius: 14px; overflow: hidden; box-shadow: 0 10px 30px rgba(36,29,32,.08); touch-action: pan-y; }
-.pv-frame img.pv-slide { position: absolute; inset: 0; width: 100%; height: 100%; object-fit: cover; display: block; user-select: none; -webkit-user-drag: none; }
+.pv-designbtn.on { background: var(--accent); color: #fff; border-color: var(--accent); box-shadow: 0 0 0 3px color-mix(in srgb, var(--accent) 30%, transparent); }
+
+/* voting lives above the tabs (v1.8): pick → say why → submit unlocks */
+.pv-votebox { border: 1px solid var(--line); border-radius: 12px; background: var(--paper); padding: 14px; margin-bottom: 16px; box-shadow: var(--shadow); }
+.pv-votebox .vb-row { display: flex; gap: 8px; }
+.pv-votebox .vb-btn { flex: 1; min-height: 52px; border-radius: 10px; border: 1px solid var(--line); background: var(--bg); font-size: .95rem; font-weight: 700; cursor: pointer; display: flex; flex-direction: column; align-items: center; justify-content: center; gap: 2px; transition: border-color .12s ease, background .12s ease; }
+.pv-votebox .vb-btn .g { font-size: 1.15rem; }
+.pv-votebox .vb-btn.on.yes { border-color: var(--yes); background: color-mix(in srgb, var(--yes) 12%, var(--paper)); }
+.pv-votebox .vb-btn.on.no { border-color: var(--no); background: color-mix(in srgb, var(--no) 12%, var(--paper)); }
+.pv-votebox .vb-btn.on.maybe { border-color: var(--maybe); background: color-mix(in srgb, var(--maybe) 16%, var(--paper)); }
+.pv-votebox .vb-why { margin-top: 10px; }
+.pv-votebox .vb-why textarea { width: 100%; min-height: 74px; }
+.pv-votebox .vb-actions { display: flex; align-items: center; gap: 10px; margin-top: 8px; flex-wrap: wrap; }
+.pv-votebox .vb-hint { font-size: .78rem; color: var(--ink-soft); }
+.pv-votebox .vb-tally { display: flex; gap: 14px; align-items: center; margin-top: 12px; padding-top: 10px; border-top: 1px solid var(--line); font-size: .9rem; }
+.pv-votebox .vb-mine { font-size: .8rem; color: var(--ink-soft); margin-top: 8px; }
+
+/* ---------------- slide stage ----------------
+   v1.7: the frame's box IS the slide — nothing overlays it and nothing is
+   nested in it but the artwork, the pin layer and the pin popover. The
+   prev/next buttons sit in the gutters beside it (grid areas below), so the
+   frame's bounding box stays exactly the 4:5 artwork for pin hit-testing and
+   for the live-preview scale math (which reads composeHost's clientWidth). */
+.pv-stage {
+  display: grid;
+  grid-template-columns: 40px minmax(0, 560px) 40px;
+  grid-template-areas: 'prev frame next'
+                       'dots dots dots';
+  justify-content: center;
+  align-items: center;
+  column-gap: 12px;
+  row-gap: 14px;
+  margin-bottom: 2px;
+}
+/* narrow: the gutters vanish, so the same two buttons re-flow into the dot
+   strip below the slide (no duplicate DOM — only the grid areas change) */
+@media (max-width: 700px) {
+  .pv-stage {
+    grid-template-columns: auto minmax(0, 1fr) auto;
+    grid-template-areas: 'frame frame frame'
+                         'prev  dots  next';
+    column-gap: 10px;
+  }
+}
+
+/* The boundary the reviewer was missing: a hairline in the card family plus
+   the card family's elevation, and a 1px outer ring so the edge still reads
+   where the paper field meets the warm app background. ONE treatment — it has
+   to work on all three slide fields (deep / paper / warm). The border is
+   INSIDE the 4:5 box (global box-sizing: border-box), so it costs the artwork
+   1px a side and never shifts the layout. */
+.pv-frame { grid-area: frame; position: relative; width: 100%; max-width: 560px; aspect-ratio: 4 / 5; margin: 0 auto; background: var(--paper); border: 1px solid var(--line); border-radius: 14px; overflow: hidden; box-shadow: 0 0 0 1px rgba(36,29,32,.07), var(--shadow-lift); touch-action: pan-y; }
+/* Layering inside the frame (all three fill the same padding box, so the two
+   render sources are pixel-identical boxes and swapping them cannot jump):
+     1  studio PNG   2  live compose   3  studio PNG when «pngtop»   5  pins
+   «pngtop» is set when the PNG is the visible layer — either because there is
+   no compose (no slides data / compose failed) or because the reviewer is
+   holding the compare button. On top, the PNG also shields the design
+   editor's overlay from clicks; hidden, it isn't hit-tested at all. */
+.pv-frame img.pv-slide { position: absolute; inset: 0; z-index: 1; width: 100%; height: 100%; object-fit: cover; display: block; visibility: hidden; user-select: none; -webkit-user-drag: none; }
+.pv-frame.pngtop img.pv-slide { visibility: visible; z-index: 3; }
 .pv-frame.noimg img.pv-slide { visibility: hidden; }
-.pv-frame .pv-noimg-note { position: absolute; inset: 0; display: none; align-items: center; justify-content: center; color: var(--ink-soft); font-size: .95rem; }
-.pv-frame.noimg .pv-noimg-note { display: flex; }
+.pv-frame .pv-noimg-note { position: absolute; inset: 0; z-index: 3; display: none; align-items: center; justify-content: center; color: var(--ink-soft); font-size: .95rem; }
+.pv-frame.noimg.pngtop .pv-noimg-note { display: flex; }
 
-.pv-compose { position: absolute; inset: 0; background: var(--paper); }
+.pv-compose { position: absolute; inset: 0; z-index: 2; background: var(--paper); }
 .pv-compose iframe { border: 0; }
 
 /* pin layer + dots */
-.pv-pinlayer { position: absolute; inset: 0; pointer-events: none; }
+.pv-pinlayer { position: absolute; inset: 0; z-index: 5; pointer-events: none; }
 .pv-frame.armed { cursor: crosshair; }
 .pv-frame.armed .pv-pinlayer { pointer-events: auto; cursor: crosshair; }
 .pin-dot { position: absolute; transform: translate(-50%, -50%); width: 26px; height: 26px; border-radius: 50%; background: var(--accent); color: #fff; border: 2px solid #fff; font-size: 13px; font-weight: 700; display: flex; align-items: center; justify-content: center; box-shadow: 0 2px 10px rgba(0,0,0,.35); cursor: pointer; pointer-events: auto; z-index: 4; }
@@ -59,21 +125,23 @@
 .pv-pop .row { display: flex; gap: 8px; align-items: center; margin-top: 8px; flex-wrap: wrap; }
 .pv-pop .fname { font-size: .78rem; color: var(--ink-soft); max-width: 110px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
 
-/* arrows: «next» moves LEFTWARD through slides */
-.pv-arrow { position: absolute; top: 50%; transform: translateY(-50%); z-index: 5; width: 40px; height: 40px; border-radius: 50%; border: 1px solid var(--line); background: color-mix(in srgb, var(--paper) 88%, transparent); color: var(--ink); font-size: 1.05rem; cursor: pointer; display: flex; align-items: center; justify-content: center; transition: opacity .15s ease, background .15s ease; }
-.pv-arrow:hover { background: var(--paper); }
-.pv-arrow[disabled] { opacity: .25; cursor: default; }
-.pv-arrow--next { left: 10px; }
-.pv-arrow--prev { right: 10px; }
+/* arrows: OUTSIDE the frame (v1.7) — gutters on wide, dot strip on narrow.
+   «next» moves LEFTWARD through slides, so in RTL «prev» is the first grid
+   column (= the right-hand gutter). */
+.pv-arrow { grid-area: prev; justify-self: center; width: 40px; height: 40px; border-radius: 50%; border: 1px solid var(--line); background: var(--paper); color: var(--ink); font-size: 1.05rem; line-height: 1; padding: 0; cursor: pointer; display: flex; align-items: center; justify-content: center; box-shadow: var(--shadow); transition: opacity .15s ease, background .15s ease, border-color .15s ease; }
+.pv-arrow:hover { border-color: rgba(36,29,32,.22); box-shadow: var(--shadow-lift); }
+.pv-arrow[disabled] { opacity: .28; cursor: default; box-shadow: none; }
+.pv-arrow--next { grid-area: next; }
+.pv-arrow--prev { grid-area: prev; }
 
 /* dots + counter */
-.pv-dots { display: flex; align-items: center; justify-content: center; gap: 6px; margin: 12px 0 4px; flex-wrap: wrap; }
+.pv-dots { grid-area: dots; display: flex; align-items: center; justify-content: center; gap: 6px; margin: 0; flex-wrap: wrap; }
 .pv-dot { width: 26px; height: 26px; border-radius: 50%; border: 1px solid var(--line); background: var(--paper); color: var(--ink-soft); font-size: .78rem; cursor: pointer; }
 .pv-dot.on { background: var(--ink); border-color: var(--ink); color: var(--bg); font-weight: 700; }
-.pv-count { text-align: center; color: var(--ink-soft); font-size: .85rem; margin-bottom: 14px; }
+.pv-count { text-align: center; color: var(--ink-soft); font-size: .85rem; margin: 8px 0 18px; }
 
 /* caption card */
-.pv-caption { max-width: 560px; margin: 0 auto; }
+.pv-caption { margin: 0; }
 .pv-caption .cap-head { display: flex; align-items: center; justify-content: space-between; gap: 10px; margin-bottom: 6px; }
 .pv-caption .cap-label { font-size: .85rem; font-weight: 700; color: var(--ink-soft); letter-spacing: .02em; }
 .pv-caption .cap-text { white-space: pre-wrap; line-height: 1.65; color: var(--ink); font-size: .95rem; }
@@ -158,6 +226,13 @@
 .st-chip--rejected { background: color-mix(in srgb, var(--no) 12%, var(--paper)); color: var(--no); border-color: transparent; }
 .st-chip--applied { background: color-mix(in srgb, var(--accent) 14%, var(--paper)); color: var(--accent); border-color: transparent; }
 
+/* design tab */
+.dz-cur { display: flex; align-items: center; gap: 10px; flex-wrap: wrap; }
+.dz-warn { border: 1px solid color-mix(in srgb, var(--maybe) 55%, transparent); background: color-mix(in srgb, var(--maybe) 12%, var(--paper)); border-radius: 10px; padding: 10px 12px; }
+.dz-raw { margin-top: 8px; }
+.dz-raw summary { cursor: pointer; font-size: .78rem; color: var(--ink-soft); }
+.dz-raw pre { direction: ltr; text-align: left; font-size: .72rem; line-height: 1.5; background: color-mix(in srgb, var(--ink) 5%, var(--paper)); border-radius: 8px; padding: 8px 10px; overflow-x: auto; white-space: pre-wrap; overflow-wrap: anywhere; }
+
 /* photos tab */
 .ph-drop { border: 2px dashed var(--line); border-radius: 14px; padding: 22px; text-align: center; color: var(--ink-soft); cursor: pointer; transition: border-color .15s ease, background .15s ease; }
 .ph-drop.over { border-color: var(--accent); background: color-mix(in srgb, var(--accent) 6%, var(--paper)); }
@@ -178,7 +253,7 @@
 .dt-row .v.ltr { direction: ltr; font-family: ui-monospace, monospace; font-size: .82rem; }
 .dt-stage { display: flex; align-items: center; gap: 10px; }
 .dt-publish { border: 1px solid var(--line); border-radius: 12px; padding: 14px; background: var(--paper); display: grid; gap: 10px; }
-.dt-nav { display: flex; gap: 10px; flex-wrap: wrap; }
+/* (.dt-nav retired in v1.7 — post-to-post navigation lives in .pv-nav, once) */
 
 .pv-error { max-width: 480px; margin: 80px auto; text-align: center; color: var(--ink-soft); display: grid; gap: 14px; justify-items: center; }
 </style>
@@ -189,50 +264,48 @@
   <div class="pv-head" id="pvHead" hidden>
     <h1 id="pvTitle"></h1>
     <div class="pv-tags" id="pvTags"></div>
+    <!-- post-to-post navigation (prev/next within this post's category) -->
+    <nav class="pv-nav" id="pvNav" aria-label="ניווט בין פוסטים"></nav>
   </div>
 
   <div class="pv-main" id="pvMain" hidden>
     <!-- viewer column: first in DOM = inline-start = RIGHT in RTL -->
     <section class="pv-viewer">
       <div class="pv-tools">
-        <button type="button" class="btn btn--ghost pv-pinbtn" id="pinBtn">📍 הוסף הערה על השקף</button>
-        <label class="pv-switch" id="liveWrap" hidden>
-          <span>תצוגה חיה</span>
-          <input type="checkbox" id="liveToggle">
-          <span class="knob"></span>
-        </label>
+        <div class="pv-tools__group">
+          <button type="button" class="btn btn--ghost pv-pinbtn" id="pinBtn">📍 הוסף הערה על השקף</button>
+          <button type="button" class="btn btn--ghost pv-designbtn" id="designBtn" aria-pressed="false">🎨 עיצוב</button>
+        </div>
+        <!-- action bar: undo/redo + save chip + duplicate + (when the design
+             editor is armed) the editor's own buttons, hosted here so nothing
+             action-like sits on the slide artwork itself -->
+        <div class="pv-tools__group pv-actionbar" id="actionBar"></div>
       </div>
 
-      <div class="pv-frame" id="frame">
-        <img class="pv-slide" id="slideImg" alt="">
-        <div class="pv-noimg-note">אין עדיין רינדור לשקף הזה</div>
-        <div class="pv-compose" id="composeHost" hidden></div>
-        <div class="pv-pinlayer" id="pinLayer"></div>
-        <button type="button" class="pv-arrow pv-arrow--next" id="nextBtn" aria-label="השקף הבא">❮</button>
+      <!-- stage: the frame plus its two gutter buttons and the dot strip.
+           The arrows are SIBLINGS of the frame, never children of it. -->
+      <div class="pv-stage">
         <button type="button" class="pv-arrow pv-arrow--prev" id="prevBtn" aria-label="השקף הקודם">❯</button>
-      </div>
 
-      <div class="pv-dots" id="dots"></div>
+        <div class="pv-frame" id="frame">
+          <img class="pv-slide" id="slideImg" alt="">
+          <div class="pv-noimg-note">אין עדיין רינדור לשקף הזה</div>
+          <div class="pv-compose" id="composeHost" hidden></div>
+          <div class="pv-pinlayer" id="pinLayer"></div>
+        </div>
+
+        <button type="button" class="pv-arrow pv-arrow--next" id="nextBtn" aria-label="השקף הבא">❮</button>
+
+        <div class="pv-dots" id="dots"></div>
+      </div>
       <div class="pv-count" id="slideCount"></div>
 
-      <div class="card pv-caption" id="captionCard">
-        <div class="cap-head">
-          <span class="cap-label">כיתוב לפוסט</span>
-          <button type="button" class="btn btn--ghost" id="capEditBtn">ערוך</button>
-        </div>
-        <div class="cap-text" id="capText"></div>
-        <div id="capEditor" hidden>
-          <textarea id="capTa" class="field__input"></textarea>
-          <div class="cap-actions">
-            <button type="button" class="btn btn--primary" id="capSave">שמור</button>
-            <button type="button" class="btn btn--ghost" id="capCancel">בטל</button>
-          </div>
-        </div>
-      </div>
     </section>
 
     <!-- panel column -->
     <aside class="pv-panel">
+      <!-- voting is not a tab: it is the first thing under the title -->
+      <div class="pv-votebox" id="voteBox"></div>
       <div class="pv-tabs" id="tabs"></div>
       <div class="pv-body" id="tabBody"></div>
     </aside>

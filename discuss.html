@@ -1,0 +1,128 @@
+<!doctype html>
+<html dir="rtl" lang="he">
+<head>
+<meta charset="utf-8">
+  <link rel="icon" href="data:image/svg+xml,<svg xmlns=%27http://www.w3.org/2000/svg%27 viewBox=%270 0 100 100%27><text y=%27.9em%27 font-size=%2790%27>💬</text></svg>">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<meta name="robots" content="noindex, nofollow">
+<title>שיחות — סקירת תוכן</title>
+<link rel="stylesheet" href="css/app.css">
+<style>
+  /* page-specific styles for discuss.html (owner: discussions hub) */
+  .page { max-width: 780px; margin: 0 auto; padding: 16px; }
+  .page > h1 { margin: 12px 0 2px; font-size: 1.5rem; color: var(--accent); }
+  .page > .sub { color: var(--ink-soft); font-size: .9rem; margin: 0 0 14px; }
+
+  .d-toolbar { display: flex; flex-direction: column; gap: 10px; margin: 0 0 18px; }
+  .d-row { display: flex; align-items: center; gap: 8px; flex-wrap: wrap; }
+  .d-row select {
+    min-height: 40px; padding: 6px 10px; border: 1px solid var(--line);
+    border-radius: 10px; background: var(--paper); color: var(--ink);
+    font-family: inherit; font-size: .92rem; max-width: 260px;
+  }
+  .d-count { color: var(--ink-soft); font-size: .88rem; }
+
+  .d-tab {
+    border: 0; background: none; cursor: pointer; font-family: inherit;
+    font-size: 1.02rem; font-weight: 700; color: var(--ink-soft);
+    padding: 6px 2px; margin-inline-end: 14px; border-bottom: 2px solid transparent;
+    display: inline-flex; align-items: center; gap: 6px;
+  }
+  .d-tab:hover { color: var(--ink); }
+  .d-tab--on { color: var(--accent); border-bottom-color: var(--accent); }
+  .d-tab__n {
+    font-size: .74rem; font-weight: 700; line-height: 1;
+    background: rgba(36,29,32,.08); color: var(--ink-soft);
+    border-radius: 999px; padding: 3px 7px;
+  }
+  .d-tab--on .d-tab__n { background: rgba(131,0,81,.12); color: var(--accent); }
+
+  .th-tally { display: inline-flex; gap: 8px; font-size: .82rem; font-weight: 700; }
+
+  .v-rows { margin-top: 6px; }
+  .v-row {
+    display: flex; align-items: baseline; gap: 10px; flex-wrap: wrap;
+    padding: 6px 0;
+  }
+  .v-row + .v-row { border-top: 1px dashed var(--line); }
+  .v-row .who { font-weight: 700; }
+  .v-row .v-vote { font-weight: 700; font-size: .92rem; }
+  .v-row time { color: var(--ink-soft); font-size: .8rem; }
+  .v-row .v-reason { flex-basis: 100%; color: var(--ink); font-size: .92rem; margin-top: -2px; }
+
+  .th-card {
+    background: var(--paper); border: 1px solid var(--line);
+    border-radius: var(--radius); box-shadow: var(--shadow);
+    padding: 14px 16px; margin-bottom: 14px;
+  }
+  .th-card.resolved { opacity: .72; }
+  .th-card.resolved .th-thumb img { filter: grayscale(.6); }
+
+  .th-top { display: flex; gap: 14px; align-items: flex-start; }
+  .th-thumb {
+    position: relative; flex: none; width: 76px; height: 95px; /* 1080×1350 */
+    border-radius: 8px; overflow: hidden; border: 1px solid var(--line);
+    background: var(--bg); display: block;
+  }
+  .th-thumb img { width: 100%; height: 100%; object-fit: cover; }
+  .th-dot {
+    position: absolute; width: 12px; height: 12px; margin: -6px; /* center on x/y */
+    border-radius: 50%; background: var(--accent);
+    box-shadow: 0 0 0 2px #fff, 0 1px 4px rgba(36,29,32,.4);
+    pointer-events: none;
+  }
+  .th-card.resolved .th-dot { background: var(--ink-soft); }
+
+  .th-main { flex: 1; min-width: 0; }
+  .th-postline {
+    display: flex; align-items: center; gap: 8px; flex-wrap: wrap;
+    margin-bottom: 4px; font-size: .88rem;
+  }
+  .th-postline .title { font-weight: 700; color: var(--ink); }
+  .th-postline .title:hover { color: var(--accent); text-decoration: none; }
+  .tag--new { background: var(--accent); color: #fff; }
+  .tag--resolved { background: rgba(46,125,79,.12); color: var(--yes); }
+
+  .th-head { display: flex; align-items: baseline; gap: 8px; flex-wrap: wrap; }
+  .th-head .who { font-weight: 700; }
+  .th-head time { color: var(--ink-soft); font-size: .82rem; }
+  .th-body { margin-top: 2px; white-space: pre-wrap; overflow-wrap: anywhere; }
+
+  .th-photos { display: flex; gap: 8px; flex-wrap: wrap; margin-top: 10px; }
+  .th-photos img {
+    width: 64px; height: 64px; object-fit: cover; border-radius: 8px;
+    border: 1px solid var(--line); cursor: pointer;
+  }
+
+  .th-replies { margin-top: 10px; border-inline-start: 2px solid var(--line); padding-inline-start: 12px; }
+  .th-reply { padding: 6px 0; }
+  .th-reply + .th-reply { border-top: 1px dashed var(--line); }
+  .th-reply .who { font-weight: 700; font-size: .9rem; }
+  .th-reply time { color: var(--ink-soft); font-size: .8rem; margin-inline-start: 6px; }
+  .th-reply .body { white-space: pre-wrap; overflow-wrap: anywhere; font-size: .95rem; }
+
+  .th-replybox { display: flex; gap: 8px; margin-top: 10px; }
+  .th-replybox input { flex: 1; }
+
+  .th-foot {
+    display: flex; align-items: center; gap: 6px; flex-wrap: wrap;
+    margin-top: 8px; padding-top: 8px; border-top: 1px solid var(--line);
+  }
+  .th-foot .spacer { margin-inline-start: auto; }
+
+  .empty { color: var(--ink-soft); font-size: .95rem; padding: 24px 8px; text-align: center; }
+  .empty b { color: var(--ink); }
+</style>
+</head>
+<body>
+<div id="nav"></div>
+<div class="page">
+  <h1>שיחות</h1>
+  <p class="sub">כל ההערות מכל הפוסטים במקום אחד — אפשר לענות, לסמן כטופל ולקפוץ לפוסט עצמו.</p>
+  <div id="toolbar" class="d-toolbar"></div>
+  <main id="feed"><p class="empty">טוען…</p></main>
+</div>
+<script src="config.js"></script>
+<script type="module" src="js/discuss.js"></script>
+</body>
+</html>

@@ -3,21 +3,25 @@
 // live preview ONLY through compose.js; shared UI through ui.js.
 
 import {
-  initStore, whoAmI, ensureName, assetUrl, slideUrl,
+  initStore, ensureName, assetUrl, slideUrl,
   listPosts, getPost,
   listVotes, latestVotes, castVote,
   listPins, addPin, deletePin, resolvePin,
   listReplies, addReply,
-  listEdits, proposeEdit, setEditStatus,
+  listEdits,
   setStage, setCaption,
   listPhotos, uploadPhoto, photoUrl,
   queuePublish, subscribe,
+  savePostSlides, logEdit,
+  saveTemplate,
+  saveVersion, listVersions,
 } from './store.js';
 import {
   el, modal, toast, fmtDate, voteGlyph,
   stageLabel, categoryLabel, STAGES, navBar,
 } from './ui.js';
-import { initCompose, mountSlide } from './compose.js';
+import { initCompose, mountSlide, manifest } from './compose.js';
+import { initEditor, canonicalJSON, designSummary, PHOTO_DRAG_MIME } from './editor.js';
 
 const $ = (id) => document.getElementById(id);
 
@@ -30,7 +34,7 @@ const CHANNEL_LABELS = { instagram: 'אינסטגרם', facebook: 'פייסבו�
 const S = {
   board: null,          // {board_key, name, local} from initStore
   me: null,             // {name, author_id}
-  post: null,
+  post: null,           // last row adopted from the backend (saved truth)
   posts: [],            // for prev/next (fetched once)
   cur: 0,               // current slide (0-based)
   pinMode: false,
@@ -41,13 +45,32 @@ const S = {
   repliesByPin: new Map(),
   edits: [],
   photos: [],
-  tab: 'vote',
+  tab: 'caption',
   voteSel: null,        // locally selected vote before שמור
-  editBase: new Map(),  // "i\tkey" -> baseline text (updated after send)
-  editVals: new Map(),  // "i\tkey" -> current textarea value
   editAccEl: null,      // cached accordion element (survives re-renders)
   pendingTabRender: false,
   popover: null,
+  // design tab (direct-manipulation editor over the live compose)
+  designCtrl: null,           // initEditor controller for the current slide
+  designCtrlIdx: -1,          // which slide the controller is armed on
+  designMountEl: null,        // persistent compose container for the editor
+  designEngineMissing: false, // compose handle doesn't expose update/doc yet
+  // v1.5 direct collaborative editing: every committed change lands in the
+  // working slides copy and PATCHes sm_posts.slides for everyone.
+  slides: [],           // deep working copy of S.post.slides (render source)
+  updatedAt: null,      // sm_posts.updated_at our saved state reflects (optimistic guard)
+  pending: new Map(),   // field ('slides.<i>.<key>') -> {old_text, new_text} since last save
+  saveInFlight: false,
+  saveQueued: false,
+  // v1.6 undo/redo: per-user, SESSION-LOCAL stacks of {slides, caption}
+  // snapshots. Undo reverts YOUR steps in this tab only; both stacks clear
+  // whenever another device's change is adopted (undoing across someone
+  // else's work is a trap, not a feature).
+  undoStack: [],
+  redoStack: [],
+  histBatchOpen: false, // an undo snapshot already covers the pending batch
+  histBatchField: null, // batching key: same-field commits fold into one step
+  applyingHistory: false, // restoring a snapshot — don't re-mark boundaries
 };
 
 const params = new URLSearchParams(location.search);
@@ -61,12 +84,27 @@ function pageUrl(page, extra = {}) {
 }
 
 function slideTotal() {
-  return S.post.slide_count || (S.post.slides || []).length || 1;
+  return S.post.slide_count || S.slides.length || 1;
 }
 function hasSlidesData() {
-  return Array.isArray(S.post.slides) && S.post.slides.length > 0;
+  return Array.isArray(S.slides) && S.slides.length > 0;
 }
-function edKey(i, key) { return i + '\t' + key; }
+
+function deepCopy(v) {
+  return v === undefined ? v : JSON.parse(JSON.stringify(v));
+}
+
+// adopt a fresh backend row as the saved truth + reset the working copy
+function adoptPost(post) {
+  S.post = post;
+  if (typeof S.post.slides === 'string') {
+    try { S.post.slides = JSON.parse(S.post.slides); } catch { S.post.slides = []; }
+  }
+  if (!Array.isArray(S.post.slides)) S.post.slides = [];
+  S.slides = deepCopy(S.post.slides);
+  S.updatedAt = S.post.updated_at || null;
+  loadVersionBase();   // background: what the gallery's version dropdown will list
+}
 
 // ---------------------------------------------------------------- boot
 
@@ -83,7 +121,7 @@ async function init() {
   const id = params.get('id');
   if (!id) return showError('חסר מזהה פוסט בכתובת.');
   try {
-    S.post = await getPost(id);
+    adoptPost(await getPost(id));
   } catch (e) {
     return showError('הפוסט לא נמצא. ' + (e && e.message ? e.message : ''));
   }
@@ -91,21 +129,27 @@ async function init() {
 
   document.title = (S.post.title || S.post.id) + ' · בדיקת פוסט';
 
+  // v1.5: no draft restore — every edit already lives in the post itself.
+
   $('pvHead').hidden = false;
   $('pvMain').hidden = false;
   renderHeader();
   wireViewer();
-  wireCaption();
+  wireFrameDrop();
+  wireDesignBtn();
+  wireSaveChip();
   buildTabs();
   renderViewer();
-  renderCaption();
+  renderVoteBox();
 
   await refreshAll();
-  showTab('vote');
+  showTab('caption');
 
+  // siblings for the header's prev/next — the header renders without them and
+  // fills them in when they land
   listPosts().then((rows) => {
     S.posts = Array.isArray(rows) ? rows : [];
-    if (S.tab === 'info') renderActiveTab();
+    renderPostNav();
   }).catch(() => {});
 
   subscribe(onRemoteChange);
@@ -144,16 +188,19 @@ async function refreshAll() {
     listPhotos(pid).catch(() => []),
   ]);
   if (post) {
-    const capOpen = !$('capEditor').hidden;
-    S.post = post;
+    const capEd = $('capEditor');
+    const capOpen = !!capEd && !capEd.hidden;
+    applyRemotePost(post);
     renderHeader();
     if (!capOpen) renderCaption();
   }
   S.votes = votes;
+  if (typeof renderVoteBox === 'function') setTimeout(renderVoteBox, 0);
   S.pins = pins.slice().sort((a, b) =>
     (a.slide - b.slide) || String(a.created_at || '').localeCompare(String(b.created_at || '')));
   S.edits = edits;
   S.photos = photos;
+  if (S.designCtrl) S.designCtrl.setPhotos(designPhotos());
 
   const reps = await Promise.all(S.pins.map((p) => listReplies(p.id).catch(() => [])));
   S.repliesByPin = new Map(S.pins.map((p, i) => [p.id, reps[i]]));
@@ -161,6 +208,57 @@ async function refreshAll() {
   renderPinLayer();
   renderTabBadges();
   renderActiveTab();
+}
+
+// v1.5: a subscribe() tick re-fetched the post row. If slides changed
+// remotely and the reviewer isn't mid-edit, adopt them and re-mount the
+// preview so the other device's edits appear live. If the reviewer has
+// unsaved local work, leave the working copy alone — the optimistic guard
+// on the next save re-fetches and merges.
+function applyRemotePost(post) {
+  let remoteSlides = post.slides;
+  if (typeof remoteSlides === 'string') {
+    try { remoteSlides = JSON.parse(remoteSlides); } catch { remoteSlides = []; }
+  }
+  if (!Array.isArray(remoteSlides)) remoteSlides = [];
+  const slidesChanged = canonicalJSON(remoteSlides) !== canonicalJSON(S.post.slides || []);
+
+  if (!slidesChanged) {
+    // metadata-only change (stage/caption/…): adopt wholesale, keep working copy
+    const remoteCaption = (post.caption ?? '') !== (S.post.caption ?? '');
+    post.slides = S.post.slides;
+    S.post = post;
+    if (!S.saveInFlight) S.updatedAt = post.updated_at || S.updatedAt;
+    // caption is part of undo snapshots — a caption from another device is a
+    // remote adoption too, so the session-local stacks go
+    if (remoteCaption) clearHistory();
+    return;
+  }
+  if (S.saveInFlight || S.pending.size || midGesture()) {
+    // remote slides changed while we're editing — adopt only non-slide fields;
+    // the conflict path merges slides on the next save
+    post.slides = S.post.slides;
+    post.updated_at = S.post.updated_at;
+    S.post = post;
+    return;
+  }
+  // clean adoption: the other device's edits become our render source.
+  // Undo/redo stacks clear — undoing across someone else's work is a trap.
+  clearHistory();
+  post.slides = remoteSlides;
+  adoptPost(post);
+  S.cur = Math.min(S.cur, slideTotal() - 1);
+  S.editAccEl = null;
+  destroyDesignEditor();
+  S.designMountEl = null;
+  renderViewer();
+}
+
+// focus guard: never yank slides out from under a reviewer mid-gesture/typing
+function midGesture() {
+  const ae = document.activeElement;
+  if (ae && /^(INPUT|TEXTAREA|SELECT|IFRAME)$/.test(ae.tagName)) return true;
+  return false;
 }
 
 // ---------------------------------------------------------------- header
@@ -173,22 +271,137 @@ function renderHeader() {
     S.post.version ? el('span', { class: 'tag', style: { direction: 'ltr' } }, S.post.version) : null,
     el('span', { class: 'tag' }, `${slideTotal()} שקפים`),
   );
+  renderPostNav();
+}
+
+// ------------------------------------------------ post-to-post navigation
+
+// The ONE ordering: alphabetical by id within the post's own category. (The
+// פרטים tab used to render a second copy of these links off the same rule;
+// v1.7 removed it so there is a single navigation.)
+function siblingPosts() {
+  const sibs = S.posts
+    .filter((p) => p.category === S.post.category)
+    .sort((a, b) => String(a.id).localeCompare(String(b.id)));
+  const idx = sibs.findIndex((p) => p.id === S.post.id);
+  return {
+    prev: idx > 0 ? sibs[idx - 1] : null,
+    next: idx >= 0 && idx < sibs.length - 1 ? sibs[idx + 1] : null,
+  };
+}
+
+// «→ הקודם» / «הבא ←»: in an RTL line the leading arrow lands on the RIGHT
+// (backwards) and the trailing one on the LEFT (forwards), which matches the
+// slide arrows and the carousel's own direction. Ends disable, never wrap.
+// Leaving the post: flush any debounced save first, so navigating away can
+// never lose the last couple of seconds of edits. Only intercept plain
+// left-clicks — modified clicks (new tab/window) must behave natively.
+function onPostNavClick(e) {
+  if (e.defaultPrevented) return;
+  if (e.button !== 0 || e.metaKey || e.ctrlKey || e.shiftKey || e.altKey) return;
+  const href = e.currentTarget && e.currentTarget.getAttribute('href');
+  if (!href) { e.preventDefault(); return; }   // disabled end-of-list button
+  if (!saveTimer && !S.saveInFlight && !S.sessionDirty) return;  // nothing to settle
+  e.preventDefault();
+  Promise.resolve(saveTimer || S.saveInFlight ? flushSave() : null)
+    .catch(() => {})
+    .then(() => stampVersion())
+    .catch(() => {})
+    .then(() => { location.href = href; });
+}
+
+
+// ---------------------------------------------------------------- versions
+// A version is a snapshot of the shared post, stamped when an editing session
+// ENDS (tab hidden / closed, or navigating to another post). Numbering
+// continues the studio's: studio v4 + as many board snapshots as exist.
+// The unique (board, post, vnum) constraint makes concurrent stamps safe —
+// store.saveVersion resolves a collision to the existing row instead of
+// throwing, so a second device stamping the same number is a no-op.
+async function loadVersionBase() {
+  try {
+    const rows = await listVersions(S.post.id);
+    S.versionRows = Array.isArray(rows) ? rows : [];
+  } catch { S.versionRows = []; }
+}
+
+function nextVnum() {
+  const studio = parseInt(String(S.post.version || 'v1').replace(/[^0-9]/g, ''), 10) || 1;
+  const highest = (S.versionRows || []).reduce((m, r) => Math.max(m, Number(r.vnum) || 0), 0);
+  return Math.max(studio, highest) + 1;
+}
+
+async function stampVersion() {
+  if (!S.sessionDirty || S.stamping) return;
+  S.stamping = true;
+  const vnum = nextVnum();
+  try {
+    const row = await saveVersion({
+      post_id: S.post.id, vnum,
+      slides: S.slides, caption: S.post.caption || '',
+    });
+    if (row) S.versionRows = [row, ...(S.versionRows || [])];
+    S.sessionDirty = false;      // one stamp per burst of edits
+  } catch { /* best effort: a lost snapshot must never block navigation */ }
+  finally { S.stamping = false; }
+}
+
+function renderPostNav() {
+  const slot = $('pvNav');
+  if (!slot) return;
+  const gallery = el('a', {
+    class: 'btn btn--ghost pv-navbtn', href: pageUrl('index.html'),
+  }, 'לגלריה');
+  gallery.addEventListener('click', onPostNavClick);
+
+  // before listPosts() resolves there are no siblings to reason about — show
+  // only the gallery link rather than two buttons that flicker enabled
+  if (!S.posts.length) { slot.replaceChildren(gallery); return; }
+
+  const { prev, next } = siblingPosts();
+  const link = (post, label, offTitle) => {
+    const a = el('a', {
+      class: 'btn btn--ghost pv-navbtn' + (post ? '' : ' is-off'),
+      href: post ? pageUrl('post.html', { id: post.id }) : null,
+      title: post ? (post.title || post.id) : offTitle,
+      'aria-disabled': post ? null : 'true',
+      tabindex: post ? null : '-1',
+    }, label);
+    if (post) a.addEventListener('click', onPostNavClick);
+    return a;
+  };
+
+  slot.replaceChildren(
+    link(prev, '→ הפוסט הקודם', 'זה הפוסט הראשון בקטגוריה'),
+    link(next, 'הפוסט הבא ←', 'זה הפוסט האחרון בקטגוריה'),
+    gallery,
+  );
 }
 
 // ---------------------------------------------------------------- viewer
+
+// The artwork's box, in viewport coords. Pin dots and the compose iframe both
+// live inside the frame's PADDING box (position:absolute; inset:0), i.e. inside
+// its 1px boundary — measuring #frame itself would be that 1px off in x and y.
+// #pinLayer is that padding box, so it is the one true reference for any
+// fraction-of-the-slide coordinate.
+function slideRect() {
+  return $('pinLayer').getBoundingClientRect();
+}
 
 function wireViewer() {
   $('nextBtn').addEventListener('click', () => goTo(S.cur + 1));
   $('prevBtn').addEventListener('click', () => goTo(S.cur - 1));
   $('pinBtn').addEventListener('click', () => setPinMode(!S.pinMode));
-  $('liveToggle').addEventListener('change', (e) => setLive(e.target.checked));
 
   const frame = $('frame');
 
-  // swipe/drag: leftward = next (RTL carousel)
+  // swipe/drag: leftward = next (RTL carousel).
+  // v1.7: the arrows are siblings of the frame now, so they can no longer
+  // deliver a pointerdown here at all — only the popover and pins need a guard.
   let down = null;
   frame.addEventListener('pointerdown', (e) => {
-    if (e.target.closest('.pv-pop') || e.target.closest('.pv-arrow') || e.target.closest('.pin-dot')) return;
+    if (e.target.closest('.pv-pop') || e.target.closest('.pin-dot')) return;
     down = { x: e.clientX, y: e.clientY };
   });
   frame.addEventListener('pointerup', (e) => {
@@ -202,7 +415,7 @@ function wireViewer() {
     }
     // a genuine click while armed → drop a pin
     if (S.pinMode && Math.abs(dx) < 8 && Math.abs(dy) < 8 && !e.target.closest('.pv-pop')) {
-      const rect = frame.getBoundingClientRect();
+      const rect = slideRect();
       const x = Math.min(1, Math.max(0, (e.clientX - rect.left) / rect.width));
       const y = Math.min(1, Math.max(0, (e.clientY - rect.top) / rect.height));
       openPinPopover(x, y);
@@ -210,10 +423,9 @@ function wireViewer() {
   });
   frame.addEventListener('pointercancel', () => { down = null; });
 
-  $('slideImg').addEventListener('error', () => {
-    frame.classList.add('noimg');
-    if (hasSlidesData() && !S.live && !S.composeFailed) setLive(true, { silent: true });
-  });
+  // a missing PNG is only user-visible when the PNG is the layer on top —
+  // otherwise the live compose is already covering it (v1.7)
+  $('slideImg').addEventListener('error', () => frame.classList.add('noimg'));
   $('slideImg').addEventListener('load', () => frame.classList.remove('noimg'));
 }
 
@@ -224,6 +436,7 @@ function goTo(i) {
   S.cur = next;
   closePopover();
   renderViewer();
+  if (designMode()) renderDesignState();  // «שמור כתבנית» visibility follows the slide
 }
 
 function renderViewer() {
@@ -243,36 +456,55 @@ function renderViewer() {
   }));
   $('slideCount').textContent = `שקף ${S.cur + 1} מתוך ${n}`;
 
-  $('liveWrap').hidden = !hasSlidesData();
+  // v1.7: live compose is not a mode the reviewer picks any more. Under v1.5
+  // every edit lands in the shared slides immediately, so for an edited post
+  // the studio PNG is stale by definition — the browser-composed render IS
+  // the post. The PNG survives only as (a) the fallback when there is no
+  // slides data or compose failed to load, and (b) the compare button.
+  S.live = hasSlidesData() && !S.composeFailed && S.composeReady;
   $('composeHost').hidden = !S.live;
-  img.style.visibility = S.live ? 'hidden' : '';
-  if (S.live) mountPreviewSoon(0);
+  if (S.live) {
+    if (designMode()) mountDesignSoon(0);
+    else mountPreviewSoon(0);
+  } else {
+    destroyDesignEditor();
+  }
 
+  applyCompare();
   renderPinLayer();
+
+  // lazy, once per page: bring compose up, then re-render into it
+  if (hasSlidesData() && !S.composeReady && !S.composeFailed) bootCompose();
 }
 
 // ------------------------------------------------ live preview (compose)
 
 let previewTimer = null;
 let previewSeq = 0;
+let composeBoot = null;
 
-async function setLive(on, opts = {}) {
-  const toggle = $('liveToggle');
-  if (on && !S.composeReady) {
+function bootCompose() {
+  if (composeBoot) return composeBoot;
+  composeBoot = (async () => {
     try {
       await initCompose(assetUrl);
       S.composeReady = true;
     } catch (e) {
       console.error('initCompose failed', e);
       S.composeFailed = true;
-      toggle.checked = false;
-      if (!opts.silent) toast('התצוגה החיה לא נטענה — מוצג הרינדור הרגיל', 'err');
-      return;
+      toast('התצוגה החיה לא נטענה — מוצג הרינדור מהסטודיו', 'err');
     }
-  }
-  S.live = on;
-  toggle.checked = on;
-  renderViewer();
+    renderViewer(); // now S.composeReady/S.composeFailed is settled — no recursion
+  })();
+  return composeBoot;
+}
+
+// ------------------------------------------------ which layer is on top
+// No mode, no control: the slide simply IS its live compose. The studio PNG
+// surfaces only when there is nothing to compose (no slides data) or when a
+// compose failed — a fallback, never a user-facing choice.
+function applyCompare() {
+  $('frame').classList.toggle('pngtop', !S.live);
 }
 
 function mountPreviewSoon(delay = 300) {
@@ -281,22 +513,25 @@ function mountPreviewSoon(delay = 300) {
 }
 
 async function mountPreview() {
-  if (!S.live) return;
-  const slide = (S.post.slides || [])[S.cur];
+  if (!S.live || designMode()) return;
+  destroyDesignEditor();
+  const slide = S.slides[S.cur];
   const host = $('composeHost');
   if (!slide) { host.replaceChildren(el('div', { class: 'pv-note', style: { padding: '20px' } }, 'אין נתוני מקור לשקף הזה')); return; }
-
-  const vars = { ...slide.vars };
-  for (const [k, v] of S.editVals) {
-    const [i, key] = k.split('\t');
-    if (Number(i) === S.cur) vars[key] = v;
-  }
 
   const seq = ++previewSeq;
   try {
     const tmp = el('div', { style: { position: 'absolute', inset: '0' } });
-    await mountSlide(tmp, { template: slide.template, vars });
+    // the working copy IS the shared truth (plus any not-yet-flushed local
+    // commits) — vars and design come straight from it
+    const composed = { template: slide.template, vars: { ...slide.vars } };
+    if (slide.design) composed.design = slide.design;
+    await mountSlide(tmp, composed);
     if (seq !== previewSeq) return; // a newer keystroke superseded this mount
+    // mode may have flipped during the await — a stale preview must never
+    // clobber the design editor's mount (it would silently detach the armed
+    // overlay without destroying the controller)
+    if (!S.live || designMode()) return;
     host.replaceChildren(tmp);
   } catch (e) {
     console.error('mountSlide failed', e);
@@ -304,6 +539,232 @@ async function mountPreview() {
     toast('שגיאה בתצוגה החיה — חוזרים לרינדור הרגיל', 'err');
     setLive(false);
   }
+}
+
+// ------------------------------------------------ design mode (editor.js)
+
+function designMode() {
+  return !!S.design && hasSlidesData();
+}
+
+function designPhotos() {
+  return S.photos.map((ph) => ({ url: photoUrl(ph), note: ph.note || '' }));
+}
+
+// ---- v1.5 commit primitives: every committed change lands in the working
+// copy, records its old→new pair (relative to the last-saved state), and
+// schedules the shared save. audit rows use '' for an absent design so
+// apply-edits' replay guard keeps working.
+
+function savedDesignCanon(i) {
+  const slide = (S.post.slides || [])[i];
+  return slide && slide.design ? canonicalJSON(slide.design) : '';
+}
+
+// old_text is captured once per save-cycle (the saved value); typing back to
+// the saved value cancels the pending entry.
+function notePending(field, old_text, new_text) {
+  const p = S.pending.get(field);
+  if (p) {
+    if (p.old_text === new_text) S.pending.delete(field);
+    else p.new_text = new_text;
+  } else if (old_text !== new_text) {
+    S.pending.set(field, { old_text, new_text });
+  }
+}
+
+function commitVar(i, key, value, opts = {}) {
+  const s = S.slides[i];
+  if (!s) return;
+  s.vars = s.vars || {};
+  const val = String(value);
+  if (String(s.vars[key] ?? '') === val && !S.pending.has(`slides.${i}.${key}`)) return;
+  markUndoBoundary(`slides.${i}.${key}`); // BEFORE the mutation — snapshot is pre-change
+  s.vars[key] = val;
+  const savedVars = ((S.post.slides || [])[i] || {}).vars || {};
+  notePending(`slides.${i}.${key}`, String(savedVars[key] ?? ''), val);
+  scheduleSave(opts.delay);
+}
+
+function commitDesign(i, design, opts = {}) {
+  const s = S.slides[i];
+  if (!s) return;
+  const field = `slides.${i}.design`;
+  const newCanon = design ? canonicalJSON(design) : '';
+  const curCanon = s.design ? canonicalJSON(s.design) : '';
+  if (newCanon === curCanon && !S.pending.has(field)) return;
+  // structural changes (slot fill, extra add/remove, hide) are their own undo
+  // step even inside an open design batch; drags/styling fold per save batch
+  markUndoBoundary(field, { always: designSig(design) !== designSig(s.design) });
+  if (design) s.design = design; else delete s.design;
+  notePending(field, savedDesignCanon(i), newCanon);
+  scheduleSave(opts.delay);
+}
+
+function destroyDesignEditor() {
+  if (S.designCtrl) { S.designCtrl.destroy(); S.designCtrl = null; }
+  S.designCtrlIdx = -1;
+  // the editor's action-bar buttons live in our bar (opts.actionBar) —
+  // destroy() removes its overlay but not the hosted row, so clear the slot
+  if (editorBarSlot) editorBarSlot.replaceChildren();
+}
+
+let designTimer = null;
+let designSeq = 0;
+function mountDesignSoon(delay = 0) {
+  clearTimeout(designTimer);
+  designTimer = setTimeout(() => { mountDesign().catch(() => {}); }, delay);
+}
+
+async function mountDesign() {
+  if (!S.live || !designMode()) return;
+  const i = S.cur;
+  const slide = S.slides[i];
+  const host = $('composeHost');
+  if (!slide) {
+    destroyDesignEditor();
+    host.replaceChildren(el('div', { class: 'pv-note', style: { padding: '20px' } }, 'אין נתוני מקור לשקף הזה'));
+    return;
+  }
+
+  // the working copy is the single render source — vars + design together
+  const composed = { template: slide.template, vars: { ...slide.vars } };
+  if (slide.design) composed.design = slide.design;
+
+  // persistent mount container — re-mounting into it reuses the iframe, so
+  // the armed editor survives var-level refreshes on the same slide
+  if (!S.designMountEl || !host.contains(S.designMountEl)) {
+    destroyDesignEditor();
+    S.designMountEl = el('div', { style: { position: 'absolute', inset: '0' } });
+    host.replaceChildren(S.designMountEl);
+  }
+
+  const seq = ++designSeq;
+  let handle;
+  try {
+    handle = await mountSlide(S.designMountEl, composed);
+  } catch (e) {
+    console.error('mountSlide (design) failed', e);
+    return;
+  }
+  if (seq !== designSeq || !designMode()) return;
+
+  // arm the editor (once per slide) — needs the {iframe, update, doc} handle
+  if (S.designCtrl && S.designCtrlIdx === i) { S.designCtrl.refresh(); return; }
+  destroyDesignEditor();
+  const wasMissing = S.designEngineMissing;
+  try {
+    S.designCtrl = initEditor(handle, composed, {
+      manifest: manifest(),
+      photos: designPhotos(),
+      assetUrl,
+      uploadFile: uploadFromEditor,
+      // v1.6: the editor's non-contextual buttons (הוסף איור / רקע / איפוס
+      // עיצוב…) render in the action bar ABOVE the slide, not on the artwork
+      actionBar: editorBarSlot,
+      // v1.5: a design mutation is a committed change — it writes into the
+      // working slides and saves (debounced ~2s) straight to everyone.
+      onChange: (design) => {
+        commitDesign(i, design, { delay: 2000 });
+        if (designMode()) renderDesignState();
+      },
+      // «איפוס עיצוב» dialog: clearing a design is itself a direct edit —
+      // it saves (and audit-logs) like any other change. Text stays: it is
+      // content, already committed to the shared post.
+      onReset: (scope) => {
+        // one undo step for the whole reset (deck resets touch many slides)
+        withOneUndoStep('reset', () => {
+          if (scope === 'deck') {
+            for (let j = 0; j < S.slides.length; j++) {
+              if (S.slides[j] && S.slides[j].design) commitDesign(j, null, { delay: 400 });
+            }
+          } else {
+            commitDesign(i, null, { delay: 400 });
+          }
+        });
+        destroyDesignEditor();
+        mountDesignSoon(0);
+        renderDesignState();
+        toast(scope === 'deck' ? 'עיצוב הקרוסלה אופס' : 'עיצוב השקף אופס');
+      },
+      // in-place text commit on the slide — same direct-write pathway as the
+      // עריכת טקסט side panel (they share the working slides copy)
+      onTextChange: (key, value) => {
+        commitVar(i, key, value, { delay: 800 });
+        S.editAccEl = null; // the side panel rebuilds in sync next render
+        if (designMode()) renderDesignState();
+      },
+    });
+    S.designCtrlIdx = i;
+    S.designEngineMissing = false;
+  } catch (e) {
+    S.designEngineMissing = true;
+    console.warn('initEditor unavailable:', e && e.message);
+  }
+  if (wasMissing !== S.designEngineMissing && designMode()) renderViewer();
+}
+
+// -------------------------------------------- drag & drop photos onto the slide
+
+// The editor's file-drop path delegates uploading here (editor.js stays
+// network-free); the fresh photo also lands in the photos tab via refreshAll.
+async function uploadFromEditor(file) {
+  const res = await uploadPhoto({ post_id: S.post.id, pin_id: null, file, note: 'נוסף מהעורך' });
+  refreshAll().catch(() => {});
+  return res; // {url, row}
+}
+
+function dtHasPhotoPayload(dt) {
+  if (!dt) return false;
+  const types = Array.from(dt.types || []);
+  return types.includes(PHOTO_DRAG_MIME) || types.includes('Files');
+}
+
+function waitForDesignCtrl(ms = 4000) {
+  return new Promise((resolve) => {
+    const t0 = Date.now();
+    (function poll() {
+      if (S.designCtrl && S.designCtrlIdx === S.cur) return resolve(S.designCtrl);
+      if (Date.now() - t0 > ms) return resolve(null);
+      setTimeout(poll, 120);
+    })();
+  });
+}
+
+// Fallback drop target: the whole slide frame. When the editor is armed its
+// own overlay handles drops (and stops propagation); this path catches drags
+// that arrive while another tab is open — e.g. a thumbnail dragged straight
+// from the תמונות tab — switches to עיצוב, waits for the editor, and places
+// the extra at the drop point.
+function wireFrameDrop() {
+  const frame = $('frame');
+  frame.addEventListener('dragover', (e) => {
+    if (!hasSlidesData() || !dtHasPhotoPayload(e.dataTransfer)) return;
+    e.preventDefault();
+    e.dataTransfer.dropEffect = 'copy';
+  });
+  frame.addEventListener('drop', (e) => {
+    if (!hasSlidesData() || !dtHasPhotoPayload(e.dataTransfer)) return;
+    e.preventDefault();
+    const rect = slideRect();
+    const xPct = (e.clientX - rect.left) / rect.width * 100;
+    const yPct = (e.clientY - rect.top) / rect.height * 100;
+    const url = e.dataTransfer.getData(PHOTO_DRAG_MIME) || '';
+    const files = [...(e.dataTransfer.files || [])];
+    handleSlideDrop({ url, files, xPct, yPct })
+      .catch((err) => toast('ההוספה לשקף נכשלה: ' + (err && err.message || err), 'err'));
+  });
+}
+
+async function handleSlideDrop({ url, files, xPct, yPct }) {
+  if (S.tab !== 'design') showTab('design');
+  const ctrl = await waitForDesignCtrl();
+  if (!ctrl) {
+    toast('עורך העיצוב לא נטען — נסו שוב מתוך לשונית «עיצוב»', 'err');
+    return;
+  }
+  if (url) { ctrl.addPhotoExtra(url, xPct, yPct); return; }
+  await ctrl.dropFiles(files, xPct, yPct); // upload + cascade + select, same path
 }
 
 // ---------------------------------------------------------------- pins on the image
@@ -409,40 +870,15 @@ function openPinPopover(x, y) {
 
 // ---------------------------------------------------------------- caption
 
-function wireCaption() {
-  $('capEditBtn').addEventListener('click', () => {
-    $('capTa').value = S.post.caption || '';
-    $('capText').hidden = true;
-    $('capEditor').hidden = false;
-    $('capEditBtn').hidden = true;
-    $('capTa').focus();
-  });
-  $('capCancel').addEventListener('click', closeCaptionEditor);
-  $('capSave').addEventListener('click', async () => {
-    const val = $('capTa').value;
-    $('capSave').disabled = true;
-    try {
-      await setCaption(S.post.id, val);
-      S.post.caption = val;
-      toast('הכיתוב נשמר', 'ok');
-      closeCaptionEditor();
-      renderCaption();
-    } catch (e) {
-      toast('הכיתוב לא נשמר: ' + e.message, 'err');
-    } finally {
-      $('capSave').disabled = false;
-    }
-  });
-}
-
 function closeCaptionEditor() {
-  $('capText').hidden = false;
-  $('capEditor').hidden = true;
-  $('capEditBtn').hidden = false;
+  const t = $('capText'), e = $('capEditor'), b = $('capEditBtn');
+  if (!t || !e || !b) return;   // caption tab not mounted — nothing to close
+  t.hidden = false; e.hidden = true; b.hidden = false;
 }
 
 function renderCaption() {
   const t = $('capText');
+  if (!t) return;               // caption lives in a tab now; may not be mounted
   if (S.post.caption) {
     t.classList.remove('pv-note');
     t.textContent = S.post.caption; // .cap-text preserves line breaks (pre-wrap)
@@ -452,10 +888,326 @@ function renderCaption() {
   }
 }
 
+// -------------------------------------------- shared save engine (v1.5)
+// Every committed change — in-place text, side-panel fields, design
+// mutations — PATCHes sm_posts.slides for EVERYONE (debounced), with one
+// sm_edits audit row (status 'applied') per changed field. The chip promises
+// «נשמר לכולם ✓» only after the PATCH actually lands, never on the debounce.
+
+let saveTimer = null;
+let saveChipEl = null;
+
+function setSaveChip(state) {
+  if (!saveChipEl) return;
+  saveChipEl.textContent =
+    state === 'saving' ? 'שומר…'
+    : state === 'saved' ? 'נשמר לכולם ✓'
+    : state === 'err' ? 'השמירה לענן נכשלה' : '';
+  saveChipEl.style.color = state === 'err' ? 'var(--no)' : 'var(--ink-soft)';
+}
+
+function scheduleSave(delay = 1500) {
+  clearTimeout(saveTimer);
+  setSaveChip('saving'); // pending, honestly — ✓ comes only from the PATCH
+  saveTimer = setTimeout(() => { flushSave(); }, delay);
+}
+
+// conflict path (PLAN v1.5): the post moved under us → re-fetch, re-apply the
+// local pending changes on top of the fresh slides, toast, save again.
+function rebaseOnto(fresh) {
+  let base = fresh.slides;
+  if (typeof base === 'string') { try { base = JSON.parse(base); } catch { base = []; } }
+  base = deepCopy(Array.isArray(base) ? base : []);
+  for (const [f, ch] of [...S.pending]) {
+    const m = /^slides\.(\d+)\.(.+)$/.exec(f);
+    if (!m) { S.pending.delete(f); continue; }
+    const s = base[+m[1]];
+    if (!s) { S.pending.delete(f); continue; } // slide vanished remotely
+    if (m[2] === 'design') {
+      ch.old_text = s.design ? canonicalJSON(s.design) : '';
+      if (ch.new_text) {
+        try { s.design = JSON.parse(ch.new_text); } catch { S.pending.delete(f); continue; }
+      } else {
+        delete s.design;
+      }
+    } else {
+      s.vars = s.vars || {};
+      ch.old_text = String(s.vars[m[2]] ?? '');
+      s.vars[m[2]] = ch.new_text;
+    }
+    if (ch.old_text === ch.new_text) S.pending.delete(f); // remote already has it
+  }
+  fresh.slides = base;
+  S.post = fresh;
+  S.slides = deepCopy(base);
+  S.updatedAt = fresh.updated_at || null;
+  // re-apply pending onto the working copy (deepCopy above took base WITH the
+  // re-applied values, so S.slides already carries them)
+  clearHistory(); // someone else's version is under us now — stacks are void
+}
+
+async function flushSave() {
+  clearTimeout(saveTimer);
+  saveTimer = null;
+  if (S.saveInFlight) { S.saveQueued = true; return; }
+  if (!S.pending.size) { setSaveChip(''); return; }
+  S.saveInFlight = true;
+  setSaveChip('saving');
+  try {
+    let batch = new Map(S.pending); // value objects shared — rebase updates them
+    let row = null;
+    try {
+      row = await savePostSlides(S.post.id, S.slides, { expected_updated_at: S.updatedAt });
+    } catch (e) {
+      if (!e || !e.conflict) throw e;
+      const fresh = await getPost(S.post.id);
+      rebaseOnto(fresh);
+      toast('עודכן על ידי מישהו נוסף — המשכנו מעל הגרסה החדשה');
+      remountAfterRemote();
+      batch = new Map(S.pending);
+      if (batch.size) {
+        row = await savePostSlides(S.post.id, S.slides, { expected_updated_at: S.updatedAt });
+      }
+    }
+    if (row) {
+      S.updatedAt = row.updated_at || S.updatedAt;
+      S.post.slides = deepCopy(S.slides);
+      S.post.updated_at = S.updatedAt;
+      S.sessionDirty = true;   // this session changed the post → stamp on exit
+    }
+    // audit log: one row per changed field, exact old→new
+    const logs = [];
+    for (const [f, ch] of batch) {
+      const cur = S.pending.get(f);
+      if (cur) {
+        if (cur.new_text === ch.new_text) S.pending.delete(f);
+        else cur.old_text = ch.new_text; // typed more mid-flight: next old = what we just saved
+      }
+      if (ch.old_text !== ch.new_text) {
+        logs.push(logEdit({ post_id: S.post.id, field: f, old_text: ch.old_text, new_text: ch.new_text }));
+      }
+    }
+    await Promise.allSettled(logs);
+    if (!S.pending.size) closeUndoBatch(); // the batch landed — next commit is a new undo step
+    setSaveChip(S.pending.size ? 'saving' : 'saved');
+    refreshEditMarks();
+    refreshAll().catch(() => {}); // history list + everything else catch up
+  } catch (e) {
+    console.warn('collab save failed', e);
+    setSaveChip('err');
+    setTimeout(() => {
+      if (S.pending.size && !saveTimer && !S.saveInFlight) scheduleSave(400);
+    }, 4000);
+  } finally {
+    S.saveInFlight = false;
+    if (S.saveQueued) { S.saveQueued = false; flushSave(); }
+  }
+}
+
+// after a rebase/remote adoption the mounted preview shows stale slides
+function remountAfterRemote() {
+  S.cur = Math.min(S.cur, slideTotal() - 1);
+  S.editAccEl = null;
+  destroyDesignEditor();
+  S.designMountEl = null;
+  renderViewer();
+  renderActiveTab();
+}
+
+// v1.6 action bar — one calm row ABOVE the slide: undo/redo + save chip +
+// «שכפל פוסט», plus a slot that hosts the design editor's own buttons
+// (initEditor's actionBar option) while design mode is armed. Nothing
+// action-like overlays the slide artwork from this page's side.
+let histUndoBtn = null;
+let histRedoBtn = null;
+let editorBarSlot = null;
+let tplSaveBtn = null;
+
+function wireSaveChip() {
+  const bar = $('actionBar');
+  saveChipEl = el('span', {
+    id: 'autosaveChip',
+    style: {
+      fontSize: '.78rem', color: 'var(--ink-soft)', minWidth: '64px',
+      textAlign: 'start', whiteSpace: 'nowrap',
+    },
+  });
+  editorBarSlot = el('span', {
+    id: 'editorBarSlot',
+    style: { display: 'inline-flex', alignItems: 'center' },
+  });
+  histUndoBtn = el('button', {
+    class: 'btn btn--ghost hist-btn', type: 'button', id: 'undoBtn',
+    title: 'ביטול', 'aria-label': 'ביטול', disabled: true,
+  }, '↩︎');
+  histRedoBtn = el('button', {
+    class: 'btn btn--ghost hist-btn', type: 'button', id: 'redoBtn',
+    title: 'ביצוע חוזר', 'aria-label': 'ביצוע חוזר', disabled: true,
+  }, '↪︎');
+  histUndoBtn.addEventListener('click', () => { undoStep(); });
+  histRedoBtn.addEventListener('click', () => { redoStep(); });
+  const dupBtn = el('a', {
+    class: 'btn btn--ghost', id: 'dupBtn', href: pageUrl('build.html', { from: S.post.id }),
+    title: 'פתיחת הפוסט בבונה הפוסטים כעותק לעריכה',
+  }, 'שכפל פוסט');
+  tplSaveBtn = el('button', {
+    class: 'btn btn--ghost', type: 'button', id: 'dzTplBtn', hidden: true,
+    title: 'שמירת השקף הנוכחי, על העיצוב שלו, כתבנית לשימוש חוזר',
+  }, 'שמור כתבנית');
+  tplSaveBtn.addEventListener('click', openSaveTemplateModal);
+  if (bar) bar.replaceChildren(editorBarSlot, histUndoBtn, histRedoBtn, saveChipEl, tplSaveBtn, dupBtn);
+  const flushNow = () => { if (saveTimer) flushSave(); };
+  window.addEventListener('pagehide', () => { flushNow(); stampVersion(); });
+  document.addEventListener('visibilitychange', () => {
+    if (document.visibilityState === 'hidden') { flushNow(); stampVersion(); }
+  });
+}
+
+// -------------------------------------------- undo/redo engine (v1.6)
+// Per-user, session-local stacks of {slides, caption} snapshots. A snapshot is
+// pushed at each commit boundary (BEFORE the mutation), same-field commits
+// fold into one step until the save batch lands, and undo/redo restore
+// through the SAME save pipeline — savePostSlides + exact old→new logEdit
+// rows — so an undo IS an edit in history and in the learning loop.
+
+const HIST_DEPTH = 60; // spec: ≥50; snapshots are a few KB of JSON each
+
+function histSnapshot() {
+  return { slides: deepCopy(S.slides), caption: S.post.caption ?? '' };
+}
+
+function renderHistButtons() {
+  if (histUndoBtn) histUndoBtn.disabled = histBusy || !S.undoStack.length;
+  if (histRedoBtn) histRedoBtn.disabled = histBusy || !S.redoStack.length;
+}
+
+function markUndoBoundary(field, opts = {}) {
+  if (S.applyingHistory) return;
+  if (!opts.always && S.histBatchOpen && S.histBatchField === field) return;
+  S.undoStack.push(histSnapshot());
+  if (S.undoStack.length > HIST_DEPTH) S.undoStack.shift();
+  S.redoStack.length = 0; // a fresh edit forks history — redo is gone
+  S.histBatchOpen = true;
+  S.histBatchField = field;
+  renderHistButtons();
+}
+
+function closeUndoBatch() {
+  S.histBatchOpen = false;
+  S.histBatchField = null;
+}
+
+function clearHistory() {
+  S.undoStack.length = 0;
+  S.redoStack.length = 0;
+  closeUndoBatch();
+  renderHistButtons();
+}
+
+// group several commits (deck reset) into ONE undo step; drops the step again
+// if the group turned out to be a no-op
+function withOneUndoStep(key, fn) {
+  markUndoBoundary(key, { always: true });
+  const prev = S.applyingHistory;
+  S.applyingHistory = true;
+  try { fn(); } finally { S.applyingHistory = prev; }
+  const top = S.undoStack[S.undoStack.length - 1];
+  if (top && canonicalJSON(top.slides) === canonicalJSON(S.slides) &&
+      (top.caption ?? '') === (S.post.caption ?? '')) {
+    S.undoStack.pop();
+    closeUndoBatch();
+    renderHistButtons();
+  }
+}
+
+// design structure (filled slots, extras count, hidden set): a structural
+// change is its own step even inside an open design batch — the drag that
+// follows a slot fill must not fold into it
+function designSig(d) {
+  if (!d) return '';
+  return Object.keys(d.slots || {}).sort().join(',') + '|' +
+    (Array.isArray(d.extras) ? d.extras.length : 0) + '|' +
+    (Array.isArray(d.hidden) ? [...d.hidden].sort().join(',') : '');
+}
+
+// working copy vs saved truth → exact old→new pending rows, the same shape
+// flushSave already turns into one savePostSlides PATCH + logEdit rows
+function rebuildPendingFromDiff() {
+  S.pending.clear();
+  const saved = Array.isArray(S.post.slides) ? S.post.slides : [];
+  const n = Math.max(S.slides.length, saved.length);
+  for (let i = 0; i < n; i++) {
+    const cur = S.slides[i] || {};
+    const was = saved[i] || {};
+    const keys = new Set([...Object.keys(cur.vars || {}), ...Object.keys(was.vars || {})]);
+    for (const k of keys) {
+      const a = String((was.vars || {})[k] ?? '');
+      const b = String((cur.vars || {})[k] ?? '');
+      if (a !== b) S.pending.set(`slides.${i}.${k}`, { old_text: a, new_text: b });
+    }
+    const da = was.design ? canonicalJSON(was.design) : '';
+    const db = cur.design ? canonicalJSON(cur.design) : '';
+    if (da !== db) S.pending.set(`slides.${i}.design`, { old_text: da, new_text: db });
+  }
+}
+
+let histBusy = false;
+
+function undoStep() { return stepHistory(S.undoStack, S.redoStack); }
+function redoStep() { return stepHistory(S.redoStack, S.undoStack); }
+
+async function stepHistory(from, to) {
+  if (histBusy || !from.length) return;
+  histBusy = true;
+  renderHistButtons();
+  try {
+    // let the pending/in-flight batch land first — its own snapshot is
+    // already on the stack, and the diff below needs a settled saved truth
+    if (saveTimer) await flushSave();
+    for (let i = 0; i < 100 && S.saveInFlight; i++) {
+      await new Promise((r) => setTimeout(r, 100));
+    }
+    if (!from.length) return; // a conflict rebase cleared the stacks meanwhile
+    const snap = from.pop();
+    to.push(histSnapshot());
+    if (to.length > HIST_DEPTH) to.shift();
+    S.applyingHistory = true;
+    try {
+      // caption first: its own direct write + audit row (setCaption logs it)
+      if ((snap.caption ?? '') !== (S.post.caption ?? '')) {
+        const row = await setCaption(S.post.id, snap.caption ?? '');
+        S.post.caption = snap.caption ?? '';
+        if (row && row.updated_at) {
+          S.post.updated_at = row.updated_at;
+          if (!S.saveInFlight) S.updatedAt = row.updated_at;
+        }
+        renderVoteBox();
+      }
+      // slides: restore the snapshot and push it through the shared pipeline
+      S.slides = deepCopy(snap.slides);
+      rebuildPendingFromDiff();
+      closeUndoBatch();
+      if (S.pending.size) scheduleSave(250);
+      else if (!S.saveInFlight) setSaveChip('');
+      remountAfterRemote(); // same full re-render an adoption uses
+    } finally {
+      S.applyingHistory = false;
+    }
+  } catch (e) {
+    console.warn('undo/redo failed', e);
+    toast('הפעולה לא הצליחה: ' + (e && e.message ? e.message : e), 'err');
+  } finally {
+    histBusy = false;
+    renderHistButtons();
+  }
+}
+
 // ---------------------------------------------------------------- tabs
 
+// v1.8: voting is not a tab (it sits above these, always visible) and design
+// is not a tab either (it is a mode armed from the viewer's control row).
 const TABS = [
-  { key: 'vote', label: 'הצבעה' },
+  { key: 'caption', label: 'כיתוב' },
   { key: 'pins', label: 'הערות' },
   { key: 'edit', label: 'עריכת טקסט' },
   { key: 'photos', label: 'תמונות' },
@@ -474,6 +1226,31 @@ function showTab(key) {
   S.tab = key;
   for (const t of TABS) $('tab-' + t.key).classList.toggle('on', t.key === key);
   renderActiveTab(true);
+}
+
+// ---- design mode: armed from the viewer's control row, not from a tab ----
+function setDesign(on) {
+  const want = !!on && hasSlidesData();
+  if (S.design === want) return;
+  S.design = want;
+  const b = $('designBtn');
+  if (b) {
+    b.classList.toggle('on', want);
+    b.setAttribute('aria-pressed', want ? 'true' : 'false');
+  }
+  if (!want) {
+    destroyDesignEditor();
+    S.designMountEl = null;
+  }
+  renderViewer();
+  renderDesignState();  // «שמור כתבנית» only shows while design is armed
+}
+
+function wireDesignBtn() {
+  const b = $('designBtn');
+  if (!b) return;
+  b.hidden = !hasSlidesData();
+  b.addEventListener('click', () => setDesign(!S.design));
 }
 
 function renderTabBadges() {
@@ -503,7 +1280,8 @@ function renderActiveTab(force = false) {
     return;
   }
   S.pendingTabRender = false;
-  const render = { vote: renderVoteTab, pins: renderPinsTab, edit: renderEditTab, photos: renderPhotosTab, info: renderInfoTab }[S.tab];
+  const render = { caption: renderCaptionTab, pins: renderPinsTab, edit: renderEditTab, photos: renderPhotosTab, info: renderInfoTab }[S.tab]
+    || renderCaptionTab;   // unknown/stale tab key must never throw mid-refresh
   body.replaceChildren(...[render() || []].flat(Infinity).filter(Boolean));
 }
 
@@ -513,38 +1291,65 @@ function postVoteMap() {
   return latestVotes(S.votes).get(S.post.id) || new Map();
 }
 
-function renderVoteTab() {
-  const mine = postVoteMap().get(S.me.name) || null;
-  if (S.voteSel === null) S.voteSel = mine ? mine.vote : null;
+// v1.8 — voting is not a tab: it sits under the title, always visible.
+// Flow the operator asked for: pick כן/לא/אולי → the «why» box appears →
+// «שלח הצבעה» only becomes clickable once a reason is written.
+function renderVoteBox() {
+  const box = $('voteBox');
+  if (!box) return;
+  const byAuthor = postVoteMap();
+  const mine = byAuthor.get(S.me.name) || null;
+  if (S.voteSel === undefined || S.voteSel === null) S.voteSel = mine ? mine.vote : null;
+  if (S.voteReason === undefined) S.voteReason = mine ? (mine.reason || '') : '';
 
   const btns = ['yes', 'no', 'maybe'].map((v) => {
     const b = el('button', {
-      class: `vote-btn vote-btn--${v}` + (S.voteSel === v ? ' on' : ''),
+      class: `vb-btn ${v}` + (S.voteSel === v ? ' on' : ''),
       type: 'button', 'aria-pressed': S.voteSel === v ? 'true' : 'false',
     }, el('span', { class: 'g' }, voteGlyph(v)), VOTE_LABELS[v]);
-    b.addEventListener('click', () => { S.voteSel = v; renderActiveTab(true); });
+    b.addEventListener('click', () => { S.voteSel = v; renderVoteBox(); setTimeout(() => { const t = box.querySelector('textarea'); if (t) t.focus(); }, 0); });
     return b;
   });
 
-  const reason = el('textarea', { class: 'field__input vote-reason', placeholder: 'למה? כמה מילים…' });
-  reason.value = mine ? (mine.reason || '') : '';
+  const kids = [el('div', { class: 'vb-row' }, btns)];
 
-  const save = el('button', { class: 'btn btn--primary', type: 'button' }, 'שמור');
-  save.addEventListener('click', async () => {
-    if (!S.voteSel) { toast('קודם בוחרים: כן, לא או אולי'); return; }
-    save.disabled = true;
-    try {
-      await castVote({ post_id: S.post.id, vote: S.voteSel, reason: reason.value.trim() });
-      toast('ההצבעה נשמרה', 'ok');
-      await refreshAll();
-    } catch (e) {
-      toast('ההצבעה לא נשמרה: ' + e.message, 'err');
-    } finally {
-      save.disabled = false;
-    }
-  });
+  if (S.voteSel) {
+    const reason = el('textarea', {
+      class: 'field__input', placeholder: 'למה? כמה מילים — זה החלק שעוזר לצוות',
+    });
+    reason.value = S.voteReason || '';
+    const submit = el('button', { class: 'btn btn--primary', type: 'button', disabled: true }, 'שלח הצבעה');
+    const hint = el('span', { class: 'vb-hint' }, 'כדי לשלוח, כתבו למה');
+    const sync = () => {
+      S.voteReason = reason.value;
+      const ok = reason.value.trim().length > 0;
+      submit.disabled = !ok;
+      hint.textContent = ok
+        ? (mine ? 'הצבעה חדשה מחליפה את הקודמת שלכם' : '')
+        : 'כדי לשלוח, כתבו למה';
+    };
+    reason.addEventListener('input', sync);
+    submit.addEventListener('click', async () => {
+      const why = reason.value.trim();
+      if (!why) return;
+      submit.disabled = true;
+      try {
+        await castVote({ post_id: S.post.id, vote: S.voteSel, reason: why });
+        toast('ההצבעה נשמרה', 'ok');
+        await refreshAll();
+      } catch (e) {
+        toast('ההצבעה לא נשמרה: ' + e.message, 'err');
+        submit.disabled = false;
+      }
+    });
+    kids.push(el('div', { class: 'vb-why' }, reason));
+    kids.push(el('div', { class: 'vb-actions' }, submit, hint));
+    sync();
+  } else {
+    kids.push(el('div', { class: 'vb-hint', style: { marginTop: '10px' } },
+      'בוחרים כן, לא או אולי — ואז מסבירים למה.'));
+  }
 
-  const byAuthor = postVoteMap();
   const tallies = { yes: 0, no: 0, maybe: 0 };
   const voters = [];
   for (const [author, v] of byAuthor) {
@@ -552,28 +1357,23 @@ function renderVoteTab() {
     voters.push({ author, ...v });
   }
   voters.sort((a, b) => String(b.created_at || '').localeCompare(String(a.created_at || '')));
-
-  return [
-    el('div', { class: 'vote-row' }, btns),
-    el('div', { class: 'field' }, reason),
-    el('div', { style: { display: 'flex', alignItems: 'center', gap: '12px', flexWrap: 'wrap' } },
-      save,
-      el('span', { class: 'pv-note' }, 'הצבעה חדשה מחליפה את ההצבעה הקודמת שלך.'),
-    ),
-    el('div', { class: 'vote-tally' },
-      el('span', null, voteGlyph('yes'), ' ', el('b', null, String(tallies.yes))),
-      el('span', null, voteGlyph('no'), ' ', el('b', null, String(tallies.no))),
-      el('span', null, voteGlyph('maybe'), ' ', el('b', null, String(tallies.maybe))),
-      el('span', { class: 'pv-note', style: { marginInlineStart: 'auto' } },
-        byAuthor.size ? `${byAuthor.size} הצביעו` : 'עוד אין הצבעות'),
-    ),
-    voters.map((v) => el('div', { class: 'voter' },
-      el('span', { class: 'who' }, v.author),
-      el('span', { class: 'v-' + v.vote }, voteGlyph(v.vote) + ' ' + (VOTE_LABELS[v.vote] || v.vote)),
-      el('time', null, fmtDate(v.created_at)),
-      v.reason ? el('span', { class: 'why' }, v.reason) : null,
-    )),
-  ];
+  kids.push(el('div', { class: 'vb-tally' },
+    el('span', null, voteGlyph('yes'), ' ', el('b', null, String(tallies.yes))),
+    el('span', null, voteGlyph('no'), ' ', el('b', null, String(tallies.no))),
+    el('span', null, voteGlyph('maybe'), ' ', el('b', null, String(tallies.maybe))),
+    el('span', { class: 'vb-hint', style: { marginInlineStart: 'auto' } },
+      byAuthor.size ? `${byAuthor.size} הצביעו` : 'עוד אין הצבעות'),
+  ));
+  if (voters.length) {
+    kids.push(el('div', { class: 'vb-mine' },
+      voters.map((v) => el('div', { class: 'voter' },
+        el('span', { class: 'who' }, v.author),
+        el('span', { class: 'v-' + v.vote }, voteGlyph(v.vote) + ' ' + (VOTE_LABELS[v.vote] || v.vote)),
+        el('time', null, fmtDate(v.created_at)),
+        v.reason ? el('span', { class: 'why' }, v.reason) : null,
+      ))));
+  }
+  box.replaceChildren(...kids);
 }
 
 // ---------------------------------------------------------------- tab: pins
@@ -695,35 +1495,35 @@ function editableVars(vars) {
 
 function buildEditAccordion() {
   const acc = el('div', { class: 'ed-acc' });
-  (S.post.slides || []).forEach((slide, i) => {
+  S.slides.forEach((slide, i) => {
     const fields = editableVars(slide.vars);
     if (!fields.length) return;
     const modCount = el('span', { class: 'tag mod-count', style: { display: 'none' } }, '');
     const fieldEls = fields.map(([key, val]) => {
-      const k = edKey(i, key);
-      if (!S.editBase.has(k)) S.editBase.set(k, val);
-      const ta = el('textarea', { class: 'field__input', rows: String(Math.min(10, Math.max(2, Math.ceil(val.length / 42)))) });
-      ta.value = S.editVals.has(k) ? S.editVals.get(k) : S.editBase.get(k);
+      const ta = el('textarea', { class: 'field__input', rows: String(Math.min(10, Math.max(2, Math.ceil(String(val).length / 42)))) });
+      ta.value = String(val);
       const wrap = el('div', { class: 'ed-field' },
         el('label', null, el('span', { class: 'mod-dot' }), el('span', { class: 'key' }, key)),
         ta,
       );
+      wrap.dataset.slide = String(i);
+      wrap.dataset.key = key;
       const sync = () => {
-        const changed = ta.value !== S.editBase.get(k);
-        if (changed) S.editVals.set(k, ta.value); else S.editVals.delete(k);
-        wrap.classList.toggle('modified', changed);
+        const savedVars = ((S.post.slides || [])[i] || {}).vars || {};
+        // «modified» now means: committed locally, PATCH not landed yet
+        wrap.classList.toggle('modified', ta.value !== String(savedVars[key] ?? ''));
         updateEditCounts(acc);
         ta.style.height = 'auto';
         ta.style.height = ta.scrollHeight + 2 + 'px';
       };
       ta.addEventListener('input', () => {
+        commitVar(i, key, ta.value); // direct write, debounced save to everyone
         sync();
         if (S.live) {
           if (S.cur !== i) goTo(i); // preview follows the field being edited
           mountPreviewSoon(300);    // the wow moment: types → preview updates
         }
       });
-      wrap.dataset.slide = String(i);
       sync();
       return wrap;
     });
@@ -740,18 +1540,26 @@ function buildEditAccordion() {
 }
 
 function updateEditCounts(acc) {
-  let total = 0;
   acc.querySelectorAll('details').forEach((d) => {
     const n = d.querySelectorAll('.ed-field.modified').length;
-    total += n;
     const tag = d.querySelector('.mod-count');
-    if (tag) { tag.style.display = n ? '' : 'none'; tag.textContent = n ? `${n} שינויים` : ''; }
+    if (tag) { tag.style.display = n ? '' : 'none'; tag.textContent = n ? `${n} נשמרים…` : ''; }
   });
-  const send = document.getElementById('edSendBtn');
-  if (send) {
-    send.disabled = !total;
-    send.textContent = total ? `שלח הצעות עריכה (${total})` : 'שלח הצעות עריכה';
-  }
+}
+
+// after a save lands (or a remote adoption), clear stale «modified» marks
+// without rebuilding the accordion (the reviewer may still be typing)
+function refreshEditMarks() {
+  if (!S.editAccEl) return;
+  S.editAccEl.querySelectorAll('.ed-field').forEach((wrap) => {
+    const i = Number(wrap.dataset.slide);
+    const key = wrap.dataset.key;
+    const ta = wrap.querySelector('textarea');
+    if (!ta || !key) return;
+    const savedVars = ((S.post.slides || [])[i] || {}).vars || {};
+    wrap.classList.toggle('modified', ta.value !== String(savedVars[key] ?? ''));
+  });
+  updateEditCounts(S.editAccEl);
 }
 
 function renderEditTab() {
@@ -760,46 +1568,15 @@ function renderEditTab() {
   }
   if (!S.editAccEl) S.editAccEl = buildEditAccordion();
 
-  const send = el('button', { class: 'btn btn--primary', type: 'button', id: 'edSendBtn' }, 'שלח הצעות עריכה');
-  send.addEventListener('click', sendEditProposals);
-
   const out = [
     el('div', { class: 'pv-note' },
-      'עורכים את הטקסט של כל שקף; עם «תצוגה חיה» דולקת רואים כל שינוי על השקף תוך כדי הקלדה. השינויים נשלחים כהצעות — שום דבר לא משתנה בפוסט עד שהמפעל מיישם.'),
+      'עורכים את הטקסט של כל שקף ורואים כל שינוי על השקף תוך כדי הקלדה. ' +
+      'כל שינוי נשמר אוטומטית לכל הצוות — אין צורך לשלוח.'),
     S.editAccEl,
-    el('div', { class: 'ed-send' }, send,
-      el('span', { class: 'pv-note' }, hasSlidesData() && !S.live ? 'טיפ: מדליקים «תצוגה חיה» ורואים את העריכה על השקף.' : ''),
-    ),
-    renderEditProposals(),
+    renderEditHistory(),
   ];
   requestAnimationFrame(() => updateEditCounts(S.editAccEl));
   return out;
-}
-
-async function sendEditProposals() {
-  const changes = [];
-  for (const [k, val] of S.editVals) {
-    const [i, key] = k.split('\t');
-    changes.push({ i: Number(i), key, old_text: S.editBase.get(k), new_text: val, k });
-  }
-  if (!changes.length) return;
-  const btn = document.getElementById('edSendBtn');
-  if (btn) btn.disabled = true;
-  let sent = 0;
-  try {
-    for (const c of changes) {
-      await proposeEdit({ post_id: S.post.id, field: `slides.${c.i}.${c.key}`, old_text: c.old_text, new_text: c.new_text });
-      sent++;
-      S.editBase.set(c.k, c.new_text); // the sent text is the new baseline
-      S.editVals.delete(c.k);
-    }
-    toast('ההצעות נשלחו למפעל התוכן', 'ok');
-  } catch (e) {
-    toast(sent ? `נשלחו ${sent} הצעות, אחת נכשלה: ${e.message}` : 'ההצעות לא נשלחו: ' + e.message, 'err');
-  }
-  S.editAccEl = null; // rebuild with fresh baselines + markers
-  await refreshAll();
-  if (S.tab === 'edit') renderActiveTab(true);
 }
 
 function fieldLabel(field) {
@@ -810,45 +1587,180 @@ function fieldLabel(field) {
   return field || '';
 }
 
-function renderEditProposals() {
-  const edits = S.edits.slice().sort((a, b) => String(b.created_at || '').localeCompare(String(a.created_at || '')));
+function isDesignEdit(ed) {
+  return /^slides\.\d+\.design$/.test(ed.field || '');
+}
+
+// v1.5: the proposal/triage list is gone — edits apply immediately, and this
+// is the read-only audit trail: «היסטוריית עריכות», newest first, everything
+// (text, caption, design), author + field + exact old→new. No buttons.
+function renderEditHistory() {
+  const edits = [...S.edits]
+    .sort((a, b) => String(b.created_at || '').localeCompare(String(a.created_at || '')));
   if (!edits.length) return el('div', { class: 'ed-props' });
   return el('div', { class: 'ed-props' },
-    el('h4', null, `הצעות עריכה (${edits.length})`),
+    el('h4', null, `היסטוריית עריכות (${edits.length})`),
     edits.map((ed) => {
-      const chips = el('span', { class: 'chips' });
-      const chip = el('span', { class: 'st-chip st-chip--' + ed.status }, EDIT_STATUS_LABELS[ed.status] || ed.status);
-      chips.appendChild(chip);
-      if (ed.status === 'proposed') {
-        const acc = el('button', { class: 'btn btn--ghost', type: 'button' }, 'לקבל');
-        const rej = el('button', { class: 'btn btn--ghost', type: 'button' }, 'לדחות');
-        acc.addEventListener('click', () => decideEdit(ed.id, 'accepted'));
-        rej.addEventListener('click', () => decideEdit(ed.id, 'rejected'));
-        chips.append(acc, rej);
-      }
+      const design = isDesignEdit(ed);
       const m = /^slides\.(\d+)\./.exec(ed.field || '');
       const nameEl = el('span', { class: 'field-name', title: m ? 'מעבר לשקף' : '' }, fieldLabel(ed.field));
       if (m) { nameEl.style.cursor = 'pointer'; nameEl.addEventListener('click', () => goTo(Number(m[1]))); }
+      // legacy rows from the proposal era keep an honest status chip
+      const legacy = ed.status && ed.status !== 'applied'
+        ? el('span', { class: 'st-chip st-chip--' + ed.status }, EDIT_STATUS_LABELS[ed.status] || ed.status)
+        : null;
       return el('div', { class: 'ed-prop' },
         el('div', { class: 'head' },
           nameEl,
           el('span', null, ed.author || 'אלמוני'),
           el('time', null, fmtDate(ed.created_at)),
-          chips,
+          legacy,
         ),
-        el('span', { class: 'diff-old' }, ed.old_text || '—'),
-        el('span', { class: 'diff-new' }, ed.new_text || '—'),
+        el('span', { class: 'diff-old' }, design ? designSummary(ed.old_text) : (ed.old_text || '—')),
+        el('span', { class: 'diff-new' }, design ? designSummary(ed.new_text) : (ed.new_text || '—')),
+        design ? el('details', { class: 'dz-raw' },
+          el('summary', null, 'JSON מלא'),
+          el('pre', null, ed.new_text || '(איפוס)'),
+        ) : null,
       );
     }),
   );
 }
 
-async function decideEdit(id, status) {
-  try {
-    await setEditStatus(id, status);
-    toast(status === 'accepted' ? 'ההצעה התקבלה' : 'ההצעה נדחתה', 'ok');
-    await refreshAll();
-  } catch (e) { toast('לא הצליח: ' + e.message, 'err'); }
+// ---------------------------------------------------------------- tab: design
+
+// The slide's current design — straight from the shared working copy.
+function currentWorkingDesign(i) {
+  const slide = S.slides[i];
+  return (slide && slide.design) || null;
+}
+
+function designNonEmpty(d) {
+  return !!d && typeof d === 'object' && !!(
+    Object.keys(d.blocks || {}).length ||
+    (Array.isArray(d.extras) && d.extras.length) ||
+    d.bg ||
+    (d.slots && Object.keys(d.slots).length) ||
+    (Array.isArray(d.hidden) && d.hidden.length));
+}
+
+// v1.5: no send state — the design tab saves continuously. This only keeps
+// the «שמור כתבנית» button in sync with the current slide's design.
+function renderDesignState() {
+  const tplBtn = document.getElementById('dzTplBtn');
+  if (tplBtn) tplBtn.hidden = !(designMode() && designNonEmpty(currentWorkingDesign(S.cur)));
+}
+
+function renderCaptionTab() {
+  const capText = el('div', { class: 'cap-text', id: 'capText' });
+  const capTa = el('textarea', { class: 'field__input', id: 'capTa' });
+  const capSaveBtn = el('button', { class: 'btn btn--primary', type: 'button', id: 'capSave' }, 'שמור');
+  const capCancelBtn = el('button', { class: 'btn btn--ghost', type: 'button', id: 'capCancel' }, 'בטל');
+  const capEditor = el('div', { id: 'capEditor', hidden: true },
+    capTa, el('div', { class: 'cap-actions' }, capSaveBtn, capCancelBtn));
+  const capEditBtn = el('button', { class: 'btn btn--ghost', type: 'button', id: 'capEditBtn' }, 'ערוך');
+
+  capEditBtn.addEventListener('click', () => {
+    capTa.value = S.post.caption || '';
+    capText.hidden = true;
+    capEditor.hidden = false;
+    capEditBtn.hidden = true;
+    capTa.focus();
+  });
+  capCancelBtn.addEventListener('click', () => closeCaptionEditor());
+  capSaveBtn.addEventListener('click', async () => {
+    const val = capTa.value;
+    capSaveBtn.disabled = true;
+    const marked = val !== (S.post.caption || '');
+    if (marked) markUndoBoundary('caption', { always: true });
+    try {
+      const row = await setCaption(S.post.id, val); // direct write + audit row
+      S.post.caption = val;
+      if (row && row.updated_at) {
+        S.post.updated_at = row.updated_at;
+        if (!S.saveInFlight) S.updatedAt = row.updated_at;
+      }
+      S.sessionDirty = true;
+      toast('הכיתוב נשמר לכולם', 'ok');
+      closeCaptionEditor();
+      renderVoteBox();
+    } catch (e) {
+      if (marked) { S.undoStack.pop(); closeUndoBatch(); renderHistButtons(); }
+      toast('הכיתוב לא נשמר: ' + e.message, 'err');
+    } finally {
+      capSaveBtn.disabled = false;
+    }
+  });
+
+  const card = el('div', { class: 'pv-caption', id: 'captionCard' },
+    el('div', { class: 'cap-head' },
+      el('span', { class: 'cap-label' }, 'הכיתוב שיפורסם עם הפוסט'),
+      capEditBtn),
+    capText, capEditor);
+  requestAnimationFrame(renderCaption);
+  return [card];
+}
+
+// «שמור כתבנית» — capture the slide's base template + current working design
+// + its vars (with any uncommitted in-place text) as a derived template the
+// builder's picker lists under «תבניות שלכם».
+function openSaveTemplateModal() {
+  const i = S.cur;
+  const slide = S.slides[i];
+  const design = currentWorkingDesign(i); // the now-current shared design
+  if (!slide || !designNonEmpty(design)) {
+    toast('אין עיצוב לשמירה בשקף הזה — קודם מעצבים אותו', 'err');
+    return;
+  }
+  // sample vars = the working slide's vars (they already carry every edit)
+  const vars = { ...(slide.vars || {}) };
+
+  const input = el('input', {
+    class: 'field__input', type: 'text', maxlength: '80',
+    value: (S.post.title || S.post.id) + ' — שקף ' + (i + 1),
+  });
+  const persist = async (name) => {
+    try {
+      await saveTemplate({
+        name,
+        base_template: slide.template,
+        design,
+        sample_vars: vars,
+        source_post: S.post.id,
+      });
+      const t = toast('התבנית נשמרה — ', 'ok');
+      t.style.pointerEvents = 'auto';
+      t.appendChild(el('a', {
+        href: pageUrl('build.html'),
+        style: { color: '#fff', textDecoration: 'underline' },
+      }, 'לבונה הפוסטים ←'));
+    } catch (e) {
+      toast('התבנית לא נשמרה: ' + e.message, 'err');
+    }
+  };
+  const submit = (close) => {
+    const name = input.value.trim();
+    if (!name) { input.focus(); return false; }
+    persist(name);
+    if (close) close();
+    return true;
+  };
+  const m = modal('שמירת השקף כתבנית',
+    el('div', { class: 'field' },
+      el('label', { class: 'field__label' },
+        'איך נקרא לתבנית? היא תופיע בבונה הפוסטים תחת «תבניות שלכם»'),
+      input,
+    ),
+    { actions: [
+      { label: 'ביטול' },
+      { label: 'שמירה', primary: true, onClick: () => submit() },
+    ] },
+  );
+  // the design editor's floating toolbar is fixed at z-index 1200–1300 —
+  // this modal opens while a block may still be selected, so lift it above
+  m.root.style.zIndex = '1400';
+  input.addEventListener('keydown', (e) => { if (e.key === 'Enter') submit(m.close); });
+  setTimeout(() => input.select(), 60);
 }
 
 // ---------------------------------------------------------------- tab: photos
@@ -896,8 +1808,14 @@ function renderPhotosTab() {
   }
 
   const cards = S.photos.map((ph) => {
-    const img = el('img', { src: photoUrl(ph), alt: ph.note || 'תמונה', loading: 'lazy' });
+    const img = el('img', { src: photoUrl(ph), alt: ph.note || 'תמונה', loading: 'lazy', draggable: 'true' });
     img.addEventListener('click', () => openPhotoModal(ph));
+    // draggable onto the slide: carries the public URL; dropping on the frame
+    // switches to עיצוב and places a photo extra at the drop point
+    img.addEventListener('dragstart', (e) => {
+      e.dataTransfer.setData(PHOTO_DRAG_MIME, photoUrl(ph));
+      e.dataTransfer.effectAllowed = 'copy';
+    });
     const pin = ph.pin_id ? S.pins.find((p) => p.id === ph.pin_id) : null;
     const pinRef = pin
       ? el('span', { class: 'pin-ref', title: 'מעבר להערה' }, `📍 מוצמדת להערה ${pinNumber(pin)} בשקף ${Number(pin.slide) + 1}`)
@@ -985,24 +1903,12 @@ function renderInfoTab() {
     );
   }
 
-  // prev/next: alphabetical within this post's category
-  const sibs = S.posts
-    .filter((p) => p.category === S.post.category)
-    .sort((a, b) => String(a.id).localeCompare(String(b.id)));
-  const idx = sibs.findIndex((p) => p.id === S.post.id);
-  const prev = idx > 0 ? sibs[idx - 1] : null;
-  const next = idx >= 0 && idx < sibs.length - 1 ? sibs[idx + 1] : null;
-  const navRow = el('div', { class: 'dt-nav' },
-    prev ? el('a', { class: 'btn btn--ghost', href: pageUrl('post.html', { id: prev.id }), title: prev.title || prev.id }, '→ הקודם') : null,
-    next ? el('a', { class: 'btn btn--ghost', href: pageUrl('post.html', { id: next.id }), title: next.title || next.id }, 'הבא ←') : null,
-    el('a', { class: 'btn btn--ghost', href: pageUrl('index.html') }, 'חזרה לגלריה'),
-  );
-
+  // «שכפל פוסט» moved to the action bar above the slide (v1.6); prev/next +
+  // «לגלריה» moved to the header's .pv-nav (v1.7) — no duplicate navigation here.
   return [
     el('div', { class: 'dt-stage' }, el('span', { class: 'pv-note' }, 'שלב:'), stageSel),
     el('div', { class: 'dt-rows' }, rows),
     publishBlock,
-    navRow,
   ];
 }
 
@@ -1010,7 +1916,13 @@ function renderInfoTab() {
 
 function onKeydown(e) {
   const t = e.target;
-  if (t && /^(INPUT|TEXTAREA|SELECT)$/.test(t.tagName)) return;
+  // native text undo owns inputs/textareas/contentEditable until commit
+  if (t && (/^(INPUT|TEXTAREA|SELECT)$/.test(t.tagName) || t.isContentEditable)) return;
+  if ((e.metaKey || e.ctrlKey) && (e.key === 'z' || e.key === 'Z')) {
+    e.preventDefault();
+    if (e.shiftKey) redoStep(); else undoStep();
+    return;
+  }
   if (e.key === 'ArrowLeft') { e.preventDefault(); goTo(S.cur + 1); }       // leftward = forward (RTL)
   else if (e.key === 'ArrowRight') { e.preventDefault(); goTo(S.cur - 1); }
   else if (e.key === 'Escape') {
