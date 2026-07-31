@@ -1,0 +1,79 @@
+<!doctype html>
+<html dir="rtl" lang="he">
+<head>
+<meta charset="utf-8">
+  <link rel="icon" href="data:image/svg+xml,<svg xmlns=%27http://www.w3.org/2000/svg%27 viewBox=%270 0 100 100%27><text y=%27.9em%27 font-size=%2790%27>🗳️</text></svg>">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>תור הפרסום — סקירת תוכן</title>
+<link rel="stylesheet" href="css/app.css">
+<style>
+  /* page-specific styles for queue.html (owner: pipeline) */
+  .page { max-width: 960px; margin: 0 auto; padding: 16px; }
+  .page > h1 { margin: 12px 0 4px; font-size: 1.5rem; color: var(--accent); }
+
+  section.block { margin-block: 20px; }
+  section.block > h2 { font-size: 1.05rem; margin: 0 0 8px; }
+  .block__hint { color: var(--ink-soft); font-size: .85rem; margin: 0 0 10px; }
+
+  .prow, .qrow {
+    display: flex; align-items: center; gap: 12px;
+    background: var(--paper); border: 1px solid var(--line); border-radius: 10px;
+    padding: 8px 12px; margin-bottom: 8px;
+  }
+  .thumb {
+    width: 48px; height: 60px; object-fit: cover; border-radius: 6px;
+    border: 1px solid var(--line); background: var(--bg); flex: none;
+  }
+  .thumb--empty { display: flex; align-items: center; justify-content: center;
+    color: var(--ink-soft); font-size: .8rem; }
+  .prow__main, .qrow__main { flex: 1; min-width: 0; }
+  .prow__title, .qrow__title { font-weight: 600; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+  .prow__meta, .qrow__meta {
+    display: flex; align-items: center; gap: 10px; flex-wrap: wrap;
+    color: var(--ink-soft); font-size: .82rem; margin-top: 3px;
+  }
+  .qrow__note { font-size: .85rem; margin-top: 4px; color: var(--ink); }
+  .qrow__result {
+    font-family: ui-monospace, monospace; direction: ltr; text-align: left;
+    font-size: .75rem; color: var(--ink-soft); margin-top: 4px;
+    overflow-wrap: anywhere; background: var(--bg); border-radius: 6px; padding: 4px 8px;
+  }
+  .tally { display: inline-flex; gap: 8px; }
+  .tally__i--yes { color: var(--yes); } .tally__i--no { color: var(--no); }
+  .tally__i--maybe { color: var(--maybe); }
+
+  .chans { display: inline-flex; gap: 4px; }
+  .chan {
+    display: inline-block; font-size: .68rem; font-weight: 700; letter-spacing: .5px;
+    border-radius: 5px; padding: 2px 6px; color: #fff; direction: ltr;
+  }
+  .chan--ig { background: linear-gradient(45deg, #b3406e, #83355f); }
+  .chan--fb { background: #3b5aa0; }
+
+  .qgroup__head {
+    display: flex; align-items: center; gap: 8px;
+    font-weight: 600; font-size: .95rem; margin: 16px 0 8px;
+  }
+  .qgroup__count { color: var(--ink-soft); font-weight: 400; font-size: .85rem; }
+  .dot { width: 9px; height: 9px; border-radius: 50%; flex: none; }
+  .dot--queued { background: var(--maybe); } .dot--published { background: var(--yes); }
+  .dot--failed { background: var(--no); } .dot--canceled { background: var(--ink-soft); }
+
+  .card--info { margin-top: 28px; padding: 14px 16px; font-size: .9rem; line-height: 1.7; }
+  .card--info h2 { font-size: 1rem; margin: 0 0 6px; }
+  .card--info code { direction: ltr; unicode-bidi: embed; background: var(--bg);
+    border-radius: 4px; padding: 1px 5px; font-size: .82em; }
+  .empty { color: var(--ink-soft); font-size: .9rem; padding: 8px 2px; }
+  .qform .field { margin-bottom: 10px; }
+</style>
+</head>
+<body>
+<div id="nav"></div>
+<div class="page">
+  <h1>תור הפרסום</h1>
+  <main id="app"><p class="empty">טוען…</p></main>
+</div>
+<script src="config.js"></script>
+<script type="module" src="js/queue.js"></script>
+</body>
+</html>
