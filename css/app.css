@@ -190,6 +190,16 @@ img { max-width: 100%; display: block; }
   font-weight: 600;
   white-space: nowrap;
 }
+/* v2.1 — a post scheduled for review carries its due date on the board card.
+   Past due reads as a warning, not as another grey tag. */
+.tag--review {
+  background: color-mix(in srgb, var(--maybe) 16%, transparent);
+  color: color-mix(in srgb, var(--maybe) 72%, var(--ink));
+}
+.tag--review.is-late {
+  background: color-mix(in srgb, var(--no) 13%, transparent);
+  color: color-mix(in srgb, var(--no) 68%, var(--ink));
+}
 
 /* ---------------------------------------------------------------- cards */
 

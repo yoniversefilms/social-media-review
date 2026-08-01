@@ -853,6 +853,16 @@ export async function setStage(post_id, stage) {
   return need().updatePost(post_id, { stage, updated_by: me.name });
 }
 
+// v2.1 «תזמון לבדיקה» — when the team is due to look at this post.
+// review_at null clears the date; note is kept separate so clearing the date
+// never silently drops what the date was for. Returns the fresh post row.
+export async function setReviewAt(post_id, review_at, note) {
+  const me = await ensureName();
+  const fields = { review_at: review_at || null, updated_by: me.name };
+  if (note !== undefined) fields.review_note = note || '';
+  return need().updatePost(post_id, fields);
+}
+
 // Shared manual arrangement (gallery «סידור ידני»): batch-write sm_posts.sort
 // for the rows whose position changed. entries: [{id, sort}] — the caller
 // diffs and passes ONLY changed rows. Both drivers route through updatePost.
@@ -943,6 +953,48 @@ export async function queuePublish({ post_id, channel, note, scheduled_for }) {
   };
   if (scheduled_for) row.scheduled_for = scheduled_for;
   return need().insert(isLocal ? 'publish' : 'sm_publish', row);
+}
+
+// v2.1 «תזמון לפרסום» — move an existing queue row's time / note in place, so
+// re-scheduling doesn't litter the queue with duplicate rows. The CHANNEL is
+// deliberately not updatable (schema grant): switching channel is a cancel +
+// re-queue, which the caller does explicitly.
+export async function rescheduleQueue(id, { scheduled_for, note } = {}) {
+  const me = await ensureName();
+  const d = need();
+  const fields = { scheduled_for: scheduled_for || null, updated_by: me.name };
+  if (note !== undefined) fields.note = note || '';
+  if (isLocal) return d.patch('publish', id, fields);
+  return d.update('sm_publish', `board_key=eq.${enc(boardKey)}&id=eq.${enc(id)}`, fields);
+}
+
+// v2.1 cloud publishing — calls the `publish` Edge Function (the only backend
+// that holds the Meta token; the browser must never see it).
+//   mode 'plan' → dry run, returns the exact Graph API calls, posts nothing.
+//   mode 'now'  → publish this row immediately, ignoring a future schedule.
+// The operator key is a SECOND secret on top of the board key: the reviewer
+// link is a capability URL handed to therapists, and holding it must never be
+// enough to post to the client's real Instagram. It lives only in the
+// operator's own browser and is verified inside the function.
+export async function callPublisher({ mode = 'plan', row_id = null, operator_key = '' } = {}) {
+  if (isLocal) {
+    throw new Error('הפרסום בענן לא זמין במצב מקומי — הרצה מקומית: node scripts/publish-meta.mjs');
+  }
+  const base = String(cfg().supabaseUrl || '').replace(/\/$/, '');
+  if (!base) throw new Error('חסר supabaseUrl ב-config.js');
+  const res = await fetch(base + '/functions/v1/publish', {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json', 'x-operator-key': operator_key || '' },
+    body: JSON.stringify(row_id ? { mode, row_id } : { mode }),
+  });
+  const body = await res.json().catch(() => null);
+  if (!res.ok) {
+    const msg = (body && (body.error || body.message)) || `HTTP ${res.status}`;
+    const err = new Error(msg);
+    err.status = res.status;
+    throw err;
+  }
+  return body;
 }
 
 export async function setQueueStatus(id, status) {

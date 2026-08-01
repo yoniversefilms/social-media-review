@@ -6,7 +6,9 @@
 //   el(tag, attrs, ...children)      DOM builder
 //   modal(title, bodyEl, {actions, dismissable}) -> {close, root}
 //   toast(msg, kind)                 kind: '' | 'ok' | 'err'
-//   fmtDate(iso)                     Hebrew relative time
+//   fmtDate(iso)                     Hebrew relative time (PAST only)
+//   fmtWhen(iso, {relative})         absolute date+time for SCHEDULED moments
+//   toLocalInput(iso) / fromLocalInput(v)   <input type=datetime-local> bridge
 //   voteGlyph(v)                     'yes' | 'no' | 'maybe' -> glyph
 //   stageLabel(s) / categoryLabel(c)
 //   STAGES / CATEGORIES              ordered [{key, label}] arrays
@@ -143,6 +145,58 @@ export function fmtDate(iso) {
   return d.toLocaleDateString('he-IL', opts);
 }
 
+// ---------------------------------------------------------------- fmtWhen
+// fmtDate() is a PAST-tense relative formatter ("לפני שעתיים") and clamps at
+// zero, so a future timestamp renders as «ממש עכשיו» — wrong for anything
+// scheduled. fmtWhen() is the scheduling formatter: an absolute date + time
+// (the thing a reviewer actually needs), with a short relative tail in both
+// directions. Times are shown in the reader's own timezone.
+export function fmtWhen(iso, { relative = true } = {}) {
+  if (!iso) return '';
+  const d = new Date(iso);
+  if (isNaN(d.getTime())) return '';
+  const opts = { day: 'numeric', month: 'short', hour: '2-digit', minute: '2-digit' };
+  if (d.getFullYear() !== new Date().getFullYear()) opts.year = 'numeric';
+  const abs = d.toLocaleString('he-IL', opts);
+  if (!relative) return abs;
+  const rel = relWhen(d);
+  return rel ? `${abs} · ${rel}` : abs;
+}
+
+function relWhen(d) {
+  const diffMin = Math.round((d.getTime() - Date.now()) / 60000);
+  const ahead = diffMin >= 0;
+  const m = Math.abs(diffMin);
+  let unit;
+  if (m < 1) return 'עכשיו';
+  else if (m < 60) unit = m === 1 ? 'דקה' : `${m} דקות`;
+  else if (m < 60 * 24) {
+    const h = Math.round(m / 60);
+    unit = h === 1 ? 'שעה' : h === 2 ? 'שעתיים' : `${h} שעות`;
+  } else {
+    const days = Math.round(m / (60 * 24));
+    unit = days === 1 ? 'יום' : days === 2 ? 'יומיים' : `${days} ימים`;
+  }
+  return ahead ? `בעוד ${unit}` : `לפני ${unit}`;
+}
+
+// A <input type="datetime-local"> wants local wall-clock, never an ISO Z
+// string — feeding it .toISOString() silently shifts the value by the UTC
+// offset. These two convert in both directions, once, for every caller.
+export function toLocalInput(iso) {
+  if (!iso) return '';
+  const d = new Date(iso);
+  if (isNaN(d.getTime())) return '';
+  const p = (n) => String(n).padStart(2, '0');
+  return `${d.getFullYear()}-${p(d.getMonth() + 1)}-${p(d.getDate())}T${p(d.getHours())}:${p(d.getMinutes())}`;
+}
+
+export function fromLocalInput(value) {
+  if (!value) return null;
+  const d = new Date(value);          // parsed as LOCAL time — what the field means
+  return isNaN(d.getTime()) ? null : d.toISOString();
+}
+
 // ---------------------------------------------------------------- vote glyphs
 
 const VOTE_GLYPHS = { yes: '👍', no: '👎', maybe: '🤔' };
@@ -168,6 +222,7 @@ export const CATEGORIES = [
   { key: 'rel',     label: 'רילוקיישן' },
   { key: 'fam',     label: 'משפחה' },
   { key: 'ind',     label: 'טיפול פרטני' },
+  { key: 'ser',     label: 'סדרות' },
   { key: 'orig',    label: 'ליבה' },
   { key: 'builder', label: 'נבנה בכלי' },
 ];

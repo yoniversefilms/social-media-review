@@ -8,7 +8,7 @@ import {
 } from './store.js';
 import { initCompose, mountSlide } from './compose.js';
 import {
-  el as h, navBar, toast, voteGlyph, fmtDate,
+  el as h, navBar, toast, voteGlyph, fmtDate, fmtWhen,
   STAGES, CATEGORIES, STAGE_LABELS, CATEGORY_LABELS,
 } from './ui.js';
 
@@ -662,6 +662,15 @@ function card(p) {
     edited ? versionBadge(p) : (version ? h('span', { class: 'tag' }, version) : null),
     p.origin === 'builder' && p.category !== 'builder'
       ? h('span', { class: 'tag' }, 'נבנה בכלי') : null,
+    // v2.1: a review date set from the post's «תזמון» button surfaces on the
+    // board too — a due date nobody sees is a due date nobody meets. Overdue
+    // reads differently. (The PUBLISH side of scheduling has its own page.)
+    p.review_at
+      ? h('span', {
+          class: 'tag tag--review' + (Date.parse(p.review_at) < Date.now() ? ' is-late' : ''),
+          title: p.review_note || 'מתוזמן לבדיקה',
+        }, `👀 ${fmtWhen(p.review_at, { relative: false })}`)
+      : null,
   ];
 
   const menuBtn = h('button', {
