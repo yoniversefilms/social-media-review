@@ -15,6 +15,39 @@
 .pv-head h1 { font-size: 1.35rem; margin: 0; color: var(--ink); font-weight: 700; }
 .pv-head .pv-tags { display: flex; gap: 8px; align-items: center; flex-wrap: wrap; }
 
+/* scheduling (v2.1) — «🗓️ תזמון» sits in the header beside the tags, always
+   visible. The chips beside it state the current schedule and are themselves
+   the shortcut back into the modal (clicking a schedule is how you change it).
+   The פרטים tab keeps only a read-only summary + the same button. */
+.pv-sched { display: flex; align-items: center; gap: 8px; flex-wrap: wrap; }
+.pv-schedbtn { min-height: 36px; padding: 5px 14px; font-size: .88rem; white-space: nowrap; }
+.sched-chip {
+  display: inline-flex; align-items: center; gap: 6px; cursor: pointer;
+  border: 1px solid var(--line); background: var(--paper); color: var(--ink);
+  border-radius: 999px; padding: 5px 11px; font-size: .8rem; font-weight: 600;
+  white-space: nowrap; transition: border-color .12s ease, box-shadow .12s ease;
+}
+.sched-chip:hover { border-color: var(--accent); box-shadow: var(--shadow); }
+.sched-chip--pub { background: color-mix(in srgb, var(--accent) 10%, var(--paper)); border-color: color-mix(in srgb, var(--accent) 35%, var(--line)); }
+.sched-chip--rev { background: color-mix(in srgb, var(--maybe) 14%, var(--paper)); border-color: color-mix(in srgb, var(--maybe) 45%, var(--line)); }
+/* a review date that has passed reads as overdue, not as a plain chip */
+.sched-chip--rev.is-late { background: color-mix(in srgb, var(--no) 12%, var(--paper)); border-color: color-mix(in srgb, var(--no) 45%, var(--line)); color: color-mix(in srgb, var(--no) 65%, var(--ink)); }
+
+/* the modal's two modes */
+.sched-form .field { margin-bottom: 12px; display: block; }
+.sched-modes { display: flex; gap: 6px; margin-bottom: 14px; }
+.sched-mode {
+  flex: 1; min-height: 42px; border-radius: 10px; cursor: pointer;
+  border: 1px solid var(--line); background: var(--bg); color: var(--ink-soft);
+  font-size: .92rem; font-weight: 700;
+}
+.sched-mode.on { border-color: var(--accent); background: color-mix(in srgb, var(--accent) 12%, var(--paper)); color: var(--accent); }
+.sched-sub { font-size: .76rem; color: var(--ink-soft); margin-top: 4px; }
+.sched-check { display: flex; align-items: center; gap: 8px; font-size: .88rem; margin-top: 4px; cursor: pointer; }
+.sched-hint { font-size: .82rem; color: var(--ink-soft); line-height: 1.55; border-top: 1px solid var(--line); padding-top: 10px; margin-top: 4px; }
+.sched-warn { margin-top: 6px; color: color-mix(in srgb, var(--maybe) 70%, var(--ink)); }
+.sched-err { margin-top: 8px; font-size: .85rem; color: var(--no); }
+
 /* post-to-post navigation (v1.7) — the ONE place it lives; the פרטים tab used
    to carry a duplicate row of the same links and no longer does. */
 .pv-nav { display: flex; align-items: center; gap: 6px; flex-wrap: wrap; margin-inline-start: auto; }
@@ -32,11 +65,12 @@
 
 .pv-tools { display: flex; align-items: center; justify-content: space-between; gap: 10px; margin-bottom: 14px; flex-wrap: wrap; }
 .pv-tools__group { display: flex; align-items: center; gap: 8px; flex-wrap: wrap; }
-/* action bar (v1.6): everything action-like lives ABOVE the slide, never on it */
+/* action bar (v1.6): everything action-like lives ABOVE the slide, never on
+   it. v2.1: while edit mode is armed the EDITING controls move out of this row
+   into the sidebar's head (post.js moveEditChrome) — only page-level actions
+   stay here, so the row above the slide stays short in both modes. */
 .pv-actionbar { justify-content: flex-end; }
 .pv-actionbar .hist-btn { min-width: 38px; padding: 5px 10px; font-size: 1rem; line-height: 1; }
-.pv-actionbar .smr-edadd { display: inline-flex; gap: 6px; flex-wrap: wrap; }
-.pv-actionbar .smr-edadd .btn { padding: 5px 10px; font-size: .8rem; }
 
 .pv-pinbtn { transition: box-shadow .15s ease; }
 .pv-pinbtn.on { background: var(--accent); color: #fff; box-shadow: 0 0 0 3px color-mix(in srgb, var(--accent) 30%, transparent); }
@@ -255,6 +289,23 @@
 .dt-publish { border: 1px solid var(--line); border-radius: 12px; padding: 14px; background: var(--paper); display: grid; gap: 10px; }
 /* (.dt-nav retired in v1.7 — post-to-post navigation lives in .pv-nav, once) */
 
+/* ---------------- edit mode (v2.1) ----------------
+   The editing sidebar takes over the panel column. Exactly one of
+   #reviewPanel / #editPanel is in the DOM flow at a time, so .pv-main stays a
+   two-column grid and the slide neither moves nor resizes when the mode flips
+   — which matters: compose.js's live preview scales itself to the viewer
+   column's width, and a reflow there would re-scale the artwork mid-edit. */
+.pv-edit { position: sticky; top: 12px; display: flex; flex-direction: column; gap: 10px; }
+.pv-edit__head { display: flex; align-items: center; gap: 8px; flex-wrap: wrap; min-height: 34px; }
+.pv-edit__head .hist-btn { min-width: 38px; padding: 5px 10px; font-size: 1rem; line-height: 1; }
+.pv-edit__host { display: flex; min-height: 460px; }
+/* the sidebar fills this box; its own body is the single scroller */
+.pv-edit__host .smr-sb { flex: 1; min-width: 0; max-height: calc(100vh - 96px); }
+@media (max-width: 920px) {
+  .pv-edit { position: static; }
+  .pv-edit__host { min-height: 0; }
+}
+
 .pv-error { max-width: 480px; margin: 80px auto; text-align: center; color: var(--ink-soft); display: grid; gap: 14px; justify-items: center; }
 </style>
 </head>
@@ -264,6 +315,9 @@
   <div class="pv-head" id="pvHead" hidden>
     <h1 id="pvTitle"></h1>
     <div class="pv-tags" id="pvTags"></div>
+    <!-- scheduling (v2.1): the ONE «תזמון» button + the post's live schedule
+         chips. Deliberately in the header, never inside a tab. -->
+    <div class="pv-sched" id="pvSched"></div>
     <!-- post-to-post navigation (prev/next within this post's category) -->
     <nav class="pv-nav" id="pvNav" aria-label="ניווט בין פוסטים"></nav>
   </div>
@@ -303,11 +357,19 @@
     </section>
 
     <!-- panel column -->
-    <aside class="pv-panel">
+    <aside class="pv-panel" id="reviewPanel">
       <!-- voting is not a tab: it is the first thing under the title -->
       <div class="pv-votebox" id="voteBox"></div>
       <div class="pv-tabs" id="tabs"></div>
       <div class="pv-body" id="tabBody"></div>
+    </aside>
+
+    <!-- edit mode (v2.1): the same column, editing chrome instead of review
+         chrome. The head receives undo/redo + the save chip + «שמור כתבנית»
+         while the session is armed; the host receives editor.js's sidebar. -->
+    <aside class="pv-edit" id="editPanel" hidden aria-label="עריכת השקף">
+      <div class="pv-edit__head" id="editPanelHead"></div>
+      <div class="pv-edit__host" id="editPanelHost"></div>
     </aside>
   </div>
 

@@ -266,6 +266,10 @@ function wireAutosave() {
   document.addEventListener('keydown', (e) => {
     const t = e.target;
     if (t && (/^(INPUT|TEXTAREA|SELECT)$/.test(t.tagName) || t.isContentEditable)) return;
+    // v2.2: while the design editor is armed it forwards ⌘Z here itself
+    // (onUndo/onRedo). Both listeners sit on document, so without this bail a
+    // single ⌘Z stepped the deck back twice.
+    if (edCtrl) return;
     if ((e.metaKey || e.ctrlKey) && (e.key === 'z' || e.key === 'Z')) {
       e.preventDefault();
       if (e.shiftKey) applyHist(redoStack, undoStack);
@@ -648,6 +652,23 @@ function armEditor() {
       photosEmptyText: 'עוד אין נכסים בלוח — אפשר להעלות קובץ כאן, או לגרור תמונה מהמחשב ישירות אל השקף.',
       uploadFile: uploadToDraft,
       uploadAsset: uploadToDraft,
+      // v2.2: ⌘Z / ⌘⇧Z reach the builder's own deck history
+      onUndo: () => applyHist(undoStack, redoStack),
+      onRedo: () => applyHist(redoStack, undoStack),
+      // v2.2: the deck strip. An unsaved draft has no PNG renders, so the
+      // strip shows numbered placeholders — still the fastest way between
+      // slides without leaving the armed editor.
+      deck: {
+        count: slides.length,
+        index: idx,
+        thumb: () => null,
+        label: (n) => 'שקופית ' + (n + 1),
+        go: (n) => { selectSlide(n); },
+      },
+      // v2.2: one background, or one text style, across the whole deck. Here
+      // everything IS the working deck, so it writes straight in — one undo
+      // step, then a re-arm so the editor re-reads the slide it holds.
+      onApplyAll: (p) => applyAllInDeck(p),
       onChange: (design) => {
         const s = slides[idx];
         if (!s) return;
@@ -700,6 +721,43 @@ function disarmEditor() {
   if (edCtrl) { edCtrl.destroy(); edCtrl = null; }
   edIdx = -1;
   edWrapper = null;
+}
+
+// v2.2 — «החלה על כל הקרוסלה». The editor holds one slide and describes the
+// change; the deck is ours. One undo step for the whole sweep, then re-arm so
+// the armed editor re-reads the slide it is sitting on.
+function applyAllInDeck(p) {
+  if (!p || !p.type || !slides.length) return;
+  markUndoOp();
+  let touched = 0;
+  for (const s of slides) {
+    if (p.type === 'bg') {
+      s.design = s.design || {};
+      s.design.bg = JSON.parse(JSON.stringify(p.bg));
+      touched++;
+    } else if (p.type === 'blockStyle') {
+      // only slides that actually carry this text block
+      if (!s.vars || !Object.prototype.hasOwnProperty.call(s.vars, p.name)) continue;
+      s.design = s.design || {};
+      s.design.blocks = s.design.blocks || {};
+      const keep = s.design.blocks[p.name] || {};
+      const next = JSON.parse(JSON.stringify(p.style));
+      // the style travels; where THIS slide nudged the block does not
+      if (typeof keep.dx === 'number') next.dx = keep.dx;
+      if (typeof keep.dy === 'number') next.dy = keep.dy;
+      s.design.blocks[p.name] = next;
+      touched++;
+    } else return;
+  }
+  if (!touched) { toast('אין שקופית נוספת שהשינוי הזה חל עליה'); return; }
+  disarmEditor();
+  renderStrip();
+  clearTimeout(previewTimer);
+  updatePreview();
+  scheduleAutosave();
+  toast(p.type === 'bg'
+    ? `הרקע הוחל על ${touched} שקופיות`
+    : `הסגנון הוחל על ${touched} שקופיות`, 'ok');
 }
 
 function selectSlide(i, opts = {}) {

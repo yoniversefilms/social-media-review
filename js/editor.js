@@ -296,6 +296,11 @@ const deepCopy = (v) => (typeof structuredClone === 'function'
 const round1 = (v) => Math.round(v * 10) / 10;
 const clamp = (v, a, b) => Math.min(b, Math.max(a, v));
 
+// v2.2 — the element clipboard. MODULE level, not per-editor: moving to the
+// next slide destroys this editor and builds a new one, and copy → next slide
+// → paste is the whole reason the clipboard exists.
+let clipboard = null;
+
 
 const BG_FIELDS = ['deep', 'paper', 'warm'];
 
@@ -312,6 +317,7 @@ function normalizeDesign(d) {
       out.els = deepCopy(d.els);
     }
     if (Array.isArray(d.hidden) && d.hidden.length) out.hidden = deepCopy(d.hidden);
+    if (Array.isArray(d.locked) && d.locked.length) out.locked = deepCopy(d.locked);
   }
   return out;
 }
@@ -320,7 +326,8 @@ function isEmptyDesign(d) {
   return !Object.keys(d.blocks).length && !d.extras.length && !d.bg &&
     !(d.slots && Object.keys(d.slots).length) &&
     !(d.els && Object.keys(d.els).length) &&
-    !(d.hidden && d.hidden.length);
+    !(d.hidden && d.hidden.length) &&
+    !(d.locked && d.locked.length);
 }
 
 // data-el keys the engine tags (PLAN «design.els + brand assets v1.6 → v1.8»):
@@ -397,6 +404,9 @@ function pruneBg(bg) {
   return Object.keys(o).length ? o : null;
 }
 
+// keep in step with RE_ALIGN in the twin PARITY BLOCK (compose.js/render.mjs)
+const RE_TEXT_ALIGN = /^(start|center|end|justify)$/;
+
 function pruneBlock(b) {
   const o = {};
   if (b.font) o.font = b.font;
@@ -404,9 +414,27 @@ function pruneBlock(b) {
   if (b.bold === true) o.bold = true;
   if (b.italic === true) o.italic = true;
   if (b.color) o.color = b.color;
+  // v2.2 typography — the engines clamp these too (PARITY BLOCK), but a value
+  // that survives to the JSON should already be legal and already rounded
+  if (RE_TEXT_ALIGN.test(String(b.align || ''))) o.align = b.align;
+  if (typeof b.lh === 'number') o.lh = Math.round(clamp(b.lh, 0.7, 3) * 100) / 100;
+  if (typeof b.ls === 'number' && Math.abs(b.ls) > 0.0025) {
+    o.ls = Math.round(clamp(b.ls, -0.08, 0.6) * 1000) / 1000;
+  }
+  if (typeof b.opacity === 'number' && b.opacity < 0.999) {
+    o.opacity = Math.round(clamp(b.opacity, 0, 1) * 100) / 100;
+  }
   if (typeof b.dx === 'number' && round1(b.dx) !== 0) o.dx = round1(b.dx);
   if (typeof b.dy === 'number' && round1(b.dy) !== 0) o.dy = round1(b.dy);
   return Object.keys(o).length ? o : null;
+}
+
+// v2.2: opacity is stored the same way everywhere — omitted at fully opaque,
+// two decimals otherwise — so one helper writes it into all three shapes
+function pruneOpacityInto(o, src) {
+  if (typeof src.opacity === 'number' && src.opacity < 0.999) {
+    o.opacity = Math.round(clamp(src.opacity, 0, 1) * 100) / 100;
+  }
 }
 
 function pruneExtra(e) {
@@ -422,6 +450,10 @@ function pruneExtra(e) {
   const rot = Math.round(e.rot || 0);
   if (rot) o.rot = rot;
   if (e.back === true) o.back = true;   // layering v1.1: renders below template content
+  pruneOpacityInto(o, e);               // v2.2
+  // v2.2 lock: editor-only (nothing in the render engines reads it), but it
+  // rides in the design so it survives a reload and reaches everyone
+  if (e.lock === true) o.lock = true;
   return o;
 }
 
@@ -439,6 +471,7 @@ function pruneEl(e, key) {
     if (Math.abs(s - 1) > 0.001) o.scale = s;
   }
   if (e.color && key !== 'lockup') o.color = e.color;
+  pruneOpacityInto(o, e);               // v2.2
   return Object.keys(o).length ? o : null;
 }
 
@@ -467,6 +500,10 @@ function injectStyles() {
   background:#B3995D;color:#fff;border-radius:4px;padding:1px 6px;
   font:600 11px/1.6 'Assistant',-apple-system,sans-serif}
 .smr-edbox--sel{outline:2px solid #830051;box-shadow:0 0 0 4px rgba(131,0,81,.15)}
+/* v2.2 group companions: the same brand ink as the primary but hollow and
+   without handles, so which box a resize would grab stays unambiguous */
+.smr-edbox--more{outline:2px dashed rgba(131,0,81,.75);
+  background:rgba(131,0,81,.06)}
 .smr-edbox--sel.is-snap{outline-color:#2e7d4f;box-shadow:0 0 0 4px rgba(46,125,79,.25)}
 .smr-edh{position:absolute;width:16px;height:16px;border-radius:50%;background:#fff;
   border:2px solid #830051;box-shadow:0 1px 4px rgba(0,0,0,.3);pointer-events:auto}
@@ -525,6 +562,26 @@ function injectStyles() {
 .smr-sb__head{display:flex;align-items:center;gap:8px;padding:11px 13px 9px;
   border-bottom:1px solid var(--line,rgba(36,29,32,.12))}
 .smr-sb__title{margin:0;font-size:.92rem;font-weight:700;color:var(--ink,#241d20)}
+.smr-sb__eye{margin-inline-start:auto;appearance:none;border:1px solid transparent;
+  background:none;cursor:pointer;font-size:1rem;line-height:1;padding:4px 7px;
+  border-radius:8px;color:var(--ink-soft,#6b5f63)}
+.smr-sb__eye:hover{background:rgba(131,0,81,.07);color:var(--ink,#241d20)}
+.smr-sb__eye.on{background:color-mix(in srgb,var(--accent,#830051) 12%,transparent);
+  color:var(--accent,#830051);border-color:color-mix(in srgb,var(--accent,#830051) 30%,transparent)}
+/* deck strip (v2.2) */
+.smr-edslides{display:grid;grid-template-columns:repeat(auto-fill,minmax(78px,1fr));gap:8px}
+.smr-edslide{appearance:none;padding:0;border:1px solid var(--line,rgba(36,29,32,.12));
+  border-radius:9px;overflow:hidden;background:var(--paper,#fffdf9);cursor:pointer;
+  position:relative;display:block;line-height:0}
+.smr-edslide:hover{border-color:var(--accent,#830051)}
+.smr-edslide.on{border-color:var(--accent,#830051);
+  box-shadow:0 0 0 2px color-mix(in srgb,var(--accent,#830051) 35%,transparent)}
+.smr-edslide img{width:100%;aspect-ratio:4/5;object-fit:cover;display:block}
+.smr-edslide__ph{display:flex;align-items:center;justify-content:center;
+  aspect-ratio:4/5;color:var(--ink-soft,#6b5f63);font-size:.9rem;line-height:1}
+.smr-edslide__n{position:absolute;inset-block-end:3px;inset-inline-start:3px;
+  background:rgba(36,29,32,.72);color:#fff;border-radius:5px;padding:0 5px;
+  font:600 11px/1.7 'Assistant',-apple-system,sans-serif}
 .smr-sb__body{flex:1;min-height:0;overflow-y:auto;padding:12px 13px 16px;
   display:grid;gap:10px;align-content:start}
 /* one scroller only (Canva's rule): panes stretch, the body scrolls */
@@ -561,6 +618,21 @@ function injectStyles() {
 .smr-edsw.on{outline:2px solid var(--accent,#830051);outline-offset:2px}
 .smr-edtb .btn{padding:5px 10px;font-size:.8rem}
 .smr-edtb__del{color:#b3403a}
+.smr-edtb__hint{font-size:.75rem;color:var(--ink-soft,#6b5f63);line-height:1.5}
+/* numeric position/size boxes (v2.2) — four to a row at 1fr each, so the row
+   holds X · Y · width · rotation without wrapping in a 300px panel */
+.smr-ednum__row{display:grid;grid-template-columns:repeat(auto-fit,minmax(58px,1fr));
+  gap:6px;align-items:end}
+/* «apply to every slide» — a full-width ghost button, because it is the one
+   control here that changes slides you cannot currently see */
+.smr-edall{width:100%;justify-content:center}
+.smr-ednum__f{display:grid;gap:2px;min-width:0}
+.smr-ednum__f > span{font-size:.68rem;color:var(--ink-soft,#6b5f63)}
+.smr-ednum{width:100%;min-width:0;padding:4px 6px;font-size:.8rem;direction:ltr;
+  text-align:center}
+.smr-ednum::-webkit-outer-spin-button,.smr-ednum::-webkit-inner-spin-button{
+  -webkit-appearance:none;margin:0}
+.smr-ednum{-moz-appearance:textfield}
 .smr-edpick{display:grid;grid-template-columns:repeat(auto-fill,minmax(92px,1fr));gap:10px;
   max-height:min(56vh,560px);overflow-y:auto;padding:2px}
 .smr-edpick button{appearance:none;border:1px solid var(--line,rgba(36,29,32,.12));
@@ -663,6 +735,8 @@ function injectStyles() {
 .smr-edlyr__row .mini:hover{background:rgba(131,0,81,.12);color:var(--accent,#830051)}
 .smr-edlyr__grip{cursor:grab;color:var(--ink-soft,#6b5f63);font-size:.85rem;flex:none;
   user-select:none}
+.smr-edlyr__row.is-locked .smr-edlyr__nm{opacity:.65}
+.smr-edlyr__row .mini--locked{color:var(--accent,#830051)}
 .smr-edlyr__row.is-off{opacity:.45}
 .smr-edlyr__row.is-off:hover{opacity:.7}
 .smr-edlyr__row .mini--restore{font-size:.72rem;font-weight:700;color:var(--accent,#830051)}
@@ -675,6 +749,19 @@ function injectStyles() {
   box-shadow:0 2px 10px rgba(0,0,0,.14);max-width:92%}
 .smr-edslot.is-target{border-color:var(--accent,#830051);border-style:solid;
   background:rgba(131,0,81,.14)}
+/* safe-area guides (v2.2) — sized in % of the slide, so they follow the frame
+   at any scale without a single line of positioning JS. 1080×1350: the grid
+   square is the middle 80% vertically; the brand margin is 96/1080 = 8.89%
+   inline and 96/1350 = 7.11% block. */
+.smr-edsafelayer{position:absolute;inset:0;z-index:4;pointer-events:none}
+.smr-edsafelayer[hidden]{display:none}
+.smr-edsafe{position:absolute;pointer-events:none}
+.smr-edsafe--sq{inset:10% 0;border-block:1.5px dashed rgba(255,255,255,.92);
+  box-shadow:0 0 0 1px rgba(36,29,32,.28) inset}
+.smr-edsafe--mg{inset:7.11% 8.89%;outline:1.5px dashed rgba(179,153,93,.95)}
+.smr-edsafe__tag{position:absolute;inset-inline-start:6px;top:4px;
+  background:rgba(36,29,32,.72);color:#fff;border-radius:4px;padding:1px 6px;
+  font:600 11px/1.6 'Assistant',-apple-system,sans-serif}
 .smr-edgrid{position:absolute;pointer-events:none;z-index:5;
   outline:1px solid rgba(255,255,255,.55);
   filter:drop-shadow(0 0 1px rgba(0,0,0,.55));
@@ -770,6 +857,12 @@ export function initEditor(handle, slide, opts = {}) {
   let photos = normalizePhotos(opts.photos);
   let design = normalizeDesign(slide.design);
   let sel = null;        // {kind:'block', name} | {kind:'extra', index} | {kind:'slot', n}
+  // v2.2 multi-select: `sel` stays THE selection — every existing renderer,
+  // gesture and toolbar reads it and none of them had to learn about groups.
+  // Shift-click adds companions here instead, and the handful of operations
+  // that are genuinely group-shaped (nudge, delete, drag, align, distribute)
+  // go through targets(). A plain click clears the group.
+  let selMore = [];
   // v1.8: where the current selection sits in the stack under the last click
   // ({i, n}), or null when it was the only candidate. Drives the toolbar's
   // depth stepper so the reviewer can walk the pile without pixel-hunting.
@@ -808,11 +901,21 @@ export function initEditor(handle, slide, opts = {}) {
   // content) + the rule-of-thirds grid shown while cropping + the accent
   // snap guides (1px lines across the full slide while a magnet is engaged).
   const slotHints = el('div', { class: 'smr-edslots' });
+  // v2.2 safe-area guides. Two things get cropped off a 1080×1350 post and
+  // people keep forgetting both: Instagram's grid thumbnail takes the CENTRE
+  // SQUARE (1080×1080, so 135px off the top and bottom), and the brand's own
+  // 96px margin is where type is supposed to stop. Off by default — this is a
+  // check you turn on, not a cage you work inside.
+  const safeSq = el('div', { class: 'smr-edsafe smr-edsafe--sq' },
+    el('span', { class: 'smr-edsafe__tag' }, 'ריבוע הגריד'));
+  const safeMg = el('div', { class: 'smr-edsafe smr-edsafe--mg' });
+  const safeBox = el('div', { class: 'smr-edsafelayer', hidden: true }, safeSq, safeMg);
   const gridBox = el('div', { class: 'smr-edgrid', hidden: true });
   const guideV = el('div', { class: 'smr-edguide smr-edguide--v' });
   const guideH = el('div', { class: 'smr-edguide smr-edguide--h' });
   const overlay = el('div', { class: 'smr-edov', dir: 'rtl' },
-    slotHints, hoverBox, peekBox, selBox, gridBox, guideV, guideH, dropHint, busyEl);
+    slotHints, safeBox, hoverBox, peekBox, selBox, gridBox, guideV, guideH,
+    dropHint, busyEl);
   wrapper.appendChild(overlay);
 
   // in-place text editing: floating ✓/✗ near the edited block. pointerdown +
@@ -842,18 +945,37 @@ export function initEditor(handle, slide, opts = {}) {
   const bgPanel = el('div', { class: 'smr-edpanel smr-sb__pane', hidden: true });
   const layersPanel = el('div', { class: 'smr-edpanel smr-sb__pane', hidden: true });
 
+  // v2.2 — the deck, when the host has one. `go(i)` moves the whole page to
+  // another slide; the editor never touches the deck itself (it only ever
+  // knows about ONE slide) — it just draws the strip and forwards the click.
+  const deck = (opts.deck && typeof opts.deck.go === 'function' &&
+    Number(opts.deck.count) > 1) ? opts.deck : null;
+  const slidesPane = el('div', { class: 'smr-sb__pane', hidden: true });
+
   const TABS = [
     { key: 'props', icon: '✎', label: 'מאפיינים', title: 'מאפייני הבחירה', pane: propsPane },
     { key: 'lib', icon: '🖼', label: 'ספרייה', title: 'ספריית נכסים', pane: libPane },
     { key: 'bg', icon: '🎨', label: 'רקע', title: 'רקע השקף', pane: bgPanel },
     { key: 'layers', icon: '☰', label: 'שכבות', title: 'שכבות השקף', pane: layersPanel },
+    ...(deck ? [{ key: 'slides', icon: '▤', label: 'שקפים', title: 'שקפי הקרוסלה', pane: slidesPane }] : []),
   ];
   let activeTab = 'props';
 
   const sbTitle = el('h4', { class: 'smr-sb__title' }, 'מאפייני הבחירה');
+  // safe-area toggle lives in the head, not the rail: it is a way of LOOKING
+  // at the slide, not a set of controls, and it stays on across tab switches
+  const safeBtn = el('button', {
+    class: 'smr-sb__eye', type: 'button', 'aria-pressed': 'false',
+    title: 'קווי בטיחות: ריבוע הגריד של אינסטגרם (1080×1080) ושולי המותג (96px)',
+    onclick: () => {
+      safeBox.hidden = !safeBox.hidden;
+      safeBtn.classList.toggle('on', !safeBox.hidden);
+      safeBtn.setAttribute('aria-pressed', safeBox.hidden ? 'false' : 'true');
+    },
+  }, '⊞');
   const sbBody = el('div', { class: 'smr-sb__body' }, ...TABS.map((t) => t.pane));
   const sbPanel = el('div', { class: 'smr-sb__panel' },
-    el('div', { class: 'smr-sb__head' }, sbTitle), sbBody);
+    el('div', { class: 'smr-sb__head' }, sbTitle, safeBtn), sbBody);
   const railBtns = new Map();
   const sbRail = el('div', { class: 'smr-sb__rail' },
     TABS.map((t) => {
@@ -891,6 +1013,7 @@ export function initEditor(handle, slide, opts = {}) {
       b.setAttribute('aria-pressed', t.key === key ? 'true' : 'false');
       if (t.key === key) sbTitle.textContent = t.title;
     }
+    if (key === 'slides') renderSlidesPane();
     if (key === 'lib') renderLibraryPane();
     if (key === 'bg') renderBgPanel();
     if (key === 'layers') renderLayersPanel();
@@ -900,6 +1023,34 @@ export function initEditor(handle, slide, opts = {}) {
 
   function syncPropsPane() {
     propsEmpty.hidden = !toolbar.hidden;
+  }
+
+  // the deck strip: which slide you are on, and one click to any other. The
+  // thumbs are the studio's own PNG renders when the host has them — cheap,
+  // and they are what the reviewer already recognises from the viewer.
+  function renderSlidesPane() {
+    if (!deck || slidesPane.hidden) return;
+    const n = Number(deck.count) || 0;
+    const cur = Number(deck.index);
+    const kids = [];
+    for (let i = 0; i < n; i++) {
+      const url = typeof deck.thumb === 'function' ? deck.thumb(i) : null;
+      const b = el('button', {
+        class: 'smr-edslide' + (i === cur ? ' on' : ''), type: 'button',
+        title: typeof deck.label === 'function' ? deck.label(i) : ('שקף ' + (i + 1)),
+        onclick: () => { if (i !== cur) deck.go(i); },
+      },
+        url ? el('img', { src: url, alt: '', loading: 'lazy' })
+          : el('span', { class: 'smr-edslide__ph' }, '—'),
+        el('span', { class: 'smr-edslide__n' }, String(i + 1)),
+      );
+      kids.push(b);
+    }
+    slidesPane.replaceChildren(
+      el('p', { class: 'smr-sb__hint' },
+        'מעבר בין שקפי הקרוסלה בלי לצאת ממצב העריכה. העתקה מכאן והדבקה שם — ⌘C ואז ⌘V.'),
+      el('div', { class: 'smr-edslides' }, kids),
+    );
   }
 
   // ---------------- geometry ----------------
@@ -937,6 +1088,51 @@ export function initEditor(handle, slide, opts = {}) {
   const slotKeyOf = (n) => 'slot:' + n;
   const hiddenKeys = () => (Array.isArray(design.hidden) ? design.hidden : []);
   const isHiddenKey = (k) => hiddenKeys().includes(k);
+
+  // ---------------- lock (v2.2) ----------------
+  //
+  // Locked = still there, still visible, still stylable — just not movable and
+  // not in the way. Template things (blocks, slots, els) lock by key in
+  // `design.locked`, the same shape `design.hidden` uses. Extras lock ON the
+  // object (`ex.lock`), because an extra is identified by its INDEX and the
+  // layers panel reorders that array — a key-based lock would follow the
+  // position instead of the thing.
+  //
+  // The real payoff is hit-testing: a locked background photo drops out of the
+  // candidate stack entirely, so clicking the text on top of it just works.
+  // The layers panel still reaches it — that is where you unlock it.
+  const lockedKeys = () => (Array.isArray(design.locked) ? design.locked : []);
+  const lockKeyOf = (t) => (t.kind === 'block' ? t.name
+    : t.kind === 'el' ? elHiddenKey(t.key)
+    : t.kind === 'slot' ? slotKeyOf(t.n) : null);
+
+  function isLocked(t) {
+    if (!t) return false;
+    if (t.kind === 'extra') {
+      const ex = design.extras[t.index];
+      return !!(ex && ex.lock === true);
+    }
+    const k = lockKeyOf(t);
+    return !!k && lockedKeys().includes(k);
+  }
+
+  function toggleLock(t) {
+    if (!t) return;
+    if (t.kind === 'extra') {
+      const ex = design.extras[t.index];
+      if (!ex) return;
+      if (ex.lock) delete ex.lock; else ex.lock = true;
+    } else {
+      const k = lockKeyOf(t);
+      if (!k) return;
+      const cur = lockedKeys();
+      design.locked = cur.includes(k) ? cur.filter((x) => x !== k) : [...cur, k];
+      if (!design.locked.length) delete design.locked;
+    }
+    commit();
+    renderToolbar();
+    renderLayersPanel();
+  }
 
   function slotEl(n) {
     const d = doc();
@@ -1134,6 +1330,7 @@ export function initEditor(handle, slide, opts = {}) {
         : t.kind === 'slot' ? t.n : t.kind === 'el' ? t.key : t.index);
       if (seen.has(k)) return;
       seen.add(k);
+      if (isLocked(t)) return;   // v2.2: a locked thing is not in the way
       out.push(t);
     };
     // extras first, topmost (= last in array) wins
@@ -1317,14 +1514,23 @@ export function initEditor(handle, slide, opts = {}) {
     if (sel && sel.kind === 'extra' && !design.extras[sel.index]) sel = null;
     if (sel && sel.kind === 'slot' && !slotEl(sel.n)) sel = null;
     if (sel && sel.kind === 'el' && !elEl(sel.key)) sel = null;
+    // companions can go stale the same way the primary can (a deck refresh, an
+    // undo that removed an extra) — drop them before anything paints
+    selMore = selMore.filter((t) => t.kind !== 'extra' || design.extras[t.index]);
     const g = sel ? geomOf(sel) : null;
-    if (!sel) { selBox.hidden = true; toolbar.hidden = true; gridBox.hidden = true; return; }
+    if (!sel) {
+      selMore = [];
+      selBox.hidden = true; toolbar.hidden = true; gridBox.hidden = true;
+      paintMoreBoxes();
+      return;
+    }
     placeBox(selBox, g);
     const showHandles = sel.kind === 'extra';
     hRot.style.display = showHandles ? '' : 'none';
     hRz.style.display = showHandles ? '' : 'none';
     const ct = cropTarget();
     if (ct && g) placeBox(gridBox, g); else gridBox.hidden = true;
+    paintMoreBoxes();
     toolbar.hidden = false;
     syncPropsPane();
   }
@@ -1370,6 +1576,16 @@ export function initEditor(handle, slide, opts = {}) {
         if (RE_HIDDEN_KEY.test(k) && !h.includes(k)) h.push(k);
       }
       if (h.length) design.hidden = h; else delete design.hidden;
+    }
+    // v2.2: locked keys use the same vocabulary as hidden ones, so the same
+    // regex validates them — an unknown key is dropped rather than persisted
+    if (design.locked) {
+      const l = [];
+      for (const k0 of design.locked) {
+        const k = String(k0);
+        if (RE_HIDDEN_KEY.test(k) && !l.includes(k)) l.push(k);
+      }
+      if (l.length) design.locked = l; else delete design.locked;
     }
   }
 
@@ -1421,6 +1637,7 @@ export function initEditor(handle, slide, opts = {}) {
   function select(t, d, o = {}) {
     if (!sameSel(t, sel)) extraCropOn = false; // crop mode never survives retargeting
     sel = t;
+    if (!o.keepGroup) selMore = [];            // a plain click starts a new group
     depth = (d && d.n > 1) ? d : null;
     hoverBox.hidden = true;
     peekBox.hidden = true;
@@ -1432,6 +1649,7 @@ export function initEditor(handle, slide, opts = {}) {
 
   function deselect() {
     sel = null;
+    selMore = [];
     extraCropOn = false;
     depth = null;
     cycle = null;
@@ -1439,8 +1657,151 @@ export function initEditor(handle, slide, opts = {}) {
     peekBox.hidden = true;
     toolbar.hidden = true;
     gridBox.hidden = true;
+    paintMoreBoxes();
     syncPropsPane();
     renderLayersPanel();
+  }
+
+  // ---------------- multi-select (v2.2) ----------------
+
+  // Everything currently selected, primary first. The ONLY entry point for
+  // group-shaped operations — everything else in this file still reads `sel`.
+  function targets() {
+    return sel ? [sel, ...selMore] : [];
+  }
+
+  // A slot has no position of its own (the template owns its box), so it can
+  // be selected but never joins a group move or an align.
+  const MOVABLE = new Set(['block', 'extra', 'el']);
+  const movable = (t) => !!t && MOVABLE.has(t.kind);
+
+  // shift-click: add to the group, or drop it back out if it was already in.
+  // Shift-clicking the primary promotes the next companion, so the modifier
+  // both adds and removes and never leaves an empty primary behind.
+  function toggleInGroup(hit) {
+    if (!movable(hit)) return;
+    if (!sel) { select(hit); return; }
+    if (!movable(sel)) { select(hit); return; }
+    if (sameSel(hit, sel)) {
+      if (!selMore.length) { deselect(); return; }
+      sel = selMore.shift();
+    } else {
+      const at = selMore.findIndex((t) => sameSel(t, hit));
+      if (at >= 0) selMore.splice(at, 1);
+      else selMore.push(hit);
+    }
+    extraCropOn = false;
+    depth = null;
+    hoverBox.hidden = true;
+    peekBox.hidden = true;
+    renderToolbar();
+    refreshUI();
+    renderLayersPanel();
+    if (activeTab !== 'props') openTab('props');
+  }
+
+  // one outline per companion, pooled — the primary keeps selBox and its
+  // handles, so at a glance you can still tell which one a resize would hit
+  const moreBoxes = [];
+  function paintMoreBoxes() {
+    const gs = selMore.map((t) => geomOf(t));
+    while (moreBoxes.length < gs.length) {
+      const b = el('div', { class: 'smr-edbox smr-edbox--more', hidden: true });
+      moreBoxes.push(b);
+      overlay.insertBefore(b, selBox);
+    }
+    for (let i = 0; i < moreBoxes.length; i++) {
+      if (i < gs.length && gs[i]) placeBox(moreBoxes[i], gs[i]);
+      else moreBoxes[i].hidden = true;
+    }
+  }
+
+  // Move one target by a delta in slide %. Extras carry an absolute x/y;
+  // blocks and els carry an offset FROM wherever the template put them — so
+  // "move by" is the only verb that means the same thing for all three, and
+  // every group operation is expressed in it.
+  function moveTargetBy(t, dx, dy) {
+    if (isLocked(t)) return false;
+    if (t.kind === 'extra') {
+      const ex = design.extras[t.index];
+      if (!ex) return false;
+      ex.x = round1(clamp((Number(ex.x) || 0) + dx, -20, 100));
+      ex.y = round1(clamp((Number(ex.y) || 0) + dy, -20, 100));
+      return true;
+    }
+    if (t.kind === 'block' || t.kind === 'el') {
+      const o = t.kind === 'block' ? blockOf(t.name) : elOf(t.key);
+      o.dx = round1(clamp((Number(o.dx) || 0) + dx, -60, 60));
+      o.dy = round1(clamp((Number(o.dy) || 0) + dy, -60, 60));
+      return true;
+    }
+    return false;   // slot
+  }
+
+  // geomOf reports in DOC units (the rects come from inside the iframe), so
+  // the arithmetic below is all in 1080×1350 space and only the final delta
+  // is converted to the % the design stores.
+  function alignSel(edge) {
+    const list = targets().filter(movable);
+    if (!list.length) return;
+    const gs = list.map((t) => ({ t, g: geomOf(t) })).filter((x) => x.g);
+    if (!gs.length) return;
+    // one thing selected → align it to the slide; a group → align the group's
+    // members to each other, which is what every editor means by "align left"
+    // once more than one thing is in hand
+    let lo, hi;
+    const horiz = edge === 'left' || edge === 'center' || edge === 'right';
+    if (gs.length === 1) {
+      lo = 0; hi = horiz ? W : H;
+    } else {
+      lo = Math.min(...gs.map((x) => (horiz ? x.g.cx - x.g.w / 2 : x.g.cy - x.g.h / 2)));
+      hi = Math.max(...gs.map((x) => (horiz ? x.g.cx + x.g.w / 2 : x.g.cy + x.g.h / 2)));
+    }
+    const mid = (lo + hi) / 2;
+    let moved = false;
+    for (const { t, g } of gs) {
+      const half = horiz ? g.w / 2 : g.h / 2;
+      const cur = horiz ? g.cx : g.cy;
+      const want = (edge === 'left' || edge === 'top') ? lo + half
+        : (edge === 'right' || edge === 'bottom') ? hi - half : mid;
+      const dpx = want - cur;
+      if (Math.abs(dpx) < 0.5) continue;
+      const dPct = dpx / (horiz ? W : H) * 100;
+      if (moveTargetBy(t, horiz ? dPct : 0, horiz ? 0 : dPct)) moved = true;
+    }
+    if (!moved) return;
+    commit();
+    renderToolbar();
+  }
+
+  // Even the GAPS, not the centres — three boxes of different widths spaced by
+  // centre still look uneven, which is the whole reason "distribute" exists.
+  function distributeSel(axis) {
+    const list = targets().filter(movable);
+    if (list.length < 3) return;
+    const gs = list.map((t) => ({ t, g: geomOf(t) })).filter((x) => x.g);
+    if (gs.length < 3) return;
+    const horiz = axis === 'x';
+    const size = (x) => (horiz ? x.g.w : x.g.h);
+    const start = (x) => (horiz ? x.g.cx - x.g.w / 2 : x.g.cy - x.g.h / 2);
+    gs.sort((a, b) => start(a) - start(b));
+    const first = gs[0], last = gs[gs.length - 1];
+    const span = (start(last) + size(last)) - start(first);
+    const used = gs.reduce((s, x) => s + size(x), 0);
+    const gap = (span - used) / (gs.length - 1);
+    let cursor = start(first) + size(first) + gap;
+    let moved = false;
+    for (let i = 1; i < gs.length - 1; i++) {
+      const x = gs[i];
+      const dpx = cursor - start(x);
+      cursor += size(x) + gap;
+      if (Math.abs(dpx) < 0.5) continue;
+      const dPct = dpx / (horiz ? W : H) * 100;
+      if (moveTargetBy(x.t, horiz ? dPct : 0, horiz ? 0 : dPct)) moved = true;
+    }
+    if (!moved) return;
+    commit();
+    renderToolbar();
   }
 
   // v1.8: the depth stepper — «2/4 ▼» in every selection toolbar when more
@@ -1498,22 +1859,287 @@ export function initEditor(handle, slide, opts = {}) {
     );
   }
 
+  // ---------------- align & distribute UI (v2.2) ----------------
+
+  const ALIGN_H = [
+    ['left', '⇤', 'יישור לשמאל'],
+    ['center', '↔', 'מרכוז לרוחב'],
+    ['right', '⇥', 'יישור לימין'],
+  ];
+  const ALIGN_V = [
+    ['top', '⤒', 'יישור למעלה'],
+    ['middle', '↕', 'מרכוז לגובה'],
+    ['bottom', '⤓', 'יישור למטה'],
+  ];
+
+  // One row, in every toolbar whose selection can move. With one thing in
+  // hand it aligns to the SLIDE; with a group it aligns the group's members
+  // to each other — the label says which, because the same six buttons doing
+  // two different things is only obvious once you already know.
+  function alignRow() {
+    const n = targets().filter(movable).length;
+    if (!n) return null;
+    const btn = ([edge, glyph, title]) => el('button', {
+      class: 'smr-edtg', type: 'button', title,
+      onclick: () => alignSel(edge),
+    }, glyph);
+    const rows = [
+      el('div', { class: 'smr-edtb__row' },
+        el('span', null, n > 1 ? 'יישור זה לזה' : 'יישור לשקף'),
+        ALIGN_H.map(btn), ALIGN_V.map(btn)),
+    ];
+    if (n > 2) {
+      rows.push(el('div', { class: 'smr-edtb__row' },
+        el('span', null, 'פיזור אחיד'),
+        el('button', {
+          class: 'smr-edtg smr-edtg--w', type: 'button',
+          title: 'מרווחים שווים לרוחב', onclick: () => distributeSel('x'),
+        }, '⇹ לרוחב'),
+        el('button', {
+          class: 'smr-edtg smr-edtg--w', type: 'button',
+          title: 'מרווחים שווים לגובה', onclick: () => distributeSel('y'),
+        }, '⇳ לגובה')));
+    }
+    return rows;
+  }
+
+  // ---------------- numeric position & size (v2.2) ----------------
+  //
+  // Everything here was drag-only, which means two slides could never be made
+  // to match exactly. The boxes read and write PIXELS at 1080×1350 — the
+  // design stores %, but nobody thinks in "3.7% of the slide", and px is what
+  // every other editor shows.
+
+  function numBox(label, title, get, set, o = {}) {
+    const input = el('input', {
+      class: 'field__input smr-ednum', type: 'number',
+      step: String(o.step || 1), value: String(Math.round(get())),
+    });
+    const apply = () => {
+      const v = Number(input.value);
+      if (!Number.isFinite(v)) { input.value = String(Math.round(get())); return; }
+      set(v);
+      commit({ defer: 120 });
+      refreshUI();
+    };
+    input.addEventListener('change', apply);
+    // Enter commits without waiting for blur; arrows inside the box are the
+    // browser's spinner, NOT the editor's nudge (onKey bails on fields)
+    input.addEventListener('keydown', (e) => { if (e.key === 'Enter') { e.preventDefault(); apply(); } });
+    return el('label', { class: 'smr-ednum__f', title },
+      el('span', null, label), input);
+  }
+
+  // ---------------- apply to every slide (v2.2) ----------------
+  //
+  // A carousel is 5–10 slides, so "change the background" is really "change it
+  // ten times". The editor only ever holds ONE slide, so it can't do this
+  // itself — it hands the host a description of the change and the host walks
+  // its own deck (post.js commits per slide; build.js writes the deck). No
+  // host callback → no button, rather than a button that quietly does nothing.
+  function applyAllBtn(label, confirmText, payload) {
+    if (typeof opts.onApplyAll !== 'function') return null;
+    if (!deck) return null;
+    const b = el('button', { class: 'btn btn--ghost smr-edall', type: 'button' }, label);
+    b.addEventListener('click', () => {
+      edModal('החלה על כל הקרוסלה', el('div', { style: { lineHeight: '1.6' } }, confirmText), {
+        actions: [
+          {
+            label: 'החל על כל השקפים',
+            primary: true,
+            onClick: () => {
+              const p = payload();
+              if (p) opts.onApplyAll(p);
+            },
+          },
+          { label: 'ביטול' },
+        ],
+      });
+    });
+    return b;
+  }
+
+  // The lock line, in every single-selection toolbar. When something IS locked
+  // this is the only way back — the canvas can't reach it, by design.
+  function lockRow() {
+    if (!sel || selMore.length) return null;
+    if (!lockKeyOf(sel) && sel.kind !== 'extra') return null;
+    const on = isLocked(sel);
+    const b = el('button', {
+      class: 'smr-edtg smr-edtg--w' + (on ? ' on' : ''), type: 'button',
+      title: on ? 'שחרור הנעילה — הפריט יחזור לזוז וללחיצות'
+        : 'נעילה: הפריט נשאר על השקף אבל לא זז ולא נתפס בלחיצה',
+      onclick: () => toggleLock(sel),
+    }, on ? '🔒 נעול' : '🔓 נעילה');
+    return el('div', { class: 'smr-edtb__row' },
+      b,
+      on ? el('span', { class: 'smr-edtb__hint' }, 'נעול — לחיצות עוברות דרכו') : null);
+  }
+
+  function posRow() {
+    if (!sel || !movable(sel) || selMore.length) return null;
+    if (isLocked(sel)) return null;
+    const px = (pct, dim) => (pct || 0) / 100 * dim;
+    const pct = (v, dim) => round1(v / dim * 100);
+    const fields = [];
+    if (sel.kind === 'extra') {
+      const ex = () => design.extras[sel.index];
+      if (!ex()) return null;
+      fields.push(numBox('X', 'מרחק משמאל השקף, בפיקסלים (רוחב השקף 1080)',
+        () => px(ex().x, W), (v) => { ex().x = clamp(pct(v, W), -20, 100); }));
+      fields.push(numBox('Y', 'מרחק מראש השקף, בפיקסלים (גובה השקף 1350)',
+        () => px(ex().y, H), (v) => { ex().y = clamp(pct(v, H), -20, 100); }));
+      fields.push(numBox('רוחב', 'רוחב הפריט בפיקסלים',
+        () => px(ex().w || 20, W), (v) => { ex().w = clamp(pct(v, W), 4, 100); }));
+      fields.push(numBox('°', 'סיבוב במעלות',
+        () => ex().rot || 0, (v) => { ex().rot = Math.round(clamp(v, -180, 180)); }));
+    } else {
+      const o = () => (sel.kind === 'block' ? blockOf(sel.name) : elOf(sel.key));
+      fields.push(numBox('X', 'הזזה מהמקום שהתבנית קבעה, בפיקסלים',
+        () => px(o().dx, W), (v) => { o().dx = clamp(pct(v, W), -60, 60); }));
+      fields.push(numBox('Y', 'הזזה מהמקום שהתבנית קבעה, בפיקסלים',
+        () => px(o().dy, H), (v) => { o().dy = clamp(pct(v, H), -60, 60); }));
+    }
+    return el('div', { class: 'smr-edtb__row smr-ednum__row' }, fields);
+  }
+
+  // what a group selection shows instead of one thing's properties: what is
+  // in hand, how to align it, and the two verbs that work on all of it
+  function renderGroupToolbar() {
+    const list = targets();
+    const delB = el('button', {
+      class: 'btn btn--ghost smr-edtb__del', type: 'button',
+      title: 'מחיקת כל הפריטים המסומנים',
+    }, 'מחיקת הכל');
+    delB.addEventListener('click', () => deleteSel());
+    toolbar.replaceChildren(...[
+      el('div', { class: 'smr-edtb__row' },
+        el('span', { class: 'smr-edtb__name' }, list.length + ' פריטים מסומנים'),
+        delB),
+      alignRow(),
+      el('div', { class: 'smr-edtb__row smr-edtb__hint' },
+        'Shift + לחיצה מוסיפה או מורידה פריט · חצים מזיזים את כולם יחד'),
+    ].flat().filter(Boolean));
+  }
+
   function renderToolbar() {
     zoomUI = null;
     if (!sel) { toolbar.hidden = true; return; }
     toolbar.hidden = false;
+    if (selMore.length) { renderGroupToolbar(); syncPropsPane(); return; }
     if (sel.kind === 'block') renderBlockToolbar(sel.name);
     else if (sel.kind === 'slot') renderSlotToolbar(sel.n);
     else if (sel.kind === 'el') renderElToolbar(sel.key);
     else renderExtraToolbar(sel.index);
     // v1.8: every sub-renderer calls replaceChildren, so the depth stepper is
     // appended after the dispatch — one place, every kind of selection.
+    // v2.2 does the same for the two rows that belong to every movable
+    // selection, so no sub-renderer had to grow them: exact numbers, and
+    // align-to-slide (which is what "align" means with one thing in hand).
+    if (!toolbar.hidden) {
+      const lr = lockRow();
+      if (lr) toolbar.appendChild(lr);
+      const pr = posRow();
+      if (pr) toolbar.appendChild(pr);
+      if (movable(sel)) {
+        const ar = alignRow();
+        if (ar) for (const r of ar) toolbar.appendChild(r);
+      }
+    }
     const st = depthStepper();
     if (st && !toolbar.hidden) {
       toolbar.appendChild(el('div', { class: 'smr-edtb__row' },
         el('span', { class: 'smr-edtb__depthlbl' }, 'מתחת'), st));
     }
     syncPropsPane();
+  }
+
+  // ---------------- shared property rows (v2.2) ----------------
+
+  // One slider + its readout. getObj() is re-resolved on every event because
+  // commit()'s prune replaces the stored objects — a captured reference goes
+  // stale after the first change (the same trap zoomRow documents).
+  function sliderRow(label, o) {
+    const val = el('span', { class: 'smr-edtb__sz' }, o.fmt(o.get()));
+    const range = el('input', {
+      type: 'range', min: String(o.min), max: String(o.max), step: String(o.step),
+      value: String(o.get()),
+    });
+    range.addEventListener('input', () => {
+      o.set(Number(range.value));
+      val.textContent = o.fmt(Number(range.value));
+      commit({ defer: 140 });
+    });
+    range.addEventListener('change', () => commit());
+    const row = el('div', { class: 'smr-edtb__row' }, el('span', null, label), range, val);
+    if (o.reset) {
+      const r = el('button', {
+        class: 'mini', type: 'button', title: 'חזרה לברירת המחדל של התבנית',
+        onclick: () => { o.reset(); commit(); renderToolbar(); },
+      }, '↺');
+      row.appendChild(r);
+    }
+    return row;
+  }
+
+  // opacity — the one property every editor has and this one did not. Stops at
+  // 10%: a 0% element is invisible AND unclickable, which reads as "it broke".
+  function opacityRow(getObj) {
+    return sliderRow('שקיפות', {
+      min: 0.1, max: 1, step: 0.05,
+      get: () => { const o = getObj(); return (o && typeof o.opacity === 'number') ? o.opacity : 1; },
+      set: (v) => {
+        const o = getObj();
+        if (!o) return;
+        if (v >= 0.999) delete o.opacity; else o.opacity = Math.round(v * 100) / 100;
+      },
+      fmt: (v) => Math.round(v * 100) + '%',
+    });
+  }
+
+  // text alignment, in LOGICAL values — «start» is the RIGHT edge in Hebrew,
+  // which is why the labels say ימין/שמאל and the values do not. Words, not
+  // glyphs: the arrow glyphs that read as "align right" in an English editor
+  // (⯈ ⯇) are missing from the brand's Hebrew faces and rendered as tofu.
+  const TEXT_ALIGN = [
+    ['start', 'ימין', 'יישור לתחילת השורה (ימין)'],
+    ['center', 'מרכז', 'מרכוז'],
+    ['end', 'שמאל', 'יישור לסוף השורה (שמאל)'],
+    ['justify', 'מלא', 'מיושר לשני הצדדים'],
+  ];
+
+  function textRows(name) {
+    const b = () => design.blocks[name] || {};
+    const alignBtns = TEXT_ALIGN.map(([v, glyph, title]) => el('button', {
+      class: 'smr-edtg smr-edtg--w' + (b().align === v ? ' on' : ''), type: 'button', title,
+      onclick: () => {
+        const blk = blockOf(name);
+        if (blk.align === v) delete blk.align; else blk.align = v;
+        commit();
+        renderToolbar();
+      },
+    }, glyph));
+    return [
+      el('div', { class: 'smr-edtb__row' }, el('span', null, 'יישור'), alignBtns),
+      sliderRow('גובה שורה', {
+        min: 0.8, max: 2.2, step: 0.05,
+        get: () => (typeof b().lh === 'number' ? b().lh : 1.2),
+        set: (v) => { blockOf(name).lh = Math.round(v * 100) / 100; },
+        fmt: (v) => v.toFixed(2),
+        reset: () => { delete blockOf(name).lh; },
+      }),
+      sliderRow('ריווח אותיות', {
+        min: -0.05, max: 0.3, step: 0.005,
+        get: () => (typeof b().ls === 'number' ? b().ls : 0),
+        set: (v) => {
+          const blk = blockOf(name);
+          if (Math.abs(v) < 0.0025) delete blk.ls; else blk.ls = Math.round(v * 1000) / 1000;
+        },
+        fmt: (v) => (v > 0 ? '+' : '') + v.toFixed(3).replace(/0+$/, '').replace(/\.$/, '') + 'em',
+        reset: () => { delete blockOf(name).ls; },
+      }),
+      opacityRow(() => blockOf(name)),
+    ];
   }
 
   // «נייר» = the .photo paper mat (default) · «קו» = gold hairline · «בלי» = bare mask
@@ -1675,7 +2301,13 @@ export function initEditor(handle, slide, opts = {}) {
     }, 'מחיקה');
     delB.addEventListener('click', () => hideKey(name));
 
-    toolbar.replaceChildren(
+    // v2.2: the same text, styled the same way, on every slide of the carousel
+    const allB = applyAllBtn('החלת הסגנון על כל השקפים',
+      'כל שקף שיש בו טקסט בשם «' + name + '» יקבל את הגופן, הגודל, הצבע, ' +
+      'היישור והריווח של השקף הזה. הטקסט עצמו לא משתנה — רק הסגנון.',
+      () => ({ type: 'blockStyle', name, style: styleOfBlock(name) }));
+
+    toolbar.replaceChildren(...[
       el('div', { class: 'smr-edtb__row' },
         el('span', { class: 'smr-edtb__name' }, name),
         fontSel, boldB, italB,
@@ -1689,8 +2321,22 @@ export function initEditor(handle, slide, opts = {}) {
         commit();
         renderToolbar();
       }),
+      textRows(name),
+      allB ? el('div', { class: 'smr-edtb__row' }, allB) : null,
       dragHint(),
-    );
+    ].flat().filter(Boolean));
+  }
+
+  // What "the style" means when it travels to another slide: everything the
+  // block carries EXCEPT where it sits. dx/dy are this slide's nudge — copying
+  // them would drag the other slides' text off its own layout.
+  function styleOfBlock(name) {
+    const b = design.blocks[name] || {};
+    const out = {};
+    for (const k of ['font', 'size', 'bold', 'italic', 'color', 'align', 'lh', 'ls', 'opacity']) {
+      if (b[k] !== undefined) out[k] = b[k];
+    }
+    return out;
   }
 
   // computed CSS color -> nearest palette token (exactish match only) — used
@@ -1844,6 +2490,7 @@ export function initEditor(handle, slide, opts = {}) {
             renderToolbar();
           })
         : null,
+      opacityRow(() => elOf(key)),
       dragHint(),
     ].filter(Boolean));
   }
@@ -1920,6 +2567,7 @@ export function initEditor(handle, slide, opts = {}) {
             renderToolbar();
           })
         : null,
+      opacityRow(() => design.extras[i]),
       ex.type === 'photo' && extraCropOn
         ? el('div', { class: 'smr-edtb__row', style: { fontSize: '.78rem', color: 'var(--ink-soft,#6b5f63)' } },
             'גוררים את התמונה בתוך המסגרת · גלגלת = זום')
@@ -2918,6 +3566,10 @@ export function initEditor(handle, slide, opts = {}) {
     }
 
     if (design.bg && Object.keys(design.bg).length) {
+      const all = applyAllBtn('החלת הרקע הזה על כל השקפים',
+        'כל שקפי הקרוסלה יקבלו בדיוק את הרקע הזה. אפשר לבטל עם ⌘Z.',
+        () => ({ type: 'bg', bg: deepCopy(design.bg) }));
+      if (all) kids.push(all);
       kids.push(el('button', {
         class: 'btn btn--ghost smr-edtb__del', type: 'button',
         onclick: () => { delete design.bg; commit(); renderBgPanel(); renderLayersPanel(); },
@@ -2984,15 +3636,16 @@ export function initEditor(handle, slide, opts = {}) {
       commit();
       renderLayersPanel();
     });
+    const lock = lockMini({ kind: 'extra', index: i });
     const row = el('div', {
-      class: 'smr-edlyr__row' + (isSel ? ' on' : ''),
+      class: 'smr-edlyr__row' + (isSel ? ' on' : '') + (ex.lock ? ' is-locked' : ''),
       draggable: 'true',
       onclick: () => select({ kind: 'extra', index: design.extras.indexOf(ex) }, null, { keepTab: true }),
     },
       el('span', { class: 'smr-edlyr__grip', title: 'גוררים לשינוי הסדר' }, '⋮⋮'),
       thumb,
       el('span', { class: 'smr-edlyr__nm' }, extraLabel(ex)),
-      flip, del,
+      lock, flip, del,
     );
     row.addEventListener('dragstart', (e) => {
       lyrDrag = { ex, band };
@@ -3024,6 +3677,18 @@ export function initEditor(handle, slide, opts = {}) {
     return row;
   }
 
+  // the 🔒 in a layers row — the fast way to lock something down, and the ONLY
+  // way back once it is locked (the canvas can't reach a locked thing)
+  function lockMini(t) {
+    const on = isLocked(t);
+    const b = el('button', {
+      class: 'mini' + (on ? ' mini--locked' : ''), type: 'button',
+      title: on ? 'שחרור הנעילה' : 'נעילה — נשאר על השקף, מפסיק לזוז ולתפוס לחיצות',
+    }, on ? '🔒' : '🔓');
+    b.addEventListener('click', (e) => { e.stopPropagation(); toggleLock(t); });
+    return b;
+  }
+
   function bgRowSummary() {
     const bg = design.bg;
     if (!bg) return 'ברירת המחדל של התבנית';
@@ -3051,7 +3716,8 @@ export function initEditor(handle, slide, opts = {}) {
     const off = isHiddenKey(key);
     const isSel = !off && sameSel(sel, t);
     const row = el('div', {
-      class: 'smr-edlyr__row' + (isSel ? ' on' : '') + (off ? ' is-off' : ''),
+      class: 'smr-edlyr__row' + (isSel ? ' on' : '') + (off ? ' is-off' : '') +
+        (!off && isLocked(t) ? ' is-locked' : ''),
       title: off ? 'הוסתר מהשקף — «שחזר» מחזיר אותו'
         : 'שכבת תבנית — אפשר לבחור ולעצב, הסדר קבוע',
     },
@@ -3060,7 +3726,7 @@ export function initEditor(handle, slide, opts = {}) {
       off ? el('button', {
         class: 'mini mini--restore', type: 'button', title: 'החזרת הפריט לשקף',
         onclick: (e) => { e.stopPropagation(); restoreKey(key); },
-      }, 'שחזר') : null,
+      }, 'שחזר') : lockMini(t),
     );
     if (!off) row.addEventListener('click', () => select(t, null, { keepTab: true }));
     return row;
@@ -3346,6 +4012,9 @@ export function initEditor(handle, slide, opts = {}) {
     const pick = pickAt(e);
     const hit = pick && pick.target;
     if (!hit) { deselect(); return; }
+    // v2.2 — Shift adds to (or removes from) the group and starts no gesture:
+    // a shift-drag would be ambiguous the moment two things are in hand
+    if (e.shiftKey) { toggleInGroup(hit); return; }
     const d = { i: pick.index, n: pick.count };
     if (!sameSel(hit, sel)) select(hit, d);
     else if (!depth || depth.n !== pick.count) { depth = pick.count > 1 ? d : null; renderToolbar(); }
@@ -3365,6 +4034,9 @@ export function initEditor(handle, slide, opts = {}) {
     }
     // slots never move as frames — an empty slot click just selects it
     if (hit.kind === 'slot') return;
+    // a locked thing selects (from the layers panel it still can) but never
+    // drags; the toolbar says so and offers the unlock
+    if (isLocked(hit)) return;
 
     const node = targetEl(hit);
     let base;
@@ -3390,8 +4062,26 @@ export function initEditor(handle, slide, opts = {}) {
       snap: buildSnapSpec(hit, g0, base.dx, base.dy, resp),
       clamp: buildClampSpec(hit, g0, base.dx, base.dy, resp),
       snapX: null, snapY: null,   // the engaged candidate per axis (or null)
+      // v2.2: the rest of the group rides along. Only the primary snaps and
+      // clamps — a magnet per member would fight itself and tear the group
+      // apart, so they all take the primary's committed delta.
+      mates: sameSel(hit, sel) ? mateSpecs(hit) : [],
     };
     overlay.setPointerCapture(e.pointerId);
+  }
+
+  // base positions of every companion, captured at gesture start
+  function mateSpecs(primary) {
+    return selMore.filter((t) => movable(t) && !sameSel(t, primary)).map((t) => {
+      if (t.kind === 'extra') {
+        const ex = design.extras[t.index];
+        if (!ex) return null;
+        return { t, el: targetEl(t), baseDx: ex.x || 0, baseDy: ex.y || 0 };
+      }
+      const o = (t.kind === 'block' ? design.blocks : (design.els || {}))[
+        t.kind === 'block' ? t.name : t.key] || {};
+      return { t, el: targetEl(t), baseDx: o.dx || 0, baseDy: o.dy || 0 };
+    }).filter(Boolean);
   }
 
   let hoverRaf = 0;
@@ -3436,6 +4126,10 @@ export function initEditor(handle, slide, opts = {}) {
                     ges.snapY ? ges.snapY.line : null);
         ges.liveDx = nx; ges.liveDy = ny;
         liveMove(ges.target, ges.el, nx, ny);
+        if (ges.mates && ges.mates.length) {
+          const ddx = nx - ges.baseDx, ddy = ny - ges.baseDy;
+          for (const m of ges.mates) liveMove(m.t, m.el, m.baseDx + ddx, m.baseDy + ddy);
+        }
         // move the outline live even when the engine element is missing
         const g = geomOf(ges.target);
         if (g && !ges.el) {
@@ -3540,6 +4234,12 @@ export function initEditor(handle, slide, opts = {}) {
         const ex = design.extras[g.target.index];
         if (ex) { ex.x = round1(g.liveDx); ex.y = round1(g.liveDy); }
       }
+      // the group takes the same delta the primary actually landed on —
+      // after its magnets and its edge stop, not the raw pointer movement
+      if (g.mates && g.mates.length) {
+        const ddx = g.liveDx - g.baseDx, ddy = g.liveDy - g.baseDy;
+        for (const m of g.mates) moveTargetBy(m.t, ddx, ddy);
+      }
     } else if (g.mode === 'resize') {
       const ex = design.extras[g.target.index];
       if (ex && typeof g.liveW === 'number') ex.w = round1(g.liveW);
@@ -3559,8 +4259,134 @@ export function initEditor(handle, slide, opts = {}) {
   }
   function onCancel() { endGesture(false); }
 
+  // ---------------- keyboard (v2.2) ----------------
+  //
+  // The editor used to answer exactly one key (Escape). Everything below is
+  // the muscle memory anyone arrives with. Two guards decide whether a
+  // keystroke is ours at all, and they matter more than the shortcuts:
+  //   · an open in-place text edit owns the keyboard completely;
+  //   · so does any focused field — the sidebar now HAS fields (the library
+  //     search, the numeric position boxes), and without this guard typing
+  //     "delete" into the search box would delete the selected element.
+  // Undo/redo are not ours to implement: the deck lives in the host, so we
+  // just forward to opts.onUndo/onRedo (post.js's stack, build.js's stack).
+
+  const NUDGE = 0.1;        // % of the slide — ≈1px at 1080×1350
+  const NUDGE_BIG = 1;      // with Shift — ≈11px
+
+  function typingInField(t) {
+    if (!t || t === document.body) return false;
+    if (t.isContentEditable) return true;
+    return /^(INPUT|TEXTAREA|SELECT)$/.test(t.tagName || '');
+  }
+
   function onKey(e) {
-    if (e.key === 'Escape' && sel) { deselect(); }
+    if (destroyed || editing) return;
+    if (typingInField(e.target)) return;
+    const mod = e.metaKey || e.ctrlKey;
+    const k = e.key;
+
+    if (k === 'Escape') {
+      if (sel) { deselect(); e.preventDefault(); }
+      return;
+    }
+    if (mod && (k === 'z' || k === 'Z')) {
+      const fn = e.shiftKey ? opts.onRedo : opts.onUndo;
+      if (typeof fn === 'function') { e.preventDefault(); fn(); }
+      return;
+    }
+    if (mod && (k === 'y' || k === 'Y')) {
+      if (typeof opts.onRedo === 'function') { e.preventDefault(); opts.onRedo(); }
+      return;
+    }
+    if (mod && (k === 'c' || k === 'C')) { if (copySel()) e.preventDefault(); return; }
+    if (mod && (k === 'v' || k === 'V')) { if (pasteClip()) e.preventDefault(); return; }
+    // ⌘D is "bookmark this page" in Chrome, so it is swallowed unconditionally
+    // while the editor is armed — offering it and then letting the bookmark
+    // dialog open on a text block would be worse than not offering it at all
+    if (mod && (k === 'd' || k === 'D')) { e.preventDefault(); duplicateSel(); return; }
+    if (mod) return;                      // every other ⌘/Ctrl combo is the browser's
+
+    if (k === 'Delete' || k === 'Backspace') {
+      if (!sel) return;
+      e.preventDefault();
+      deleteSel();
+      return;
+    }
+    const step = e.shiftKey ? NUDGE_BIG : NUDGE;
+    const d = k === 'ArrowLeft' ? [-step, 0] : k === 'ArrowRight' ? [step, 0]
+      : k === 'ArrowUp' ? [0, -step] : k === 'ArrowDown' ? [0, step] : null;
+    if (d && sel) { e.preventDefault(); nudgeSel(d[0], d[1]); }
+  }
+
+  function nudgeSel(dx, dy) {
+    let moved = false;
+    for (const t of targets()) if (moveTargetBy(t, dx, dy)) moved = true;
+    if (!moved) return;
+    // defer the re-compose so a held arrow key streams instead of stuttering
+    commit({ defer: 180 });
+    renderToolbar();
+  }
+
+  function deleteSel() {
+    // extras go by index, so delete them high-index-first or the earlier
+    // splices shift the later ones out from under us
+    const list = targets();
+    const idx = list.filter((t) => t.kind === 'extra').map((t) => t.index)
+      .sort((a, b) => b - a);
+    for (const i of idx) design.extras.splice(i, 1);
+    for (const t of list) {
+      if (t.kind === 'block') hideOne(t.name);
+      else if (t.kind === 'el') hideOne(elHiddenKey(t.key));
+      else if (t.kind === 'slot') hideOne(slotKeyOf(t.n));
+    }
+    deselect();
+    commit();
+    renderLayersPanel();
+  }
+
+  // hideKey() deselects + commits + re-renders on every call; when a delete
+  // covers several things we want exactly one of each, at the end
+  function hideOne(key) {
+    if (!Array.isArray(design.hidden)) design.hidden = [];
+    if (!design.hidden.includes(key)) design.hidden.push(key);
+  }
+
+  // ---------------- clipboard (v2.2) ----------------
+  //
+  // `clipboard` is MODULE-level on purpose: moving to the next slide destroys
+  // this editor and builds a new one, and copy→next slide→paste is the whole
+  // point. Only extras travel — a block or a template element exists because
+  // the template drew it, so there is nothing to paste it into.
+
+  function copySel() {
+    const ex = sel && sel.kind === 'extra' ? design.extras[sel.index] : null;
+    if (!ex) return false;
+    clipboard = deepCopy(ex);
+    toast('הועתק — הדבקה עם ⌘V, גם בשקף אחר');
+    return true;
+  }
+
+  function pasteClip() {
+    if (!clipboard) return false;
+    const ex = deepCopy(clipboard);
+    ex.x = round1(clamp((Number(ex.x) || 0) + 3, -20, 100));
+    ex.y = round1(clamp((Number(ex.y) || 0) + 3, -20, 100));
+    design.extras.push(ex);
+    if (ex.type === 'photo' && ex.url && !photos.some((p) => p.url === ex.url)) {
+      photos.push({ url: ex.url, note: '' });
+    }
+    commit();
+    select({ kind: 'extra', index: design.extras.length - 1 });
+    return true;
+  }
+
+  function duplicateSel() {
+    if (!sel || sel.kind !== 'extra') return false;
+    const ex = design.extras[sel.index];
+    if (!ex) return false;
+    clipboard = deepCopy(ex);
+    return pasteClip();
   }
 
   // wheel over the live crop target = zoom (1..3), anchored to the current
@@ -3668,6 +4494,10 @@ export function initEditor(handle, slide, opts = {}) {
     addPhotoExtra,   // (url, xPct, yPct) — host fallback for off-overlay drops
     dropFiles,       // (files, xPct, yPct) — same, for file drops
     startTextEdit,   // (name, ev?) — in-place text editing entry point
-    openTab,         // ('props'|'lib'|'bg'|'layers') — host-driven tab switch
+    openTab,         // ('props'|'lib'|'bg'|'layers'|'slides') — host tab switch
+    // v2.2: hosts bind their own document-level keys (post.js pages slides
+    // with the arrows). They need to know whether an arrow press has anything
+    // to nudge before they page away from it.
+    hasSelection() { return !!sel; },
   };
 }

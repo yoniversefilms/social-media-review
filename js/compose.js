@@ -122,7 +122,8 @@ async function loadBrandAsset(name) {
 }
 
 /* == PARITY BLOCK — design overrides (v1 + bg v1.1 + slots/hidden v1.2 +
-   els/brand v1.6 + full-library element tagging v1.8)
+   els/brand v1.6 + full-library element tagging v1.8 +
+   text spacing & opacity v2.2)
    This block MUST stay textually identical to the same block in
    New_Workflow/studio/render.mjs. compose.js (browser preview) and render.mjs
    (final PNG) apply slide.design through these exact functions; any drift
@@ -146,6 +147,10 @@ const DESIGN_FONTS = {
 const RE_TOKEN = /^[a-z0-9-]+$/;                     // legal palette token name
 const RE_PHOTO_URL = /^(https?:|data:image\/|blob:)/; // legal photo src (extras + bg)
 const RE_FIELD = /^(deep|paper|warm)$/;              // legal bg.field values
+// v2.2 text alignment. LOGICAL values only — `start`/`end` mean right/left in
+// this RTL library and would have to be flipped by hand if they were physical,
+// which is exactly the bug an English-language editor would ship here.
+const RE_ALIGN = /^(start|center|end|justify)$/;
 // Gradients + tints (v1.9), straight off the brand guide pp. 9-10.
 // RE_GRAD covers both geometries: `grad-2` runs magenta-first in reading
 // order (the RTL default), `grad-2-ltr` is the printed left-to-right one.
@@ -187,6 +192,21 @@ function designBlockStyle(b) {
   if (b.color && RE_TOKEN.test(String(b.color))) s += 'color:var(--' + b.color + ');';
   if (b.bold) s += 'font-weight:700;';
   if (b.italic) s += 'font-style:italic;';
+  // v2.2 typography. line-height and letter-spacing are what actually decide
+  // whether Hebrew display type reads — more than bold or italic ever do.
+  // Alignment needs display:block: a {{var}} is substituted as an inline
+  // span, and text-align on an inline box does nothing at all. Block makes it
+  // fill the line box its template already gave it, so the alignment has
+  // something to align INSIDE, without changing where the box sits.
+  if (b.align && RE_ALIGN.test(String(b.align))) {
+    s += 'display:block;text-align:' + b.align + ';';
+  }
+  const lh = dnum(b.lh);
+  if (lh !== null) s += 'line-height:' + dround(dclamp(lh, 0.7, 3)) + ';';
+  const ls = dnum(b.ls);
+  if (ls !== null) s += 'letter-spacing:' + dround(dclamp(ls, -0.08, 0.6)) + 'em;';
+  const bop = dnum(b.opacity);
+  if (bop !== null) s += 'opacity:' + dround(dclamp(bop, 0, 1)) + ';';
   const dx = dnum(b.dx) || 0, dy = dnum(b.dy) || 0;
   if (dx || dy) {
     s += 'position:relative;left:' + dround(dx * DESIGN_W / 100) + 'px;top:' +
@@ -357,6 +377,8 @@ function designElStyle(e, paint) {
   if (paint && e.color && RE_TOKEN.test(String(e.color))) {
     s += paint + ':var(--' + e.color + ');';
   }
+  const op = dnum(e.opacity);           // v2.2
+  if (op !== null) s += 'opacity:' + dround(dclamp(op, 0, 1)) + ';';
   return s;
 }
 
@@ -527,6 +549,10 @@ function designExtraHtml(ex, i, svg) {
     'z-index:' + z + ';left:' + dround(x) + '%;top:' + dround(y) +
     '%;width:' + dround(w) + '%;';
   if (rot) pos += 'transform:rotate(' + dround(rot) + 'deg);';
+  // v2.2: opacity rides on the wrapper, so a photo extra fades WITH its paper
+  // mat and its border ring rather than through them
+  const exop = dnum(ex.opacity);
+  if (exop !== null) pos += 'opacity:' + dround(dclamp(exop, 0, 1)) + ';';
   if (ex.type === 'ill' || ex.type === 'brand') {
     const color = ex.color && RE_TOKEN.test(String(ex.color))
       ? 'color:var(--' + ex.color + ');' : '';

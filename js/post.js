@@ -9,16 +9,16 @@ import {
   listPins, addPin, deletePin, resolvePin,
   listReplies, addReply,
   listEdits,
-  setStage, setCaption,
+  setStage, setCaption, setReviewAt,
   listPhotos, uploadPhoto, photoUrl,
   listAssets, uploadAsset, assetRowUrl,
-  queuePublish, subscribe,
+  queuePublish, listQueue, rescheduleQueue, setQueueStatus, subscribe,
   savePostSlides, logEdit,
   saveTemplate,
   saveVersion, listVersions,
 } from './store.js';
 import {
-  el, modal, toast, fmtDate, voteGlyph,
+  el, modal, toast, fmtDate, fmtWhen, toLocalInput, fromLocalInput, voteGlyph,
   stageLabel, categoryLabel, STAGES, navBar,
 } from './ui.js';
 import { initCompose, mountSlide, manifest } from './compose.js';
@@ -73,6 +73,10 @@ const S = {
   histBatchOpen: false, // an undo snapshot already covers the pending batch
   histBatchField: null, // batching key: same-field commits fold into one step
   applyingHistory: false, // restoring a snapshot — don't re-mark boundaries
+  // v2.1 scheduling: this post's sm_publish rows (all statuses, newest first).
+  // Only 'queued' rows are a live schedule; the rest are history the modal
+  // shows so a reviewer can see a post already went out.
+  queue: [],
 };
 
 const params = new URLSearchParams(location.search);
@@ -182,7 +186,7 @@ function onRemoteChange() {
 
 async function refreshAll() {
   const pid = S.post.id;
-  const [post, votes, pins, edits, photos, assets] = await Promise.all([
+  const [post, votes, pins, edits, photos, assets, queue] = await Promise.all([
     getPost(pid).catch(() => null),
     listVotes().catch(() => []),
     listPins(pid).catch(() => []),
@@ -192,13 +196,21 @@ async function refreshAll() {
     // yet on an older board) must degrade to "no library", never to a broken
     // post page — the picker falls back to manifest + photos on its own.
     listAssets().catch(() => []),
+    // the queue is board-wide and filtered here; a miss (older board without
+    // sm_publish reachable) degrades to "no schedule", never to a broken page
+    listQueue().catch(() => []),
   ]);
+  S.queue = (Array.isArray(queue) ? queue : [])
+    .filter((q) => q.post_id === pid)
+    .sort((a, b) => String(b.created_at || '').localeCompare(String(a.created_at || '')));
   if (post) {
     const capEd = $('capEditor');
     const capOpen = !!capEd && !capEd.hidden;
     applyRemotePost(post);
-    renderHeader();
+    renderHeader();                 // renderHeader() re-renders the schedule bar
     if (!capOpen) renderCaption();
+  } else {
+    renderScheduleBar();            // post row unreadable this tick — queue still refreshed
   }
   S.votes = votes;
   if (typeof renderVoteBox === 'function') setTimeout(renderVoteBox, 0);
@@ -281,7 +293,242 @@ function renderHeader() {
     S.post.version ? el('span', { class: 'tag', style: { direction: 'ltr' } }, S.post.version) : null,
     el('span', { class: 'tag' }, `${slideTotal()} שקפים`),
   );
+  renderScheduleBar();
   renderPostNav();
+}
+
+// ------------------------------------------------------------- scheduling
+// v2.1. «תזמון» is a first-class action, not a tab: one button in the header,
+// always visible, plus chips that state the post's current schedule at a
+// glance. The פרטים tab no longer owns a second copy of the publish form —
+// same single-source rule that retired the duplicate nav in v1.7.
+
+function liveQueueRow() {
+  return (S.queue || []).find((q) => q.status === 'queued') || null;
+}
+
+function renderScheduleBar() {
+  const slot = $('pvSched');
+  if (!slot) return;
+
+  const btn = el('button', {
+    class: 'btn btn--primary pv-schedbtn', type: 'button',
+    title: 'תזמון הפוסט — לפרסום או לבדיקה',
+  }, '🗓️ תזמון');
+  btn.addEventListener('click', () => openScheduleModal());
+
+  const chips = [];
+  const q = liveQueueRow();
+  if (q) {
+    chips.push(el('button', {
+      class: 'sched-chip sched-chip--pub', type: 'button',
+      title: 'תזמון לפרסום — לחצו לעריכה',
+      onclick: () => openScheduleModal('publish'),
+    }, q.scheduled_for
+      ? `📣 פרסום: ${fmtWhen(q.scheduled_for)}`
+      : '📣 בתור לפרסום (בהרצה הקרובה)'));
+  }
+  if (S.post.review_at) {
+    chips.push(el('button', {
+      class: 'sched-chip sched-chip--rev' + (Date.parse(S.post.review_at) < Date.now() ? ' is-late' : ''),
+      type: 'button',
+      title: S.post.review_note || 'תזמון לבדיקה — לחצו לעריכה',
+      onclick: () => openScheduleModal('review'),
+    }, `👀 בדיקה: ${fmtWhen(S.post.review_at)}`));
+  }
+
+  slot.replaceChildren(btn, ...chips);
+}
+
+async function refreshQueue() {
+  try {
+    const rows = await listQueue();
+    S.queue = (Array.isArray(rows) ? rows : [])
+      .filter((q) => q.post_id === S.post.id)
+      .sort((a, b) => String(b.created_at || '').localeCompare(String(a.created_at || '')));
+  } catch {
+    S.queue = [];                 // a queue read must never break the page
+  }
+  renderScheduleBar();
+}
+
+// One modal, two modes. «לפרסום» writes sm_publish (channel + when + note);
+// «לבדיקה» writes sm_posts.review_at/review_note and can move the stage.
+// mode defaults to whichever the post already has, else 'publish'.
+function openScheduleModal(mode) {
+  const q = liveQueueRow();
+  const initial = mode || (S.post.review_at && !q ? 'review' : 'publish');
+  let cur = initial;
+
+  const tabPub = el('button', { class: 'sched-mode', type: 'button' }, '📣 לפרסום');
+  const tabRev = el('button', { class: 'sched-mode', type: 'button' }, '👀 לבדיקה');
+  const pane = el('div', { class: 'sched-pane' });
+  const hint = el('div', { class: 'sched-hint' });
+  const err = el('div', { class: 'sched-err', hidden: true });
+
+  // ---- publish pane
+  const chSel = el('select', { class: 'field__input' },
+    Object.entries(CHANNEL_LABELS).map(([v, l]) => {
+      const o = el('option', { value: v }, l);
+      if (q && q.channel === v) o.selected = true;
+      return o;
+    }));
+  const pubWhen = el('input', {
+    class: 'field__input', type: 'datetime-local',
+    value: q ? toLocalInput(q.scheduled_for) : '',
+  });
+  const pubNote = el('input', {
+    class: 'field__input', type: 'text',
+    placeholder: 'הערה למפרסם (לא חובה)…',
+    value: q ? (q.note || '') : '',
+  });
+
+  // ---- review pane
+  const revWhen = el('input', {
+    class: 'field__input', type: 'datetime-local',
+    value: toLocalInput(S.post.review_at),
+  });
+  const revNote = el('input', {
+    class: 'field__input', type: 'text',
+    placeholder: 'מה צריך להיבדק? (לא חובה)…',
+    value: S.post.review_note || '',
+  });
+  const revStage = el('input', { type: 'checkbox' });
+  revStage.checked = S.post.stage !== 'in_review';
+  const revStageRow = el('label', { class: 'sched-check' },
+    revStage, el('span', null, 'להעביר את הפוסט לשלב «בבדיקה»'));
+
+  const field = (label, input, note) => el('label', { class: 'field' },
+    el('div', { class: 'field__label' }, label),
+    input,
+    note ? el('div', { class: 'sched-sub' }, note) : null,
+  );
+
+  function fillPane() {
+    tabPub.classList.toggle('on', cur === 'publish');
+    tabRev.classList.toggle('on', cur === 'review');
+    err.hidden = true;
+    if (cur === 'publish') {
+      pane.replaceChildren(
+        field('ערוץ', chSel, q ? 'שינוי ערוץ יבטל את השורה בתור ויכניס אותה מחדש.' : null),
+        field('מתי לפרסם', pubWhen, 'ריק = בהרצת הפרסום הקרובה.'),
+        field('הערה למפרסם', pubNote),
+      );
+      hint.replaceChildren(
+        q ? 'הפוסט כבר בתור הפרסום — שמירה תעדכן את התזמון הקיים.'
+          : 'שמירה תכניס את הפוסט לתור הפרסום.',
+        canQueueStage() ? null : el('div', { class: 'sched-warn' },
+          `שימו לב: הפוסט בשלב «${stageLabel(S.post.stage)}» ולא «מאושר». אפשר לתזמן, אבל כדאי לאשר קודם.`),
+      );
+    } else {
+      pane.replaceChildren(
+        field('מתי לבדוק', revWhen, 'ריק = בלי תאריך יעד.'),
+        field('הערה לבודקים', revNote),
+        revStageRow,
+      );
+      hint.replaceChildren('התזמון לבדיקה מופיע על הפוסט ובגלריה — הוא לא מפרסם כלום.');
+    }
+  }
+
+  tabPub.addEventListener('click', () => { cur = 'publish'; fillPane(); });
+  tabRev.addEventListener('click', () => { cur = 'review'; fillPane(); });
+  fillPane();
+
+  const body = el('div', { class: 'sched-form' },
+    el('div', { class: 'sched-modes' }, tabPub, tabRev),
+    pane, hint, err,
+  );
+
+  // `q` above is the row as it was when the modal OPENED — good enough to
+  // prefill, wrong to write against: one save inside this modal changes it.
+  // Every handler below re-reads the live row instead.
+  const hasSomethingToClear = () => (cur === 'publish' ? !!liveQueueRow() : !!S.post.review_at);
+
+  const m = modal('תזמון — ' + (S.post.title || S.post.id), body, {
+    actions: [
+      {
+        label: 'ביטול תזמון',
+        onClick: (close) => {
+          if (!hasSomethingToClear()) {
+            showErr('אין תזמון לבטל.');
+            return false;
+          }
+          clearSchedule(cur).then(close).catch((e) => showErr(e.message));
+          return false;      // close only after the write lands
+        },
+      },
+      {
+        label: 'שמירה', primary: true,
+        onClick: (close) => {
+          saveSchedule(cur).then(close).catch((e) => showErr(e.message));
+          return false;
+        },
+      },
+    ],
+  });
+
+  function showErr(msg) {
+    err.textContent = msg;
+    err.hidden = false;
+  }
+
+  async function saveSchedule(which) {
+    if (which === 'publish') {
+      const live = liveQueueRow();
+      const when = fromLocalInput(pubWhen.value);
+      const note = pubNote.value.trim();
+      if (live && live.channel === chSel.value) {
+        await rescheduleQueue(live.id, { scheduled_for: when, note });
+      } else {
+        if (live) await setQueueStatus(live.id, 'canceled');   // channel changed
+        await queuePublish({
+          post_id: S.post.id, channel: chSel.value, note,
+          scheduled_for: when || undefined,
+        });
+      }
+      await refreshQueue();
+      toast(when ? 'תוזמן לפרסום: ' + fmtWhen(when, { relative: false }) : 'נוסף לתור הפרסום', 'ok');
+    } else {
+      const when = fromLocalInput(revWhen.value);
+      const row = await setReviewAt(S.post.id, when, revNote.value.trim());
+      S.post.review_at = row && 'review_at' in row ? row.review_at : when;
+      S.post.review_note = revNote.value.trim();
+      if (revStage.checked && S.post.stage !== 'in_review') {
+        try {
+          await setStage(S.post.id, 'in_review');
+          S.post.stage = 'in_review';
+        } catch (e) {
+          toast('התזמון נשמר, אבל השלב לא עודכן: ' + e.message, 'err');
+        }
+      }
+      renderHeader();
+      renderActiveTab(true);
+      toast(when ? 'תוזמן לבדיקה: ' + fmtWhen(when, { relative: false }) : 'נשמר לבדיקה', 'ok');
+    }
+  }
+
+  async function clearSchedule(which) {
+    if (which === 'publish') {
+      const live = liveQueueRow();
+      if (!live) throw new Error('אין תזמון פעיל לפרסום.');
+      await setQueueStatus(live.id, 'canceled');
+      await refreshQueue();
+      toast('הוסר מתור הפרסום', 'ok');
+    } else {
+      await setReviewAt(S.post.id, null, '');
+      S.post.review_at = null;
+      S.post.review_note = '';
+      renderHeader();
+      renderActiveTab(true);
+      toast('התזמון לבדיקה בוטל', 'ok');
+    }
+  }
+
+  return m;
+}
+
+function canQueueStage() {
+  return S.post.stage === 'approved' || S.post.stage === 'complete';
 }
 
 // ------------------------------------------------ post-to-post navigation
@@ -630,9 +877,11 @@ function commitDesign(i, design, opts = {}) {
 function destroyDesignEditor() {
   if (S.designCtrl) { S.designCtrl.destroy(); S.designCtrl = null; }
   S.designCtrlIdx = -1;
-  // the editor's action-bar buttons live in our bar (opts.actionBar) —
-  // destroy() removes its overlay but not the hosted row, so clear the slot
-  if (editorBarSlot) editorBarSlot.replaceChildren();
+  // v2.1: destroy() takes the whole sidebar with it — the host element it
+  // mounted into is ours and stays. Clearing it guards the one case destroy()
+  // can't cover: a controller that never armed (engine missing).
+  const host = document.getElementById('editPanelHost');
+  if (host) host.replaceChildren();
 }
 
 let designTimer = null;
@@ -691,9 +940,30 @@ async function mountDesign() {
       // post-scoped upload — it lands in that post's תמונות tab AND in the
       // board-wide library, exactly like a drop on the slide.
       uploadAsset: uploadFromEditor,
-      // v1.6: the editor's non-contextual buttons (הוסף איור / רקע / איפוס
-      // עיצוב…) render in the action bar ABOVE the slide, not on the artwork
-      actionBar: editorBarSlot,
+      // v2.1: every editing control lives in the editor's own sidebar, docked
+      // into the panel column while edit mode is armed (see setDesign). Drop
+      // this and the sidebar still works — it falls back to a fixed drawer —
+      // but it would float over the review panel instead of replacing it.
+      sidebar: $('editPanelHost'),
+      // v2.2: ⌘Z / ⌘⇧Z inside the editor. The stack is THIS page's (it covers
+      // caption and text edits too, not just design), so the editor only
+      // forwards the intent.
+      onUndo: () => undoStep(),
+      onRedo: () => redoStep(),
+      // v2.2: the deck strip in the sidebar — move between slides without
+      // leaving edit mode. Thumbs are the studio's own renders.
+      deck: {
+        count: slideTotal(),
+        index: i,
+        thumb: (n) => slideUrl(S.post, n),
+        label: (n) => 'שקף ' + (n + 1),
+        go: (n) => goTo(n),
+      },
+      // v2.2: one change, every slide of the carousel. The editor holds ONE
+      // slide, so it hands us the change and we walk the deck — as a single
+      // undo step, because "apply to all" is one action to the person who
+      // pressed it.
+      onApplyAll: (p) => applyToAllSlides(p),
       // v1.5: a design mutation is a committed change — it writes into the
       // working slides and saves (debounced ~2s) straight to everyone.
       onChange: (design) => {
@@ -734,6 +1004,53 @@ async function mountDesign() {
     console.warn('initEditor unavailable:', e && e.message);
   }
   if (wasMissing !== S.designEngineMissing && designMode()) renderViewer();
+}
+
+// -------------------------------------------- apply to every slide (v2.2)
+//
+// The editor describes the change; the deck is ours to walk. Two shapes so
+// far — a background, and one text block's style — and both are written the
+// same way: through commitDesign, so every slide gets its own audit row and
+// its own «applied» edit in the learning loop, exactly as if the reviewer had
+// made the change by hand on each one. withOneUndoStep wraps the lot, because
+// «apply to all» is a single action to whoever pressed the button.
+function applyToAllSlides(p) {
+  if (!p || !p.type) return;
+  const n = slideTotal();
+  let touched = 0;
+  withOneUndoStep('applyAll', () => {
+    for (let j = 0; j < n; j++) {
+      const s = S.slides[j];
+      if (!s) continue;
+      const d = s.design ? deepCopy(s.design) : {};
+      if (p.type === 'bg') {
+        d.bg = deepCopy(p.bg);
+      } else if (p.type === 'blockStyle') {
+        // only slides that HAVE this text block — a template without it would
+        // otherwise collect a styling orphan that nothing ever renders
+        const has = s.vars && Object.prototype.hasOwnProperty.call(s.vars, p.name);
+        if (!has) continue;
+        d.blocks = d.blocks || {};
+        const keep = d.blocks[p.name] || {};
+        // position is this slide's own nudge — the style travels, the place
+        // it was nudged to does not
+        const next = { ...deepCopy(p.style) };
+        if (typeof keep.dx === 'number') next.dx = keep.dx;
+        if (typeof keep.dy === 'number') next.dy = keep.dy;
+        d.blocks[p.name] = next;
+      } else {
+        return;
+      }
+      commitDesign(j, d, { delay: 500 });
+      touched++;
+    }
+  });
+  if (!touched) { toast('אין שקף נוסף שהשינוי הזה חל עליו'); return; }
+  destroyDesignEditor();
+  mountDesignSoon(0);
+  toast(p.type === 'bg'
+    ? `הרקע הוחל על ${touched} שקפים`
+    : `הסגנון הוחל על ${touched} שקפים`, 'ok');
 }
 
 // -------------------------------------------- drag & drop photos onto the slide
@@ -1047,12 +1364,12 @@ function remountAfterRemote() {
 }
 
 // v1.6 action bar — one calm row ABOVE the slide: undo/redo + save chip +
-// «שכפל פוסט», plus a slot that hosts the design editor's own buttons
-// (initEditor's actionBar option) while design mode is armed. Nothing
-// action-like overlays the slide artwork from this page's side.
+// download + «שכפל פוסט». Nothing action-like overlays the slide artwork from
+// this page's side. v2.1: the editing controls (undo/redo, the save chip,
+// «שמור כתבנית») move OUT of this row into the sidebar's head while edit mode
+// is armed — see moveEditChrome. The row keeps only page-level actions.
 let histUndoBtn = null;
 let histRedoBtn = null;
-let editorBarSlot = null;
 let tplSaveBtn = null;
 
 function wireSaveChip() {
@@ -1063,10 +1380,6 @@ function wireSaveChip() {
       fontSize: '.78rem', color: 'var(--ink-soft)', minWidth: '64px',
       textAlign: 'start', whiteSpace: 'nowrap',
     },
-  });
-  editorBarSlot = el('span', {
-    id: 'editorBarSlot',
-    style: { display: 'inline-flex', alignItems: 'center' },
   });
   histUndoBtn = el('button', {
     class: 'btn btn--ghost hist-btn', type: 'button', id: 'undoBtn',
@@ -1087,12 +1400,120 @@ function wireSaveChip() {
     title: 'שמירת השקף הנוכחי, על העיצוב שלו, כתבנית לשימוש חוזר',
   }, 'שמור כתבנית');
   tplSaveBtn.addEventListener('click', openSaveTemplateModal);
-  if (bar) bar.replaceChildren(editorBarSlot, histUndoBtn, histRedoBtn, saveChipEl, tplSaveBtn, dupBtn);
+  const dlBtn = el('button', {
+    class: 'btn btn--ghost', type: 'button', id: 'dlBtn',
+    title: 'הורדת השקף הזה או כל השקפים כקובצי PNG',
+  }, '⬇︎ הורדה');
+  dlBtn.addEventListener('click', openDownloadModal);
+  if (bar) bar.replaceChildren(histUndoBtn, histRedoBtn, saveChipEl, tplSaveBtn, dlBtn, dupBtn);
   const flushNow = () => { if (saveTimer) flushSave(); };
   window.addEventListener('pagehide', () => { flushNow(); stampVersion(); });
   document.addEventListener('visibilitychange', () => {
     if (document.visibilityState === 'hidden') { flushNow(); stampVersion(); }
   });
+}
+
+// ---------------------------------------------------------------- download
+// v2.1. Downloads the STUDIO RENDERS (the PNGs in the sm-assets bucket) — the
+// same files the publisher hands to Meta, so what you download is what would
+// actually be posted.
+//
+// The load-bearing caveat: those PNGs are re-rendered by the factory, not by
+// this app. A post edited on the board (text, design, photos) has a live
+// preview that is AHEAD of its PNG, and the download would be the pre-edit
+// image. That is exactly the case a reviewer most wants to share, so the
+// modal says so out loud instead of quietly handing over stale pixels.
+// Rasterising the live compose in-browser is a real build (font + photo
+// inlining, foreignObject → canvas) and is deliberately NOT faked here.
+
+function pngIsStale() {
+  const designed = Array.isArray(S.slides)
+    && S.slides.some((s) => s && s.design && Object.keys(s.design).length > 0);
+  return designed || (S.versionRows || []).length > 0;
+}
+
+function slideFileName(i) {
+  const base = String(S.post.id || 'post').replace(/[^\w.-]+/g, '-');
+  return `${base}-slide-${String(i + 1).padStart(2, '0')}.png`;
+}
+
+// Fetch → object URL → click. Going through a blob (rather than putting the
+// storage URL straight on the anchor) is what makes `download` actually rename
+// the file: a cross-origin href makes the browser ignore the attribute and
+// navigate to the image instead.
+async function downloadSlide(i) {
+  const res = await fetch(slideUrl(S.post, i), { cache: 'no-store' });
+  if (!res.ok) throw new Error(`שקף ${i + 1}: ${res.status}`);
+  const blob = await res.blob();
+  const url = URL.createObjectURL(blob);
+  const a = el('a', { href: url, download: slideFileName(i) });
+  document.body.appendChild(a);
+  a.click();
+  a.remove();
+  setTimeout(() => URL.revokeObjectURL(url), 4000);
+}
+
+function openDownloadModal() {
+  const total = slideTotal();
+  const cur = S.cur;
+
+  // Builder posts that were never rendered by the factory have no PNGs at all.
+  if (!S.post.asset_prefix) {
+    modal('הורדת שקפים', el('div', { class: 'sched-hint' },
+      'לפוסט הזה אין עדיין רינדור מהסטודיו, ולכן אין קובצי PNG להורדה. ',
+      'פוסטים שנבנו בכלי מקבלים רינדור אחרי שהמפעל מריץ אותם.'));
+    return;
+  }
+
+  const status = el('div', { class: 'sched-hint' });
+  const one = el('button', { class: 'btn btn--primary', type: 'button' }, `השקף הנוכחי (${cur + 1})`);
+  const all = el('button', { class: 'btn btn--ghost', type: 'button' }, `כל השקפים (${total})`);
+
+  const body = el('div', { class: 'sched-form' },
+    pngIsStale()
+      ? el('div', { class: 'dz-warn' },
+          el('b', null, 'שימו לב: ההורדה היא הרינדור מהסטודיו.'),
+          el('div', { class: 'sched-sub' },
+            'לפוסט הזה יש עריכות שנעשו בלוח (טקסט או עיצוב) שעדיין לא עברו רינדור מחדש. ',
+            'הקבצים שיירדו לא כוללים אותן — הם מה שיתפרסם היום. ',
+            'לקבלת הקבצים המעודכנים צריך רינדור מחדש במפעל.'))
+      : null,
+    el('div', { class: 'sched-hint' },
+      'הקבצים יורדים בגודל המקורי (1080×1350), אותם קבצים שנשלחים לפרסום.'),
+    el('div', { class: 'toolbar', style: { display: 'flex', gap: '8px', marginTop: '10px' } }, one, all),
+    status,
+  );
+  const m = modal('הורדת שקפים — ' + (S.post.title || S.post.id), body);
+
+  const run = async (indices, btn) => {
+    one.disabled = true; all.disabled = true;
+    let done = 0;
+    const failed = [];
+    for (const i of indices) {
+      status.textContent = `מוריד ${done + 1} מתוך ${indices.length}…`;
+      try {
+        await downloadSlide(i);
+        done++;
+      } catch (e) {
+        failed.push(i + 1);
+      }
+      // Chrome asks once about "multiple downloads" and then throttles; a beat
+      // between saves keeps the browser from dropping the later files.
+      if (indices.length > 1) await new Promise((r) => setTimeout(r, 350));
+    }
+    one.disabled = false; all.disabled = false;
+    if (failed.length) {
+      status.textContent = `ירדו ${done} קבצים. נכשלו שקפים: ${failed.join(', ')}.`;
+      toast('חלק מהשקפים לא ירדו', 'err');
+    } else {
+      status.textContent = '';
+      toast(done === 1 ? 'השקף ירד' : `${done} שקפים ירדו`, 'ok');
+      m.close();
+    }
+  };
+
+  one.addEventListener('click', () => { run([cur], one); });
+  all.addEventListener('click', () => { run([...Array(total).keys()], all); });
 }
 
 // -------------------------------------------- undo/redo engine (v1.6)
@@ -1270,12 +1691,40 @@ function setDesign(on) {
     b.classList.toggle('on', want);
     b.setAttribute('aria-pressed', want ? 'true' : 'false');
   }
+  // v2.1 — edit mode is a MODE: the panel column stops being the review panel
+  // and becomes the editing sidebar. One of the two asides is always hidden,
+  // so .pv-main stays a two-column grid and the slide never moves.
+  const rp = document.getElementById('reviewPanel');
+  const ep = document.getElementById('editPanel');
+  if (rp) rp.hidden = want;
+  if (ep) ep.hidden = !want;
+  moveEditChrome(want);
+  // pinning a comment is a REVIEW action — it has no place in edit mode, and
+  // its armed overlay would fight the editor's for the same clicks
+  const pin = $('pinBtn');
+  if (pin) pin.hidden = want;
+  if (want && S.pinMode) setPinMode(false);
   if (!want) {
     destroyDesignEditor();
     S.designMountEl = null;
   }
   renderViewer();
   renderDesignState();  // «שמור כתבנית» only shows while design is armed
+}
+
+// v2.1 — undo/redo, the save chip and «שמור כתבנית» are the EDITING session's
+// controls, so they travel into the sidebar's head while it is armed and come
+// back to the action bar when it closes. The SAME nodes are re-parented:
+// nothing is duplicated, and renderHistButtons / renderDesignState keep
+// working on them without knowing where they currently live.
+function moveEditChrome(on) {
+  const head = document.getElementById('editPanelHead');
+  const bar = $('actionBar');
+  if (!head || !bar) return;
+  const movers = [histUndoBtn, histRedoBtn, saveChipEl, tplSaveBtn].filter(Boolean);
+  if (on) { head.replaceChildren(...movers); return; }
+  const dup = document.getElementById('dupBtn');
+  for (const n of movers) bar.insertBefore(n, dup || null);
 }
 
 function wireDesignBtn() {
@@ -1908,32 +2357,40 @@ function renderInfoTab() {
     el('span', { class: 'v' + (ltr ? ' ltr' : '') }, v),
   ));
 
-  const canQueue = S.post.stage === 'approved' || S.post.stage === 'complete';
-  let publishBlock = null;
-  if (canQueue) {
-    const ch = el('select', { class: 'field__input' },
-      Object.entries(CHANNEL_LABELS).map(([v, l]) => el('option', { value: v }, l)));
-    const pNote = el('input', { class: 'field__input', type: 'text', placeholder: 'הערה למפרסם (לא חובה)…' });
-    const qBtn = el('button', { class: 'btn btn--primary', type: 'button' }, 'הוסף לתור הפרסום');
-    qBtn.addEventListener('click', async () => {
-      qBtn.disabled = true;
-      try {
-        await queuePublish({ post_id: S.post.id, channel: ch.value, note: pNote.value.trim() });
-        toast('נוסף לתור הפרסום', 'ok');
-        pNote.value = '';
-      } catch (e) {
-        toast('לא נוסף לתור: ' + e.message, 'err');
-      } finally {
-        qBtn.disabled = false;
-      }
-    });
-    publishBlock = el('div', { class: 'dt-publish' },
-      el('b', null, 'פרסום'),
-      el('span', { class: 'pv-note' }, 'הפוסט מאושר — אפשר להוסיף אותו לתור הפרסום.'),
-      el('div', { class: 'dt-stage' }, ch, qBtn),
-      pNote,
-    );
+  // v2.1: the publish FORM that used to live here is gone. Scheduling (both
+  // kinds) is the header's «🗓️ תזמון» button — one implementation, always
+  // visible, never behind a tab. What stays here is a read-only statement of
+  // where the post stands plus a shortcut to that same modal.
+  const q = liveQueueRow();
+  const done = (S.queue || []).filter((r) => r.status === 'published');
+  const schedBtn = el('button', { class: 'btn btn--primary', type: 'button' }, '🗓️ פתיחת התזמון');
+  schedBtn.addEventListener('click', () => openScheduleModal());
+
+  const lines = [];
+  if (q) {
+    lines.push(el('span', { class: 'pv-note' }, q.scheduled_for
+      ? `בתור לפרסום (${CHANNEL_LABELS[q.channel] || q.channel}) · ${fmtWhen(q.scheduled_for)}`
+      : `בתור לפרסום (${CHANNEL_LABELS[q.channel] || q.channel}) · בהרצה הקרובה`));
   }
+  if (S.post.review_at) {
+    lines.push(el('span', { class: 'pv-note' }, `מתוזמן לבדיקה · ${fmtWhen(S.post.review_at)}`));
+  }
+  if (done.length) {
+    lines.push(el('span', { class: 'pv-note' }, `פורסם ${done.length === 1 ? 'פעם אחת' : done.length + ' פעמים'} · אחרון: ${fmtWhen(done[0].updated_at || done[0].created_at)}`));
+  }
+  if (!lines.length) {
+    lines.push(el('span', { class: 'pv-note' }, 'הפוסט לא מתוזמן — לא לפרסום ולא לבדיקה.'));
+  }
+  if (!canQueueStage()) {
+    lines.push(el('span', { class: 'pv-note' },
+      `לפני פרסום כדאי להעביר את הפוסט לשלב «${stageLabel('approved')}» (עכשיו: «${stageLabel(S.post.stage)}»).`));
+  }
+
+  const publishBlock = el('div', { class: 'dt-publish' },
+    el('b', null, 'תזמון'),
+    ...lines,
+    el('div', { class: 'dt-stage' }, schedBtn),
+  );
 
   // «שכפל פוסט» moved to the action bar above the slide (v1.6); prev/next +
   // «לגלריה» moved to the header's .pv-nav (v1.7) — no duplicate navigation here.
@@ -1950,6 +2407,20 @@ function onKeydown(e) {
   const t = e.target;
   // native text undo owns inputs/textareas/contentEditable until commit
   if (t && (/^(INPUT|TEXTAREA|SELECT)$/.test(t.tagName) || t.isContentEditable)) return;
+  // v2.2 — while the design editor is armed IT owns the keyboard. Both
+  // handlers sit on document and both would run: without this, one ⌘Z undid
+  // twice (the editor forwards ⌘Z straight back to undoStep below), and one
+  // ArrowLeft both nudged the selected element AND paged to the next slide.
+  // Arrows only defer when something is actually selected — with an empty
+  // selection there is nothing to nudge, so they keep paging.
+  const armed = designMode() && S.designCtrl;
+  if (armed) {
+    if (e.metaKey || e.ctrlKey) return;            // undo/redo, copy/paste/duplicate
+    if (e.key === 'Delete' || e.key === 'Backspace' || e.key === 'Escape') return;
+    if (e.key === 'ArrowUp' || e.key === 'ArrowDown') return;
+    if ((e.key === 'ArrowLeft' || e.key === 'ArrowRight') &&
+        typeof S.designCtrl.hasSelection === 'function' && S.designCtrl.hasSelection()) return;
+  }
   if ((e.metaKey || e.ctrlKey) && (e.key === 'z' || e.key === 'Z')) {
     e.preventDefault();
     if (e.shiftKey) redoStep(); else undoStep();
