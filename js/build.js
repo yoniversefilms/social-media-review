@@ -9,6 +9,7 @@ import {
   initStore, assetUrl, getPost, createBuilderPost, uploadPhoto,
   saveDraft, deleteDraft, listDrafts,
   listTemplates, deleteTemplate, whoAmI,
+  listAssets, assetRowUrl,
 } from './store.js';
 import { el as h, navBar, toast, modal } from './ui.js';
 import { initCompose, mountSlide, manifest } from './compose.js';
@@ -28,6 +29,39 @@ let saving = false;
 // uses it, then mints a fresh one for the next draft.
 let draftId = newId();
 let draftPhotos = [];          // photos uploaded via drag-drop this session ({url, note})
+// v2.0: the board-wide asset library, loaded once at boot and topped up as
+// this session uploads. The builder's editor picks from the same one library
+// the post page does — a photo a therapist uploaded on a post is usable here.
+let libAssets = [];            // sm_assets rows (raw)
+
+function designAssets() {
+  return libAssets.map((a) => ({
+    id: a.id,
+    kind: a.kind || 'other',
+    source: a.source || 'upload',
+    name: a.name || '',
+    label: a.label || '',
+    tags: Array.isArray(a.tags) ? a.tags : [],
+    post_id: a.post_id || null,
+    url: assetRowUrl(a),
+  })).filter((a) => a.url);
+}
+
+async function refreshAssets() {
+  libAssets = await listAssets().catch(() => []);
+  if (edCtrl && edCtrl.setAssets) edCtrl.setAssets(designAssets());
+}
+
+// Uploads from the builder land on the draft's pre-minted post id, so they
+// are already attached when the post saves under that same id — and (v2.0)
+// they earn a library row with that post_id, so the «בפוסט הזה» filter works
+// on the draft too.
+async function uploadToDraft(file) {
+  const res = await uploadPhoto({ post_id: draftId, pin_id: null, file, note: 'נוסף מהעורך' });
+  if (res && res.url) draftPhotos.push({ url: res.url, note: '' });
+  refreshAssets().catch(() => {});
+  return res;
+}
 /* design mode (editor.js over the large preview) */
 let designOn = false;
 let stageHandle = null;        // compose mountSlide handle for the stage
@@ -61,6 +95,7 @@ const sampleCache = new Map(); // template name -> sample vars (frozen master co
   $('b-save').addEventListener('click', save);
   $('b-design').addEventListener('click', toggleDesign);
   wireAutosave();
+  refreshAssets().catch(() => {});   // v2.0 library — never blocks the build UI
 
   // ?from=<post_id> — start from an existing post (a "spin")
   const from = new URLSearchParams(location.search).get('from');
@@ -608,14 +643,11 @@ function armEditor() {
       manifest: manifest(),
       assetUrl,
       photos: draftPhotos,
-      photosEmptyText: 'עוד אין תמונות בטיוטה — גוררים קובץ תמונה מהמחשב ישירות אל השקף, והוא יועלה ויתווסף.',
-      uploadFile: async (file) => {
-        // uploads land on the draft's pre-minted post id, so they are already
-        // attached when the post is saved with that same id
-        const res = await uploadPhoto({ post_id: draftId, pin_id: null, file, note: 'נוסף מהעורך' });
-        if (res && res.url) draftPhotos.push({ url: res.url, note: '' });
-        return res;
-      },
+      assets: designAssets(),
+      postId: draftId,
+      photosEmptyText: 'עוד אין נכסים בלוח — אפשר להעלות קובץ כאן, או לגרור תמונה מהמחשב ישירות אל השקף.',
+      uploadFile: uploadToDraft,
+      uploadAsset: uploadToDraft,
       onChange: (design) => {
         const s = slides[idx];
         if (!s) return;

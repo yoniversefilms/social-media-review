@@ -11,6 +11,7 @@ import {
   listEdits,
   setStage, setCaption,
   listPhotos, uploadPhoto, photoUrl,
+  listAssets, uploadAsset, assetRowUrl,
   queuePublish, subscribe,
   savePostSlides, logEdit,
   saveTemplate,
@@ -45,6 +46,7 @@ const S = {
   repliesByPin: new Map(),
   edits: [],
   photos: [],
+  assets: [],           // v2.0 board-wide asset library (sm_assets rows)
   tab: 'caption',
   voteSel: null,        // locally selected vote before שמור
   editAccEl: null,      // cached accordion element (survives re-renders)
@@ -180,12 +182,16 @@ function onRemoteChange() {
 
 async function refreshAll() {
   const pid = S.post.id;
-  const [post, votes, pins, edits, photos] = await Promise.all([
+  const [post, votes, pins, edits, photos, assets] = await Promise.all([
     getPost(pid).catch(() => null),
     listVotes().catch(() => []),
     listPins(pid).catch(() => []),
     listEdits(pid).catch(() => []),
     listPhotos(pid).catch(() => []),
+    // the library is board-wide, so a miss here (e.g. sm_assets not applied
+    // yet on an older board) must degrade to "no library", never to a broken
+    // post page — the picker falls back to manifest + photos on its own.
+    listAssets().catch(() => []),
   ]);
   if (post) {
     const capEd = $('capEditor');
@@ -200,7 +206,11 @@ async function refreshAll() {
     (a.slide - b.slide) || String(a.created_at || '').localeCompare(String(b.created_at || '')));
   S.edits = edits;
   S.photos = photos;
-  if (S.designCtrl) S.designCtrl.setPhotos(designPhotos());
+  S.assets = assets;
+  if (S.designCtrl) {
+    S.designCtrl.setPhotos(designPhotos());
+    if (S.designCtrl.setAssets) S.designCtrl.setAssets(designAssets());
+  }
 
   const reps = await Promise.all(S.pins.map((p) => listReplies(p.id).catch(() => [])));
   S.repliesByPin = new Map(S.pins.map((p, i) => [p.id, reps[i]]));
@@ -551,6 +561,22 @@ function designPhotos() {
   return S.photos.map((ph) => ({ url: photoUrl(ph), note: ph.note || '' }));
 }
 
+// v2.0 — the whole board library, shaped for the editor's «ספריית נכסים»
+// picker: URLs resolved here (the editor is network-free), studio drawings
+// and reviewer uploads in one list. S.assets is refreshed by refreshAll().
+function designAssets() {
+  return (S.assets || []).map((a) => ({
+    id: a.id,
+    kind: a.kind || 'other',
+    source: a.source || 'upload',
+    name: a.name || '',
+    label: a.label || '',
+    tags: Array.isArray(a.tags) ? a.tags : [],
+    post_id: a.post_id || null,
+    url: assetRowUrl(a),
+  })).filter((a) => a.url);
+}
+
 // ---- v1.5 commit primitives: every committed change lands in the working
 // copy, records its old→new pair (relative to the last-saved state), and
 // schedules the shared save. audit rows use '' for an absent design so
@@ -657,8 +683,14 @@ async function mountDesign() {
     S.designCtrl = initEditor(handle, composed, {
       manifest: manifest(),
       photos: designPhotos(),
+      assets: designAssets(),
+      postId: S.post.id,
       assetUrl,
       uploadFile: uploadFromEditor,
+      // v2.0: the picker's upload tile. Uploading from inside a post is a
+      // post-scoped upload — it lands in that post's תמונות tab AND in the
+      // board-wide library, exactly like a drop on the slide.
+      uploadAsset: uploadFromEditor,
       // v1.6: the editor's non-contextual buttons (הוסף איור / רקע / איפוס
       // עיצוב…) render in the action bar ABOVE the slide, not on the artwork
       actionBar: editorBarSlot,

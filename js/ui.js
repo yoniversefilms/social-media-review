@@ -11,7 +11,8 @@
 //   stageLabel(s) / categoryLabel(c)
 //   STAGES / CATEGORIES              ordered [{key, label}] arrays
 //   STAGE_LABELS / CATEGORY_LABELS   plain {key: label} maps
-//   navBar(active)                   shared top bar ('index'|'build'|'queue')
+//   navBar(active)                   shared top bar ('index'|'build'|'discuss'|
+//                                    'assets'|'queue'|'backend')
 //   injectFonts(assetUrlFn)          runtime @font-face for Assistant
 
 // ---------------------------------------------------------------- el
@@ -219,6 +220,7 @@ export function navBar(active) {
     { key: 'index', href: 'index.html' + q, label: 'הגלריה' },
     { key: 'build', href: 'build.html' + q, label: 'בונים פוסט' },
     { key: 'discuss', href: 'discuss.html' + q, label: 'שיחות' },
+    { key: 'assets', href: 'assets.html' + q, label: 'נכסים' },
     { key: 'queue', href: 'queue.html' + q, label: 'תור פרסום' },
     { key: 'backend', href: 'backend.html' + q, label: 'Backend' },
   ];

@@ -121,7 +121,8 @@ async function loadBrandAsset(name) {
   return svg;
 }
 
-/* == PARITY BLOCK — design overrides (v1 + bg v1.1 + slots/hidden v1.2 + els/brand v1.6)
+/* == PARITY BLOCK — design overrides (v1 + bg v1.1 + slots/hidden v1.2 +
+   els/brand v1.6 + full-library element tagging v1.8)
    This block MUST stay textually identical to the same block in
    New_Workflow/studio/render.mjs. compose.js (browser preview) and render.mjs
    (final PNG) apply slide.design through these exact functions; any drift
@@ -145,6 +146,29 @@ const DESIGN_FONTS = {
 const RE_TOKEN = /^[a-z0-9-]+$/;                     // legal palette token name
 const RE_PHOTO_URL = /^(https?:|data:image\/|blob:)/; // legal photo src (extras + bg)
 const RE_FIELD = /^(deep|paper|warm)$/;              // legal bg.field values
+// Gradients + tints (v1.9), straight off the brand guide pp. 9-10.
+// RE_GRAD covers both geometries: `grad-2` runs magenta-first in reading
+// order (the RTL default), `grad-2-ltr` is the printed left-to-right one.
+const RE_GRAD = /^grad-[123](?:-ltr)?$/;             // legal bg.gradient values
+const RE_TINT_CLASS = /^slide--tint-(?:red|blue|orange|gold)-\d+$/;
+const RE_GRAD_CLASS = /^slide--grad-[123](?:-ltr)?$/;
+const TINT_FAMS = ['red', 'blue', 'orange', 'gold']; // the guide's four groups
+const TINT_STEPS = [100, 70, 50, 35, 18, 7];         // and their six steps
+// The only steps dark enough to take light type. Everything else in every
+// family — including orange-100 and gold-100, which read far lighter than
+// they look beside the burgundy — pairs with the paper polarity. Measured in
+// docs/GRADIENTS-AND-TINTS.md; do not widen this by eye.
+const RE_TINT_DEEP = /^(?:red|blue)-(?:100|70)$/;
+// "<family>-<step>" for a valid bg.tint, else null. step is accepted as a
+// number or a numeric string — the editor writes numbers, hand-authored JSON
+// and anything that has been through a form does not always.
+const tintKey = (t) => {
+  if (!t || typeof t !== 'object') return null;
+  const fam = String(t.color || '');
+  const step = Number(t.step);
+  return (TINT_FAMS.includes(fam) && TINT_STEPS.includes(step))
+    ? fam + '-' + step : null;
+};
 const dnum = (v) => (typeof v === 'number' && Number.isFinite(v) ? v : null);
 const dround = (v) => Math.round(v * 100) / 100;
 const dclamp = (v, lo, hi) => Math.min(hi, Math.max(lo, v));
@@ -246,81 +270,214 @@ function applySlots(html, slots, hiddenSlots) {
   return { html: out, count, filled, bad };
 }
 
-// Decorative template elements (design.els v1.6). .rule / .lockup / .torn
-// are tagged data-el at compose time; an els entry moves/scales/recolors one.
-// dx/dy are % of slide W/H; scale clamps to [0.4, 2.5]; both ride a single
-// transform, so the element's layout footprint never changes (rules are
-// in-flow blocks — an offset that reflowed neighbors would wreck the column).
-// color becomes inline color: only on currentColor-driven elements (rule,
-// torn); the lockup keeps its own colors — the caller validates and reports.
-const RE_EL_KEY = /^(?:rule:\d+|torn:\d+|lockup)$/;
-function designElStyle(e, allowColor) {
+// Decorative template elements (design.els v1.6, widened to the whole library
+// in v1.8). Every visually distinct thing a template draws is tagged data-el
+// at compose time — the editor cannot hit-test what the engine never tagged,
+// and v1.6 tagged three classes out of the library's forty, which is why
+// clicking an illustration did nothing on most posts.
+// docs/ELEMENT-INVENTORY.md is the measured audit this table was derived from
+// (all 47 templates walked in Chrome: 635 painted elements, 226 of them with
+// no tagged ancestor-or-self at all), and smr-els2-doc.mjs re-checks it — a
+// template that draws something whose class is in no row below fails the
+// guard instead of shipping unclickable.
+//
+// [class, kind, tagFilter, paint]. tagFilter narrows a class that means two
+// different things in this library: span.mark is list-soft's hand-drawn
+// ornament, p.mark is house-e-marker's TEXT paragraph, and putting a
+// decorative key on a block of type would shadow the text block underneath.
+// paint names the property a palette colour writes — svg/currentColor
+// elements take `color`, painted fields take `background`, the lockup takes
+// neither (it keeps its own colours; the caller validates and reports).
+const DESIGN_EL_KINDS = [
+  ['lockup', 'lockup', null, null],
+  ['rule', 'rule', null, 'color'],
+  ['torn', 'torn', null, 'color'],
+  ['ill', 'ill', null, 'color'],
+  ['cut', 'edge', null, 'color'],
+  ['portrait', 'edge', null, 'color'],
+  ['field__cut', 'edge', null, 'color'],
+  ['band', 'field', null, 'background'],
+  ['wash', 'field', null, 'background'],
+  ['glow', 'field', null, 'background'],
+  ['smudge', 'field', null, 'background'],
+  ['masthead', 'field', null, 'background'],
+  ['mast', 'field', null, 'background'],
+  ['qa__shape', 'field', null, 'color'],
+  ['portrait__fill', 'field', null, 'background'],
+  ['mark', 'mark', 'span', 'color'],
+  ['dash', 'mark', null, 'color'],
+  ['tick', 'mark', null, 'color'],
+  ['svc__mark', 'mark', null, 'color'],
+  ['label-mark', 'mark', null, 'color'],
+  ['kicker__mark', 'mark', null, 'color'],
+  ['wing', 'mark', null, 'color'],
+  ['cue', 'mark', null, 'color'],
+  ['stamp__tick', 'mark', null, 'color'],
+  ['series__mark', 'mark', null, 'color'],
+  ['stroke', 'line', null, 'color'],
+  ['underline', 'line', null, 'color'],
+  ['emph__ul', 'line', null, 'color'],
+  ['spine', 'line', null, 'color'],
+  ['item__n', 'type', null, 'color'],
+  ['tel', 'type', null, 'color'],
+  ['tel__num', 'type', null, 'color'],
+  ['foot__a', 'type', null, 'color'],
+  ['foot__b', 'type', null, 'color'],
+  ['tag', 'type', null, 'color'],
+];
+const EL_PAINT = { sweep: 'background' };            // promoted, not a class row
+for (const [, kind, , paint] of DESIGN_EL_KINDS) {
+  if (!(kind in EL_PAINT)) EL_PAINT[kind] = paint;
+}
+const RE_EL_KEY =
+  /^(?:lockup|(?:rule|torn|ill|edge|field|mark|line|type|sweep):\d+)$/;
+
+// dx/dy are % of slide W/H; scale clamps to [0.4, 2.5]. Both ride the
+// INDIVIDUAL `translate`/`scale` properties, never the `transform` shorthand:
+// house-e-marker rotates the very elements v1.8 newly tags (.stroke--a/b/c,
+// .underline, .smudge and the sweep blob all carry transform:rotate), and a
+// shorthand written here would silently drop that rotation the first time a
+// reviewer nudged one. The individual properties compose as
+// translate ∘ rotate ∘ scale ∘ transform and a uniform scale commutes with
+// the template's rotation, so an element with no els entry — and a rule/torn/
+// lockup with a v1.6-era one — resolves to exactly the matrix it did before.
+// Neither property affects layout, so an offset never reflows the column.
+function designElStyle(e, paint) {
   if (!e || typeof e !== 'object') return '';
-  let t = '';
+  let s = '';
   const dx = dnum(e.dx) || 0, dy = dnum(e.dy) || 0;
   if (dx || dy) {
-    t += 'translate(' + dround(dx * DESIGN_W / 100) + 'px,' +
-      dround(dy * DESIGN_H / 100) + 'px)';
+    s += 'translate:' + dround(dx * DESIGN_W / 100) + 'px ' +
+      dround(dy * DESIGN_H / 100) + 'px;';
   }
   const sc = dnum(e.scale);
   if (sc !== null && sc !== 1) {
-    t += (t ? ' ' : '') + 'scale(' + dround(dclamp(sc, 0.4, 2.5)) + ')';
+    s += 'scale:' + dround(dclamp(sc, 0.4, 2.5)) + ';';
   }
-  let s = t ? 'transform:' + t + ';' : '';
-  if (allowColor && e.color && RE_TOKEN.test(String(e.color))) {
-    s += 'color:var(--' + e.color + ');';
+  if (paint && e.color && RE_TOKEN.test(String(e.color))) {
+    s += paint + ':var(--' + e.color + ');';
   }
   return s;
 }
 
-// Tags decorative elements in DOM order — .rule → data-el="rule:N", .torn →
-// data-el="torn:N", .lockup → data-el="lockup" (templates carry one; every
-// match is tagged) — and applies els styles plus hidden "el:" entries as
-// inline style. Runs ALWAYS (the editor needs the tags for hit-testing) and
-// BEFORE extras are appended, so extras are never tagged. Template
-// rule/lockup/torn tags carry no inline style attribute (checked across the
-// library), so injecting one is safe. Returns {html, counts}.
+// .sweep::before is the marker blob painted BEHIND the type — the operator's
+// «spots of color behind illustrations … lines that are behind text». A
+// pseudo-element is not in the DOM: it can never be hit-tested and never
+// styled per slide. So the engine emits a real first child that carries the
+// key and switches the pseudo off. The declarations are tokens.css's
+// `.sweep::before` verbatim; template rules targeting that pseudo are
+// rewritten onto the same child, which preserves their relative specificity
+// (both sides gain one class and lose one pseudo-element); and this block is
+// prepended BEFORE the template's own <style> so those overrides still win.
+// smr-els2-verify.mjs compares the promoted child's computed box against the
+// pseudo's in the null build rather than trusting this copy to stay in step.
+const SWEEP_CSS = '<style>' +
+  '.sweep--el::before{display:none!important}' +
+  '.sweep__blob{position:absolute;z-index:0;inset-inline:-18px -10px;' +
+  'top:12%;bottom:6%;background:var(--gold-35);' +
+  'border-radius:42% 58% 46% 54% / 62% 44% 56% 38%;' +
+  'transform:rotate(-.7deg)}' +
+  '</style>';
+const rewriteSweepCss = (html) => html.replace(/<style>([\s\S]*?)<\/style>/g,
+  (m0, css) => '<style>' +
+    css.replace(/(\.sweep(?:--[A-Za-z0-9_-]+)?)::before/g, '$1>.sweep__blob') +
+    '</style>');
+
+// Tags every decorative element in DOM order — kind:N per the table above,
+// .lockup keeping its bare "lockup" key (templates carry one) — and applies
+// els styles plus hidden "el:" entries as inline style. Runs ALWAYS (the
+// editor needs the tags for hit-testing) and BEFORE extras are appended, so
+// extras are never tagged. The tagged template elements carry no inline style
+// attribute (checked across the library), so injecting one is safe.
+// Returns {html, counts}: counts is instances-per-kind, which is what the
+// caller's existence check needs.
 function applyEls(html, els, hiddenEls) {
-  const counts = { rule: 0, torn: 0, lockup: 0 };
+  const counts = Object.create(null);
+  const styleFor = (key, paint) => {
+    const st = designElStyle(els ? els[key] : null, paint) +
+      (hiddenEls && hiddenEls.has(key) ? 'display:none;' : '');
+    return st ? ' style="' + st + '"' : '';
+  };
   const out = html.replace(/<([a-z][a-z0-9]*)\s([^>]*?)class="([^"]*)"([^>]*)>/g,
     (m0, tag, pre, cls, post) => {
       const names = cls.split(/\s+/);
-      let key = null;
-      if (names.includes('rule')) key = 'rule:' + counts.rule++;
-      else if (names.includes('torn')) key = 'torn:' + counts.torn++;
-      else if (names.includes('lockup')) { key = 'lockup'; counts.lockup++; }
-      if (!key) return m0;
-      const e = els ? els[key] : null;
-      const style = designElStyle(e, key !== 'lockup') +
-        (hiddenEls && hiddenEls.has(key) ? 'display:none;' : '');
+      // The sweep host wraps the type, so it keeps its own box and stays
+      // untagged; the promoted blob is what carries the key and the style.
+      if (names.includes('sweep')) {
+        counts.sweep = (counts.sweep || 0) + 1;
+        const key = 'sweep:' + (counts.sweep - 1);
+        return '<' + tag + ' ' + pre + 'class="' + cls + ' sweep--el"' + post + '>' +
+          '<i class="sweep__blob" data-el="' + key + '"' +
+          styleFor(key, 'background') + '></i>';
+      }
+      let kind = null, paint = null;
+      for (const [c, k, wantTag, p] of DESIGN_EL_KINDS) {
+        if (!names.includes(c)) continue;
+        if (wantTag && tag !== wantTag) continue;
+        kind = k; paint = p; break;
+      }
+      if (kind == null) return m0;
+      counts[kind] = (counts[kind] || 0) + 1;
+      const key = kind === 'lockup' ? 'lockup' : kind + ':' + (counts[kind] - 1);
       return '<' + tag + ' ' + pre + 'class="' + cls + '" data-el="' + key + '"' +
-        (style ? ' style="' + style + '"' : '') + post + '>';
+        styleFor(key, paint) + post + '>';
     });
-  return { html: out, counts };
+  return { html: counts.sweep ? SWEEP_CSS + rewriteSweepCss(out) : out, counts };
 }
 
-// design.bg.field — swap the slide root's field class (slide--deep/--paper/
-// --warm). The PREFERRED background change: every text token re-resolves with
-// the class, exactly as templates already work. Invalid/absent field: no-op
-// (caller reports). Non-global regex touches only the first slide class attr.
-function applyBgField(html, field) {
-  if (!RE_FIELD.test(String(field || ''))) return html;
+// design.bg.field / .gradient / .tint — swap the classes on the slide root.
+// The PREFERRED background change: every text token re-resolves with the
+// class, exactly as templates already work, so the surface cannot end up
+// carrying type its own contrast table disagrees with.
+//
+// A gradient/tint emits its class ALONGSIDE a field class rather than instead
+// of one. tokens.css scopes nothing to the field today, but all 47 templates
+// carry it on their root div and template CSS is free to use it, so the
+// light/dark polarity has to stay legible there. The implied field comes from
+// the surface's own measured polarity (deep = takes light type); an explicit
+// bg.field overrides WHICH field class is written, never the surface itself —
+// the gradient/tint rules are declared after the field variants in tokens.css
+// and restate `color`, so legibility survives any combination.
+//
+// gradient beats tint if a design somehow carries both. Invalid/absent
+// values: no-op (caller reports). Non-global regex touches only the first
+// slide class attr.
+function applyBgClasses(html, bg) {
+  const b = (bg && typeof bg === 'object') ? bg : {};
+  const grad = RE_GRAD.test(String(b.gradient || '')) ? String(b.gradient) : null;
+  const tint = grad ? null : tintKey(b.tint);
+  let field = RE_FIELD.test(String(b.field || '')) ? String(b.field) : null;
+  if (!field && grad) field = 'deep';        // all three gradients take --on-deep
+  if (!field && tint) field = RE_TINT_DEEP.test(tint) ? 'deep' : 'paper';
+  if (!field && !grad && !tint) return html;
   return html.replace(/class="([^"]*\bslide\b[^"]*)"/, (_, cls) => {
-    const kept = cls.split(/\s+/)
-      .filter((c) => c && !/^slide--(deep|paper|warm)$/.test(c));
-    kept.push('slide--' + field);
+    const kept = cls.split(/\s+/).filter((c) => c &&
+      !/^slide--(deep|paper|warm)$/.test(c) &&
+      !RE_GRAD_CLASS.test(c) && !RE_TINT_CLASS.test(c));
+    if (field) kept.push('slide--' + field);
+    if (grad) kept.push('slide--' + grad);
+    else if (tint) kept.push('slide--tint-' + tint);
     return 'class="' + kept.join(' ') + '"';
   });
 }
 
-// design.bg color/photo/overlay layers. Precedence: photo > color > field —
-// a valid photo suppresses the flat color; the overlay scrim only exists
-// with a photo. pos clamps to 0..100 (default 50,50); overlay opacity clamps
-// to 0..0.8 (default 0.35). Invalid tokens/urls: layer skipped (caller
-// reports).
+// design.bg color/photo/overlay layers. Precedence: photo > color >
+// gradient/tint > field — a valid photo suppresses the flat color, and
+// gradient/tint paint on the slide root (above) rather than as a layer here.
+// pos clamps to 0..100 (default 50,50); overlay opacity clamps to 0..0.8
+// (default 0.35). Invalid tokens/urls: layer skipped (caller reports).
+//
+// The overlay scrim used to exist only with a photo. It now also applies over
+// a gradient or tint, because gradient 2 (red -> orange) needs it: --on-deep
+// decays from 9.55:1 at the magenta end to 3.05:1 at the orange end, crossing
+// the 4.5:1 floor at 68% of the sweep, and a red-100 scrim at 0.35 restores
+// 4.73:1 across the whole sweep. Flat bg.color deliberately still takes no
+// overlay — that is existing behaviour and changing it would repaint slides
+// nobody asked us to touch.
 function designBgHtml(bg) {
   if (!bg || typeof bg !== 'object') return '';
   let out = '';
+  let scrimmable = false;
   if (typeof bg.photo === 'string' && RE_PHOTO_URL.test(bg.photo)) {
     const pos = Array.isArray(bg.pos) ? bg.pos : [];
     const px = dclamp(dnum(pos[0]) ?? 50, 0, 100);
@@ -328,15 +485,19 @@ function designBgHtml(bg) {
     out += '<img data-bg="photo" src="' + dattr(bg.photo) + '" alt="" ' +
       'style="position:absolute;inset:0;width:100%;height:100%;object-fit:cover;' +
       'object-position:' + dround(px) + '% ' + dround(py) + '%;z-index:-30">';
-    const ov = bg.overlay;
-    if (ov && typeof ov === 'object' && ov.color && RE_TOKEN.test(String(ov.color))) {
-      const op = dclamp(dnum(ov.opacity) ?? 0.35, 0, 0.8);
-      out += '<div data-bg="overlay" style="position:absolute;inset:0;' +
-        'background:var(--' + ov.color + ');opacity:' + dround(op) + ';z-index:-20"></div>';
-    }
+    scrimmable = true;
   } else if (bg.color && RE_TOKEN.test(String(bg.color))) {
     out += '<div data-bg="color" style="position:absolute;inset:0;' +
       'background:var(--' + bg.color + ');z-index:-30"></div>';
+  } else if (RE_GRAD.test(String(bg.gradient || '')) || tintKey(bg.tint)) {
+    scrimmable = true;
+  }
+  const ov = bg.overlay;
+  if (scrimmable && ov && typeof ov === 'object' && ov.color &&
+      RE_TOKEN.test(String(ov.color))) {
+    const op = dclamp(dnum(ov.opacity) ?? 0.35, 0, 0.8);
+    out += '<div data-bg="overlay" style="position:absolute;inset:0;' +
+      'background:var(--' + ov.color + ');opacity:' + dround(op) + ';z-index:-20"></div>';
   }
   return out;
 }
@@ -426,7 +587,8 @@ async function composeInner(slide, problems) {
     for (const entry of design.hidden) {
       if (typeof entry !== 'string' || !entry) { hiddenBad.push(String(entry)); continue; }
       const sm = entry.match(/^slot:(\d+)$/);
-      const em = entry.match(/^el:((?:rule|torn):\d+|lockup)$/);
+      const em = entry.match(/^el:(.+)$/);
+      if (em && !RE_EL_KEY.test(em[1])) { hiddenBad.push(entry); continue; }
       if (sm) hiddenSlots.add(sm[1]);
       else if (em) hiddenEls.add(em[1]);
       else if (/^[a-zA-Z0-9_]+$/.test(entry)) hiddenVars.add(entry);
@@ -531,7 +693,13 @@ async function composeInner(slide, problems) {
         bg.overlay.color && RE_TOKEN.test(String(bg.overlay.color)))) {
       problems.push('שכבת ההכהיה (overlay) חסרה צבע חוקי');
     }
-    html = applyBgField(html, bg.field);
+    if (bg.gradient != null && !RE_GRAD.test(String(bg.gradient))) {
+      problems.push('מעבר צבע לא חוקי: ”' + String(bg.gradient) + '“');
+    }
+    if (bg.tint != null && !tintKey(bg.tint)) {
+      problems.push('גוון לא חוקי — צריך משפחה (אדום/כחול/כתום/זהב) ודרגה');
+    }
+    html = applyBgClasses(html, bg);
   }
 
   // design.slots + hidden slots — tag every .photo placeholder, fill/hide
@@ -568,9 +736,9 @@ async function composeInner(slide, problems) {
   const elRes = applyEls(html, els, hiddenEls);
   html = elRes.html;
   const elExists = (key) => {
-    const m = key.match(/^(rule|torn):(\d+)$/);
-    if (m) return Number(m[2]) < elRes.counts[m[1]];
-    return key === 'lockup' && elRes.counts.lockup > 0;
+    if (key === 'lockup') return (elRes.counts.lockup || 0) > 0;
+    const m = key.match(/^([a-z]+):(\d+)$/);
+    return !!m && Number(m[2]) < (elRes.counts[m[1]] || 0);
   };
   if (els) {
     for (const k of Object.keys(els)) {

@@ -24,11 +24,20 @@
 // instead of floating them over the artwork. Contextual UI (selection
 // toolbar, handles, guides, slot hints) always stays on the slide.
 //
-//   initEditor(handle, slide, {onChange, manifest, photos, assetUrl,
-//                              photosEmptyText, uploadFile, onTextChange,
-//                              actionBar})
-//     -> {destroy, refresh, setPhotos, getDesign, addPhotoExtra, dropFiles,
-//         startTextEdit}
+//   initEditor(handle, slide, {onChange, manifest, photos, assets, postId,
+//                              assetUrl, photosEmptyText, uploadFile,
+//                              uploadAsset, onTextChange, actionBar})
+//     -> {destroy, refresh, setPhotos, setAssets, getDesign, addPhotoExtra,
+//         dropFiles, startTextEdit}
+//
+// Asset library (v2.0): opts.assets is the board's WHOLE library — reviewer
+// uploads and studio drawings alike, each row {id, kind, source, name, label,
+// tags, url, post_id} with its URL already resolved by the host (the editor
+// never talks to store.js). It feeds ONE «ספריית נכסים» picker that replaced
+// the three old ones; opts.postId powers its «בפוסט הזה» filter and
+// opts.uploadAsset(file) its upload tile. Without opts.assets the picker
+// falls back to manifest illustrations + brand assets + opts.photos, so an
+// unwired host still works exactly as it did.
 //
 // Drag & drop: while armed, the overlay accepts (a) desktop image-file drops —
 // uploaded through the host's opts.uploadFile(file) -> {url}, then placed as a
@@ -61,23 +70,52 @@
 // reports the choice through opts.onReset(scope); proposals already in
 // sm_edits are never touched.
 //
+// EVERY element is clickable (v1.8, operator: «I'm still not able to click on
+// the illustration on some posts. make sure every single line is a clickable
+// asset. especially the lines that are behind text or spots of color behind
+// illustrations»). Two halves:
+//   · the ENGINE now tags all ten kinds — ill:N (the drawing itself),
+//     field:N (bands, washes, glows, smudges, mastheads, card shapes),
+//     mark:N, line:N, edge:N, type:N (literal template text), sweep:N (the
+//     marker blob, PROMOTED out of .sweep::before into a real element),
+//     plus v1.6's rule:N / torn:N / lockup. 226 painted elements in the
+//     library had no tagged ancestor-or-self before this; now none do.
+//     docs/ELEMENT-INVENTORY.md is the measured audit, per template.
+//   · HIT-TESTING is depth-aware. elementFromPoint returns only the topmost
+//     node, which is why a line behind text or a colour field behind a
+//     drawing could never be reached by pointing at it. candidatesAt() reads
+//     the whole elementsFromPoint stack, collects every tagged
+//     ancestor-or-self of every node in it, and ranks them: extras → slots →
+//     text blocks → els (smallest kind first). Clicking the SAME spot again
+//     steps one level deeper and wraps; the gold dashed peek box names what
+//     the next click will reach; the toolbar carries an «N/M ▼» stepper.
+//     Alt is deliberately NOT the cycle key — it already means "free the
+//     magnets / bleed past the frame" for the drag that may follow the same
+//     pointerdown. When the geometry is hopeless, the layers panel lists
+//     every tagged element and selects it on click; that is the reliable path.
+//
 // design.els + brand assets (v1.6): the engine tags decorative template
-// elements (.rule → data-el="rule:N", .lockup → data-el="lockup", .torn →
-// data-el="torn:N"); clicking one selects it (after slots and text blocks,
+// elements; clicking one selects it (after slots and text blocks,
 // before free space). Its toolbar: drag to move (els.dx/dy % — the block-drag
 // machinery incl. snap+guides and a measured drag-response correction, here
 // probed through the element's own transform), scale slider [0.4–2.5]
-// (els.scale), palette swatches for RULES only (currentColor; lockup/torn
-// keep their own ink), «מחיקה» → hidden "el:<key>" entry (greyed layers row +
+// (els.scale), palette swatches for every kind except the lockup (v1.8 — the
+// engine decides whether the token lands on `color` or `background`), and
+// «מחיקה» → hidden "el:<key>" entry (greyed layers row +
 // שחזר), and «שכפול» — a rule duplicates as the matching ba-rule-* brand
-// extra (exact svg-path match, default ba-rule-wide), torn as ba-torn-band;
+// extra (exact svg-path match, default ba-rule-wide), torn as ba-torn-band.
+// v1.8 keeps שכפול honest for the kinds it widened to: an illustration host
+// offers «איור נוסף» (the library, since the composed svg carries no name),
+// and the kinds with no extracted twin — fields, sweeps, marks, strokes,
+// literal type — say so instead of silently placing a divider.
 // the lockup's שכפול is blocked («אין עדיין קובץ לוגו רשמי» — the JFCS
 // Logomark Masterfile is still open; never fake the brand stamp). The
-// «נכסי מותג» action-bar button opens a picker of manifest.brandAssets
-// (inline SVG previews, Hebrew labels) and places extras {type:"brand",
-// name, x, y, w} — engine-identical to ill extras but sourced from
-// studio/brand-assets/; their toolbar has drag/resize/rotate/front-back/
-// delete + color swatches, and NO crop/border rows (furniture, not photos).
+// Brand marks place as extras {type:"brand", name, x, y, w} — engine-
+// identical to ill extras but sourced from studio/brand-assets/; their
+// toolbar has drag/resize/rotate/front-back/delete + color swatches, and NO
+// crop/border rows (furniture, not photos). (v1.6 gave them their own
+// «נכסי מותג» picker; v2.0 folded that, the illustration picker and the
+// photo picker into the single «ספריית נכסים» picker described below.)
 //
 // Edge offsets (operator directive, v1.6): EVERY drag — extra, block or el —
 // hard-stops when the dragged box reaches the slide frame, so nothing walks
@@ -250,10 +288,23 @@ function isEmptyDesign(d) {
     !(d.hidden && d.hidden.length);
 }
 
-// design.hidden — var names + "slot:N" + "el:<key>" (v1.2 + els v1.6)
-const RE_HIDDEN_KEY = /^(?:[a-zA-Z0-9_]+|slot:\d+|el:(?:rule|torn):\d+|el:lockup)$/;
-// data-el keys the engine tags (PLAN «design.els + brand assets (v1.6)»)
-const RE_EL_KEY = /^(?:(?:rule|torn):\d+|lockup)$/;
+// The ten element kinds the engine tags (PLAN «design.els … v1.8»). Order is
+// the priority order hit-testing uses when several sit under one pointer:
+// the smallest, most specific marks first, the slide-sized colour fields last,
+// so a tick sitting on a band selects the tick. docs/ELEMENT-INVENTORY.md is
+// the measured audit behind the kind list.
+const EL_KINDS = ['mark', 'line', 'type', 'rule', 'torn', 'ill', 'edge',
+  'sweep', 'field', 'lockup'];
+// data-el keys the engine tags (PLAN «design.els + brand assets v1.6 → v1.8»)
+const RE_EL_KEY = /^(?:lockup|(?:rule|torn|ill|edge|field|mark|line|type|sweep):\d+)$/;
+// design.hidden — var names + "slot:N" + "el:<key>" (v1.2 + els v1.6 + v1.8)
+const RE_HIDDEN_KEY =
+  /^(?:[a-zA-Z0-9_]+|slot:\d+|el:(?:lockup|(?:rule|torn|ill|edge|field|mark|line|type|sweep):\d+))$/;
+// Which kinds accept a palette colour. The lockup keeps its own colours (the
+// JFCS Logomark Masterfile is still the open blocker), every other kind is
+// either currentColor-driven or a painted field — the ENGINE decides whether
+// the token lands on `color` or `background`; the editor only stores it.
+const EL_NO_COLOR = new Set(['lockup']);
 
 // Shared crop canonicalization for slot fills and photo extras: pos [%,%]
 // (omitted at the 50/50 default), zoom clamped 1..3 (omitted at 1), border
@@ -358,6 +409,15 @@ function injectStyles() {
 .smr-edov.is-drag{cursor:grabbing}
 .smr-edbox{position:absolute;pointer-events:none;border-radius:2px}
 .smr-edbox--hover{outline:1.5px dashed rgba(131,0,81,.55)}
+/* v1.8 depth peek — the thing UNDER what you are hovering. Gold, not brand
+   red, so it never reads as the live selection; the tag hangs above the box
+   and is pointer-transparent so it can never eat the click it advertises. */
+.smr-edbox--peek{outline:1.5px dashed rgba(179,153,93,.95);
+  background:rgba(179,153,93,.10);pointer-events:none}
+.smr-edbox__tag{position:absolute;inset-inline-start:0;bottom:100%;
+  margin-bottom:3px;white-space:nowrap;pointer-events:none;
+  background:#B3995D;color:#fff;border-radius:4px;padding:1px 6px;
+  font:600 11px/1.6 'Assistant',-apple-system,sans-serif}
 .smr-edbox--sel{outline:2px solid #830051;box-shadow:0 0 0 4px rgba(131,0,81,.15)}
 .smr-edbox--sel.is-snap{outline-color:#2e7d4f;box-shadow:0 0 0 4px rgba(46,125,79,.25)}
 .smr-edh{position:absolute;width:16px;height:16px;border-radius:50%;background:#fff;
@@ -410,6 +470,23 @@ function injectStyles() {
 .smr-edpick img{width:64px;height:64px;object-fit:contain;display:block}
 .smr-edpick--ph img{width:100%;height:84px;object-fit:cover;border-radius:6px}
 .smr-edpick .nm{font-size:.7rem;direction:ltr;overflow-wrap:anywhere;color:var(--ink-soft,#6b5f63)}
+/* «ספריית נכסים» (v2.0) — one picker over the whole board library */
+.smr-edlibbar{display:flex;gap:8px;align-items:center;flex-wrap:wrap;margin-bottom:8px}
+.smr-edlibbar .field__input{flex:1;min-width:180px}
+.smr-edchips{display:flex;gap:6px;flex-wrap:wrap;margin-bottom:6px}
+.smr-edcount{font-size:.76rem;color:var(--ink-soft,#6b5f63)}
+.smr-edpick--lib{grid-template-columns:repeat(auto-fill,minmax(104px,1fr))}
+.smr-edpick--lib button{align-items:stretch;position:relative}
+.smr-edpick--lib .nm{direction:rtl;text-align:center;font-size:.72rem;
+  display:-webkit-box;-webkit-line-clamp:2;-webkit-box-orient:vertical;overflow:hidden}
+.smr-edpick--lib > button > img{width:100%;height:84px;object-fit:cover;border-radius:6px}
+.smr-edpick--lib .bsvg{display:flex;align-items:center;justify-content:center;
+  height:84px;color:var(--accent,#830051)}
+.smr-edpick--lib .bsvg svg{width:86%;max-height:100%;overflow:visible}
+.smr-edpick--lib .bsvg img{width:100%;height:84px;object-fit:contain}
+.smr-edbadge{position:absolute;inset-block-start:4px;inset-inline-start:4px;
+  background:var(--accent,#830051);color:#fff;border-radius:999px;
+  font-size:.62rem;line-height:1;padding:3px 6px}
 .smr-edcta[hidden]{display:none}
 .smr-edcta{position:fixed;z-index:1300;display:flex;gap:6px;background:var(--paper,#fffdf9);
   border:1px solid var(--line,rgba(36,29,32,.12));border-radius:10px;padding:6px;
@@ -572,6 +649,10 @@ export function initEditor(handle, slide, opts = {}) {
   let photos = normalizePhotos(opts.photos);
   let design = normalizeDesign(slide.design);
   let sel = null;        // {kind:'block', name} | {kind:'extra', index} | {kind:'slot', n}
+  // v1.8: where the current selection sits in the stack under the last click
+  // ({i, n}), or null when it was the only candidate. Drives the toolbar's
+  // depth stepper so the reviewer can walk the pile without pixel-hunting.
+  let depth = null;
   let destroyed = false;
   let changeT = null, applyT = null;
   let editing = null;    // in-place text edit session (see startTextEdit)
@@ -590,6 +671,12 @@ export function initEditor(handle, slide, opts = {}) {
   // ---------------- parent-document UI ----------------
 
   const hoverBox = el('div', { class: 'smr-edbox smr-edbox--hover', hidden: true });
+  // v1.8 depth peek: when more than one thing sits under the pointer, this
+  // dashed box outlines what the NEXT click will step to, with an N/M badge.
+  // Without it depth-cycling is invisible — a reviewer has no way to know
+  // there is a colour field under the paragraph they are hovering.
+  const peekTag = el('span', { class: 'smr-edbox__tag' }, '');
+  const peekBox = el('div', { class: 'smr-edbox smr-edbox--peek', hidden: true }, peekTag);
   const selBox = el('div', { class: 'smr-edbox smr-edbox--sel', hidden: true });
   const hRot = el('div', { class: 'smr-edh smr-edh--rot', title: 'סיבוב' });
   const hRz = el('div', { class: 'smr-edh smr-edh--rz', title: 'שינוי גודל' });
@@ -600,9 +687,13 @@ export function initEditor(handle, slide, opts = {}) {
   // row keeps the .smr-edadd class — hosts/tests target the buttons by it.
   const barHost = (opts.actionBar && opts.actionBar.nodeType === 1) ? opts.actionBar : null;
   const addBar = el('div', { class: 'smr-edadd' + (barHost ? ' smr-edadd--bar' : '') },
-    el('button', { class: 'btn btn--ghost', type: 'button', onclick: () => pickIll() }, '+ הוסף איור'),
-    el('button', { class: 'btn btn--ghost', type: 'button', onclick: () => pickPhoto() }, '+ הוסף תמונה'),
-    el('button', { class: 'btn btn--ghost', type: 'button', title: 'חותמות, קווים ועיטורים של המותג', onclick: () => pickBrand() }, 'נכסי מותג'),
+    // v2.0: one door to everything — photos, logos, illustrations and brand
+    // marks are one library now, so they are one button (was three).
+    el('button', {
+      class: 'btn btn--ghost', type: 'button',
+      title: 'תמונות, לוגו, איורים וחותמות מותג — הכול במקום אחד',
+      onclick: () => pickAsset(),
+    }, '+ ספריית נכסים'),
     el('button', { class: 'btn btn--ghost', type: 'button', onclick: () => togglePanel('bg') }, 'רקע'),
     el('button', { class: 'btn btn--ghost', type: 'button', onclick: () => togglePanel('layers') }, 'שכבות'),
     el('button', { class: 'btn btn--ghost', type: 'button', title: 'איפוס העיצוב — שקף אחד או כל הקרוסלה', onclick: () => resetDialog() }, 'איפוס עיצוב'),
@@ -617,7 +708,7 @@ export function initEditor(handle, slide, opts = {}) {
   const guideV = el('div', { class: 'smr-edguide smr-edguide--v' });
   const guideH = el('div', { class: 'smr-edguide smr-edguide--h' });
   const overlay = el('div', { class: 'smr-edov', dir: 'rtl' },
-    slotHints, hoverBox, selBox, gridBox, guideV, guideH, dropHint, busyEl);
+    slotHints, hoverBox, peekBox, selBox, gridBox, guideV, guideH, dropHint, busyEl);
   if (barHost) barHost.appendChild(addBar); else overlay.appendChild(addBar);
   wrapper.appendChild(overlay);
 
@@ -741,24 +832,36 @@ export function initEditor(handle, slide, opts = {}) {
     return design.els[key];
   }
 
-  // the inline transform the ENGINE writes for an els entry (parity: compose
-  // and live drag must move the element identically) — translate in design
-  // px, then scale about the element's own origin
-  function elTransform(dx, dy, sc) {
-    let t = '';
-    if (dx || dy) {
-      t += 'translate(' + round1(dx * W / 100) + 'px,' + round1(dy * H / 100) + 'px)';
-    }
+  // The live-drag equivalent of what the ENGINE writes for an els entry —
+  // parity: compose and drag must move the element identically. v1.8 moved
+  // both engines off the `transform` shorthand onto the INDIVIDUAL
+  // `translate`/`scale` properties, because house-e-marker rotates the very
+  // elements v1.8 newly tags (.stroke, .underline, .smudge, the sweep blob)
+  // and a shorthand written here would wipe that rotation mid-drag — the
+  // element would visibly snap straight the moment the reviewer touched it.
+  // Writes both properties every time (never a partial style), so clearing a
+  // scale during a drag cannot leave a stale one behind.
+  function applyElTransform(node, dx, dy, sc) {
+    if (!node) return;
+    node.style.translate = (dx || dy)
+      ? round1(dx * W / 100) + 'px ' + round1(dy * H / 100) + 'px' : '';
     const s = typeof sc === 'number' ? clamp(sc, 0.4, 2.5) : 1;
-    if (Math.abs(s - 1) > 0.001) t += (t ? ' ' : '') + 'scale(' + s + ')';
-    return t;
+    node.style.scale = Math.abs(s - 1) > 0.001 ? String(s) : '';
   }
 
+  // Hebrew names for every kind the engine tags (v1.8). The label is what the
+  // layers panel lists and the toolbar titles, so it has to read like the
+  // thing on the slide, not like a key.
+  const EL_KIND_LABEL = {
+    rule: 'קו מפריד', torn: 'שפה קרועה', ill: 'איור', edge: 'שפת גזירה',
+    field: 'שדה צבע', mark: 'סימן', line: 'קו', type: 'טקסט קבוע',
+    sweep: 'משיחת מרקר',
+  };
   function elLabelOf(key) {
     if (key === 'lockup') return 'חתימת המותג (לוגו)';
-    const m = key.match(/^(rule|torn):(\d+)$/);
+    const m = key.match(/^([a-z]+):(\d+)$/);
     if (!m) return key;
-    const base = m[1] === 'rule' ? 'קו מפריד' : 'שפה קרועה';
+    const base = EL_KIND_LABEL[m[1]] || m[1];
     // number the label only when the template carries siblings of the kind
     const twins = elKeysInDoc().filter((k) => k.startsWith(m[1] + ':')).length;
     return twins > 1 ? base + ' ' + (Number(m[2]) + 1) : base;
@@ -831,37 +934,124 @@ export function initEditor(handle, slide, opts = {}) {
     return Math.abs(lx) <= g.w / 2 && Math.abs(ly) <= g.h / 2;
   }
 
-  function hitAt(e) {
+  // ---------------- depth-aware hit-testing (v1.8) ----------------
+  // `elementFromPoint` returns ONLY the topmost node, which is why a colour
+  // field behind a paragraph, or a marker sweep under its own type, could
+  // never be selected however precisely a reviewer clicked: the text box
+  // swallowed the click and the walk up from it never reached the thing
+  // underneath. `elementsFromPoint` returns the whole stack, so the editor
+  // can rank EVERY candidate at the point and offer the ones below the top.
+  //
+  // candidatesAt() is the single source of truth for both: click selects
+  // candidates[0], Alt-click (or clicking the same spot again) steps one
+  // deeper and wraps at the bottom. The ranking is deliberate:
+  //   extras (reviewer-placed, topmost first) → photo slots → text blocks →
+  //   decorative els, smallest kind first → nothing.
+  // Slots stay above text because a slot's pending label IS a text block —
+  // clicking it must fill the slot, not edit the label (v1.2). Els stay below
+  // text so the ordinary click on a paragraph still edits the paragraph;
+  // everything underneath is one Alt-click away, and the layers panel lists
+  // it unconditionally for the cases where the geometry is hopeless.
+  const EL_RANK = new Map(EL_KINDS.map((k, i) => [k, i]));
+
+  function candidatesAt(e) {
     const p = docPoint(e);
+    const out = [];
+    const seen = new Set();
+    const push = (t) => {
+      const k = t.kind + ':' + (t.kind === 'block' ? t.name
+        : t.kind === 'slot' ? t.n : t.kind === 'el' ? t.key : t.index);
+      if (seen.has(k)) return;
+      seen.add(k);
+      out.push(t);
+    };
     // extras first, topmost (= last in array) wins
     for (let i = design.extras.length - 1; i >= 0; i--) {
-      if (pointInGeom(p, geomOf({ kind: 'extra', index: i }))) return { kind: 'extra', index: i };
+      if (pointInGeom(p, geomOf({ kind: 'extra', index: i }))) push({ kind: 'extra', index: i });
     }
     const d = doc();
-    if (d) {
-      let n = null;
-      try { n = d.elementFromPoint(p.x, p.y); } catch { /* ignore */ }
-      // walk up: a photo-slot ancestor beats any var inside it (the slot's
-      // pending label IS a var — clicking it must hit the slot, not the text);
-      // decorative data-el elements (v1.6) rank after slots and text blocks,
-      // before free space
-      let varName = null, elKey = null;
-      while (n && n.nodeType === 1) {
-        if (varName == null && n.hasAttribute && n.hasAttribute('data-var')) {
-          varName = n.getAttribute('data-var');
-        }
-        if (elKey == null && n.hasAttribute && n.hasAttribute('data-el')) {
-          elKey = n.getAttribute('data-el');
-        }
+    if (!d) return out;
+    let stack = [];
+    try {
+      stack = d.elementsFromPoint ? [...d.elementsFromPoint(p.x, p.y)]
+        : [d.elementFromPoint(p.x, p.y)].filter(Boolean);
+    } catch { /* ignore */ }
+    // Every tagged ancestor-or-self of every node in the stack is reachable
+    // at this point, not just the tagged ancestors of the TOP node — that
+    // distinction is the whole fix.
+    const slots = [], blocks = [], els = [];
+    for (const top of stack) {
+      for (let n = top; n && n.nodeType === 1; n = n.parentElement) {
         if (n.hasAttribute && n.hasAttribute('data-slot') && !n.hasAttribute('data-extra')) {
-          return { kind: 'slot', n: Number(n.getAttribute('data-slot')) };
+          slots.push({ kind: 'slot', n: Number(n.getAttribute('data-slot')) });
         }
-        n = n.parentElement;
+        if (n.hasAttribute && n.hasAttribute('data-var')) {
+          blocks.push({ kind: 'block', name: n.getAttribute('data-var') });
+        }
+        if (n.hasAttribute && n.hasAttribute('data-el')) {
+          const key = n.getAttribute('data-el');
+          if (RE_EL_KEY.test(key)) els.push({ kind: 'el', key });
+        }
       }
-      if (varName != null) return { kind: 'block', name: varName };
-      if (elKey != null && RE_EL_KEY.test(elKey)) return { kind: 'el', key: elKey };
     }
-    return null;
+    // a tick lying on a band should select the tick, so rank els by kind
+    els.sort((a, b) => (EL_RANK.get(a.key.split(':')[0]) ?? 99) -
+      (EL_RANK.get(b.key.split(':')[0]) ?? 99));
+    slots.forEach(push); blocks.forEach(push); els.forEach(push);
+    return out;
+  }
+
+  // The plain answer — what a single click selects.
+  function hitAt(e) {
+    const c = candidatesAt(e);
+    return c.length ? c[0] : null;
+  }
+
+  // Where the last cycle left off, so a second click on the same spot goes
+  // deeper instead of re-selecting the top. Reset by any click that lands
+  // more than CYCLE_R doc-px away, so ordinary clicking never feels sticky.
+  const CYCLE_R = 6;
+  let cycle = null;   // {x, y, i}
+
+  // The full pick used by pointerdown: returns {target, index, count} so the
+  // caller can show the reviewer where in the stack it landed. A repeat click
+  // within CYCLE_R of the last one, on something already selected, steps one
+  // level deeper and wraps at the bottom.
+  function pickAt(e) {
+    const list = candidatesAt(e);
+    if (!list.length) { cycle = null; return null; }
+    const p = docPoint(e);
+    const near = cycle && Math.abs(cycle.x - p.x) <= CYCLE_R &&
+      Math.abs(cycle.y - p.y) <= CYCLE_R;
+    let i = 0;
+    if (near && cycle.i < list.length && sameSel(sel, list[cycle.i])) {
+      i = (cycle.i + 1) % list.length;
+    }
+    // client coords ride along so the toolbar's depth stepper can re-probe
+    // the same point without a pointer event of its own
+    cycle = { x: p.x, y: p.y, cx: e.clientX, cy: e.clientY, i };
+    return { target: list[i], index: i, count: list.length };
+  }
+
+  // What the NEXT click at this point would step to (drives the peek box).
+  function peekAt(e) {
+    const list = candidatesAt(e);
+    if (list.length < 2) return null;
+    const p = docPoint(e);
+    const near = cycle && Math.abs(cycle.x - p.x) <= CYCLE_R &&
+      Math.abs(cycle.y - p.y) <= CYCLE_R;
+    const at = (near && cycle.i < list.length && sameSel(sel, list[cycle.i]))
+      ? (cycle.i + 1) % list.length : 0;
+    return { target: list[at], index: at, count: list.length };
+  }
+
+  function labelOfTarget(t) {
+    if (!t) return '';
+    if (t.kind === 'block') return 'טקסט: ' + t.name;
+    if (t.kind === 'slot') return 'משבצת תמונה ' + (t.n + 1);
+    if (t.kind === 'el') return elLabelOf(t.key);
+    const ex = design.extras[t.index];
+    return ex ? (ex.type === 'photo' ? 'תמונה שנוספה' : 'נכס שנוסף') : 'שכבה';
   }
 
   function sameSel(a, b) {
@@ -1051,10 +1241,15 @@ export function initEditor(handle, slide, opts = {}) {
 
   // ---------------- selection & toolbar ----------------
 
-  function select(t) {
+  // `d` = {i, n} when the caller picked out of a stack under a point (v1.8);
+  // omitted for layers-panel and programmatic selection, which carry no
+  // position and so have no stack to step through.
+  function select(t, d) {
     if (!sameSel(t, sel)) extraCropOn = false; // crop mode never survives retargeting
     sel = t;
+    depth = (d && d.n > 1) ? d : null;
     hoverBox.hidden = true;
+    peekBox.hidden = true;
     renderToolbar();
     refreshUI();
     renderLayersPanel(); // highlight follows selection
@@ -1063,10 +1258,36 @@ export function initEditor(handle, slide, opts = {}) {
   function deselect() {
     sel = null;
     extraCropOn = false;
+    depth = null;
+    cycle = null;
     selBox.hidden = true;
+    peekBox.hidden = true;
     toolbar.hidden = true;
     gridBox.hidden = true;
     renderLayersPanel();
+  }
+
+  // v1.8: the depth stepper — «2/4 ▼» in every selection toolbar when more
+  // than one thing sits under the click that made the selection. Clicking it
+  // walks one level further down the same stack, which is the keyboard-free,
+  // no-modifier way past a paragraph that is sitting on the thing you want.
+  // Returns null when the selection was unambiguous, so ordinary toolbars are
+  // unchanged.
+  function depthStepper() {
+    if (!depth || depth.n < 2 || !cycle) return null;
+    return el('button', {
+      class: 'btn btn--ghost smr-edtb__depth', type: 'button',
+      title: 'מתחת לסימון הזה יש עוד ' + (depth.n - 1) +
+        ' — לחיצה עוברת לשכבה הבאה (גם לחיצה חוזרת על אותה נקודה)',
+      onclick: () => {
+        const at = { clientX: cycle.cx, clientY: cycle.cy };
+        const list = candidatesAt(at);
+        if (list.length < 2) { depth = null; renderToolbar(); return; }
+        const i = ((depth.i + 1) % list.length);
+        cycle.i = i;
+        select(list[i], { i, n: list.length });
+      },
+    }, (depth.i + 1) + '/' + depth.n + ' ▼');
   }
 
   // hide/restore template items (design.hidden) — the delete path for
@@ -1109,6 +1330,13 @@ export function initEditor(handle, slide, opts = {}) {
     else if (sel.kind === 'slot') renderSlotToolbar(sel.n);
     else if (sel.kind === 'el') renderElToolbar(sel.key);
     else renderExtraToolbar(sel.index);
+    // v1.8: every sub-renderer calls replaceChildren, so the depth stepper is
+    // appended after the dispatch — one place, every kind of selection.
+    const st = depthStepper();
+    if (st && !toolbar.hidden) {
+      toolbar.appendChild(el('div', { class: 'smr-edtb__row' },
+        el('span', { class: 'smr-edtb__depthlbl' }, 'מתחת'), st));
+    }
     requestAnimationFrame(() => positionToolbar(sel ? geomOf(sel) : null));
   }
 
@@ -1316,6 +1544,8 @@ export function initEditor(handle, slide, opts = {}) {
   // (RULE_D_TO_ASSET); unmapped one-off wobbles default to ba-rule-wide.
   // torn → ba-torn-band. Placed at the element's position (nudged +3% down so
   // the copy is visible beside its source), same width, same rendered ink.
+  // Only called for rule:N / torn:N — the two kinds with an exact extracted
+  // twin in brand-assets/ (renderElToolbar gates the button).
   function duplicateEl(key) {
     const node = elEl(key);
     const g = geomOf({ kind: 'el', key });
@@ -1346,14 +1576,20 @@ export function initEditor(handle, slide, opts = {}) {
     toast('נכס המותג ”' + brandLabel(name) + '“ נוסף — גררו אותו למקומו');
   }
 
-  // decorative-element toolbar (v1.6): drag hint, scale, color (rules only),
-  // duplicate, delete-to-hidden, reset. The lockup's שכפול is blocked — the
-  // JFCS Logomark Masterfile is still the open blocker; the brand stamp is
-  // never faked from live-typed HTML.
+  // decorative-element toolbar (v1.6, widened v1.8): drag hint, scale, palette
+  // colour, duplicate, delete-to-hidden, reset — now for every kind the engine
+  // tags, not just rules. Colour is offered wherever the ENGINE can honour it
+  // (EL_NO_COLOR is the one exception, the lockup), because the token lands on
+  // `color` for currentColor-driven marks and on `background` for painted
+  // fields and the sweep blob — that choice belongs to the parity block, and
+  // duplicating it here is how the two would drift. The lockup's שכפול stays
+  // blocked: the JFCS Logomark Masterfile is still the open blocker and the
+  // brand stamp is never faked from live-typed HTML.
   function renderElToolbar(key) {
     const e = (design.els || {})[key] || {};
-    const isRule = key.startsWith('rule:');
-    const isLockup = key === 'lockup';
+    const kind = key === 'lockup' ? 'lockup' : key.split(':')[0];
+    const isLockup = kind === 'lockup';
+    const canColor = !EL_NO_COLOR.has(kind);
     const name = el('span', {
       class: 'smr-edtb__name',
       title: 'גרירה נעצרת בשולי השקף · Alt = תזוזה חופשית',
@@ -1367,24 +1603,44 @@ export function initEditor(handle, slide, opts = {}) {
       const cur = elOf(key);
       cur.scale = Number(scRange.value);
       scVal.textContent = '×' + cur.scale.toFixed(2);
-      const node = elEl(key);
-      if (node) node.style.transform = elTransform(cur.dx || 0, cur.dy || 0, cur.scale);
+      applyElTransform(elEl(key), cur.dx || 0, cur.dy || 0, cur.scale);
       if (sel) placeBox(selBox, geomOf(sel));
       commit({ defer: 150 });
     });
     scRange.addEventListener('change', () => commit());
 
+    // «שכפול» only where an EQUIVALENT asset really exists: rules and torn
+    // edges were extracted into brand-assets/ and match by svg path, so the
+    // copy is the same object. An illustration host has no name left in the
+    // composed DOM (the svg is inlined), so its שכפול opens the library at
+    // the illustrations instead of guessing — and the kinds with no extracted
+    // twin at all (fields, sweeps, marks, strokes, literal type) say so
+    // plainly. Silently placing ba-rule-wide for a colour field, which is
+    // what a shared default would do, is the failure worth avoiding.
     const dupB = isLockup
       ? el('button', {
           class: 'btn btn--ghost is-off', type: 'button', 'aria-disabled': 'true',
           title: 'אין עדיין קובץ לוגו רשמי',
           onclick: () => toast('אין עדיין קובץ לוגו רשמי — חתימת המותג נשארת חלק מהתבנית', 'err'),
         }, 'שכפול')
-      : el('button', {
-          class: 'btn btn--ghost', type: 'button',
-          title: 'שכפול כנכס מותג חופשי — אפשר לגרור, לסובב ולמחוק',
-          onclick: () => duplicateEl(key),
-        }, 'שכפול');
+      : (kind === 'rule' || kind === 'torn')
+        ? el('button', {
+            class: 'btn btn--ghost', type: 'button',
+            title: 'שכפול כנכס מותג חופשי — אפשר לגרור, לסובב ולמחוק',
+            onclick: () => duplicateEl(key),
+          }, 'שכפול')
+        : kind === 'ill'
+          ? el('button', {
+              class: 'btn btn--ghost', type: 'button',
+              title: 'הוספת איור נוסף מהספרייה — האיור שבתבנית נשאר במקומו',
+              onclick: () => pickAsset({ kind: 'ill' }),
+            }, 'איור נוסף')
+          : el('button', {
+              class: 'btn btn--ghost is-off', type: 'button', 'aria-disabled': 'true',
+              title: 'לאלמנט הזה אין נכס מותג מקביל בספרייה',
+              onclick: () => toast('ל”' + elLabelOf(key) +
+                '“ אין נכס מקביל בספריית המותג — אפשר להזיז, להגדיל, לצבוע ולהסתיר אותו', 'err'),
+            }, 'שכפול');
 
     const resetB = el('button', { class: 'btn btn--ghost', type: 'button', title: 'ביטול ההתאמות של האלמנט הזה' }, 'איפוס');
     resetB.addEventListener('click', () => {
@@ -1404,7 +1660,7 @@ export function initEditor(handle, slide, opts = {}) {
         name, el('span', null, elLabelOf(key)), dupB, resetB, delB),
       el('div', { class: 'smr-edtb__row' },
         el('span', null, 'גודל'), scRange, scVal),
-      isRule
+      canColor
         ? swatchRow(e.color || null, (color) => {
             const cur = elOf(key);
             if (color) cur.color = color; else delete cur.color;
@@ -1523,96 +1779,250 @@ export function initEditor(handle, slide, opts = {}) {
     return m;
   }
 
-  function pickIll() {
-    if (!illNames.length) return;
-    let m = null;
-    const grid = el('div', { class: 'smr-edpick' });
-    const draw = (q) => {
-      const names = q ? illNames.filter((n) => n.includes(q)) : illNames;
-      grid.replaceChildren(...(names.length
-        ? names.map((n) => el('button', {
-            type: 'button', title: n,
-            onclick: () => {
-              if (m) m.close();
-              design.extras.push({ type: 'ill', name: n, x: 36, y: 34, w: 28 });
-              commit();
-              select({ kind: 'extra', index: design.extras.length - 1 });
-            },
-          },
-            el('img', { src: assetUrl('studio/illustrations/' + n + '.svg'), alt: n, loading: 'lazy' }),
-            el('span', { class: 'nm' }, n),
-          ))
-        : [el('p', { class: 'pv-note' }, 'אין איור שמתאים לחיפוש הזה.')]));
-    };
-    const search = el('input', {
-      class: 'field__input', type: 'search',
-      placeholder: 'חיפוש בין ' + illNames.length + ' איורים (באנגלית, למשל bridge)',
-      oninput: () => draw(search.value.trim().toLowerCase()),
-    });
-    draw('');
-    m = edModal('איזה איור מוסיפים?', el('div', null, search, el('div', { style: { height: '10px' } }), grid));
-    setTimeout(() => search.focus(), 60);
+  // ---------------- «ספריית נכסים» — ONE picker (v2.0) ----------------
+  //
+  // Replaces the three separate pickers (photos / illustrations / brand
+  // assets). Everything the board owns is one list: reviewer uploads
+  // (source 'upload', bytes in sm-photos) and the studio's own drawings
+  // (source 'studio', bytes already in the sm-assets mirror). The host hands
+  // the list in through opts.assets with each row's URL already resolved —
+  // the editor still never touches the network for state; only for preview
+  // bytes it already fetched before (inline brand SVG).
+  //
+  // What a pick DOES is decided by the asset, not by which button opened the
+  // picker — that is the whole point of unifying them:
+  //   studio + illustration → {type:'ill',   name}   (inline SVG, recolorable)
+  //   studio + brand        → {type:'brand', name}   (inline SVG, recolorable)
+  //   any upload            → {type:'photo', url}    (<img>; see below)
+  // Uploaded SVGs place as photo extras rather than inline vector extras:
+  // inlining would put reviewer-supplied markup into the composed document
+  // that render.mjs also rasterizes, and would need a new extra type in the
+  // twin PARITY BLOCK (ENGINEERING-NOTES §9). Through <img>/data-URI the
+  // vector still scales cleanly; it just does not take a palette colour.
+
+  const KIND_CHIPS = [
+    { key: 'all',          label: 'כל הנכסים' },
+    { key: 'photo',        label: 'תמונות' },
+    { key: 'illustration', label: 'איורים' },
+    { key: 'brand',        label: 'נכסי מותג' },
+    { key: 'logo',         label: 'לוגו' },
+  ];
+
+  // Fallback library for hosts that have not been wired to opts.assets yet:
+  // the manifest's studio assets plus whatever photos were handed in. Same
+  // shape as a real sm_assets row, so one code path renders both.
+  function fallbackAssets() {
+    return [
+      ...photos.map((p) => ({
+        id: 'ph:' + p.url, kind: 'photo', source: 'upload',
+        name: p.note || '', label: p.note || '', tags: [], url: p.url, post_id: null,
+      })),
+      ...illNames.map((n) => ({
+        id: 'ill:' + n, kind: 'illustration', source: 'studio',
+        name: n, label: '', tags: [],
+        url: assetUrl('studio/illustrations/' + n + '.svg'), post_id: null,
+      })),
+      ...brandAssets.map((b) => ({
+        id: 'br:' + b.name, kind: 'brand', source: 'studio',
+        name: b.name, label: b.label || '', tags: [],
+        url: assetUrl('studio/brand-assets/' + b.name + '.svg'), post_id: null,
+      })),
+    ];
   }
 
-  // o.onPick(url) redirects the choice (slot filling); default adds a free
-  // photo extra mid-slide. o.title labels the modal for the flow it serves.
-  function pickPhoto(o = {}) {
-    const onPick = typeof o.onPick === 'function'
-      ? o.onPick : (url) => addPhotoExtra(url, 50, 52);
-    if (!photos.length) {
-      edModal(o.title || 'הוספת תמונה', el('div', { class: 'pv-note' }, photosEmptyText));
+  function library() {
+    const given = Array.isArray(opts.assets) ? opts.assets : null;
+    if (!given || !given.length) return fallbackAssets();
+    // uploads first (a reviewer's own photo is what they came for), then the
+    // studio's drawings; within each, host order (newest-first from store).
+    const rank = (a) => (a.source === 'studio' ? 1 : 0);
+    return [...given].sort((a, b) => rank(a) - rank(b));
+  }
+
+  function assetTitle(a) {
+    return a.label || a.name || 'נכס';
+  }
+
+  function assetMatches(a, q) {
+    if (!q) return true;
+    const hay = [a.name, a.label, ...(Array.isArray(a.tags) ? a.tags : [])]
+      .join(' ').toLowerCase();
+    return hay.includes(q);
+  }
+
+  // Place an asset on the slide (the default action when no onPick redirect).
+  function placeAsset(a) {
+    if (a.source === 'studio' && a.kind === 'illustration') {
+      design.extras.push({ type: 'ill', name: a.name, x: 36, y: 34, w: 28 });
+      commit();
+      select({ kind: 'extra', index: design.extras.length - 1 });
       return;
     }
+    if (a.source === 'studio' && a.kind === 'brand') {
+      design.extras.push({ type: 'brand', name: a.name, x: 35, y: 40, w: 30 });
+      commit();
+      select({ kind: 'extra', index: design.extras.length - 1 });
+      return;
+    }
+    addPhotoExtra(a.url, 50, 52);
+  }
+
+  // o.onPick(url) redirects the choice to the caller (slot fill/replace) —
+  // in that mode every asset resolves to a URL, studio drawings included.
+  // o.kind pre-selects a filter chip. o.title labels the modal.
+  function pickAsset(o = {}) {
     let m = null;
-    const grid = el('div', { class: 'smr-edpick smr-edpick--ph' },
-      photos.map((p) => {
-        const card = el('button', {
-          type: 'button', title: p.note || '', draggable: 'true',
-          onclick: () => {
-            if (m) m.close();
-            onPick(p.url);
-          },
+    let kind = o.kind || 'all';
+    let onlyPost = false;
+    let q = '';
+    const postId = opts.postId || null;
+    const onPick = typeof o.onPick === 'function' ? o.onPick : null;
+
+    const grid = el('div', { class: 'smr-edpick smr-edpick--lib' });
+    const chipRow = el('div', { class: 'smr-edchips' });
+    const count = el('span', { class: 'smr-edcount' });
+
+    const visible = () => library().filter((a) =>
+      (kind === 'all' || a.kind === kind) &&
+      (!onlyPost || (postId && a.post_id === postId)) &&
+      assetMatches(a, q));
+
+    function card(a) {
+      const isVec = a.source === 'studio';
+      const holder = isVec ? el('span', { class: 'bsvg' }) : null;
+      if (isVec) {
+        // brand marks preview as inline SVG so currentColor picks up the
+        // accent ink; illustrations are fine (and cheaper) as <img>.
+        if (a.kind === 'brand') {
+          brandSvgText(a.name).then((svg) => { if (svg && !destroyed) holder.innerHTML = svg; });
+        } else {
+          holder.appendChild(el('img', { src: a.url, alt: a.name, loading: 'lazy' }));
+        }
+      }
+      const btn = el('button', {
+        type: 'button', title: a.name || a.label || '',
+        draggable: onPick ? 'false' : 'true',
+        onclick: () => {
+          if (m) m.close();
+          if (onPick) onPick(a.url);
+          else placeAsset(a);
         },
-          el('img', { src: p.url, alt: p.note || 'תמונה', loading: 'lazy' }),
-          p.note ? el('span', { class: 'nm' }, p.note) : null,
-        );
-        // draggable straight onto the slide: hide the modal a tick after
-        // dragstart (removing/hiding the source synchronously aborts the drag)
-        card.addEventListener('dragstart', (e) => {
-          e.dataTransfer.setData(PHOTO_DRAG_MIME, p.url);
+      },
+        isVec ? holder : el('img', { src: a.url, alt: assetTitle(a), loading: 'lazy' }),
+        el('span', { class: 'nm' }, assetTitle(a)),
+        a.post_id && postId && a.post_id === postId
+          ? el('span', { class: 'smr-edbadge' }, 'בפוסט הזה') : null,
+      );
+      // uploads stay draggable straight onto the slide (no re-upload). Hide
+      // the modal a tick after dragstart — removing the source synchronously
+      // aborts the drag.
+      if (!onPick && a.source !== 'studio') {
+        btn.addEventListener('dragstart', (e) => {
+          e.dataTransfer.setData(PHOTO_DRAG_MIME, a.url);
           e.dataTransfer.effectAllowed = 'copy';
           setTimeout(() => { if (m) m.root.style.display = 'none'; }, 0);
         });
-        card.addEventListener('dragend', () => { if (m) m.close(); });
-        return card;
-      }),
-    );
-    m = edModal(o.title || 'איזו תמונה מוסיפים? (אפשר גם לגרור ישירות אל השקף)', grid);
+        btn.addEventListener('dragend', () => { if (m) m.close(); });
+      }
+      return btn;
+    }
+
+    function draw() {
+      const list = visible();
+      count.textContent = list.length ? `${list.length} נכסים` : '';
+      const empty = library().length
+        ? 'אין נכס שמתאים לסינון הזה. אפשר להעלות קובץ חדש למעלה.'
+        : photosEmptyText;
+      grid.replaceChildren(...(list.length
+        ? list.map(card)
+        : [el('p', { class: 'pv-note' }, empty)]));
+    }
+
+    for (const c of KIND_CHIPS) {
+      const b = el('button', {
+        class: 'chip' + (kind === c.key ? ' chip--on' : ''), type: 'button',
+        onclick: () => {
+          kind = c.key;
+          for (const other of chipRow.children) other.classList.remove('chip--on');
+          b.classList.add('chip--on');
+          draw();
+        },
+      }, c.label);
+      chipRow.appendChild(b);
+    }
+    if (postId) {
+      const b = el('button', {
+        class: 'chip', type: 'button', title: 'רק נכסים שהועלו ישירות לפוסט הזה',
+        onclick: () => { onlyPost = !onlyPost; b.classList.toggle('chip--on', onlyPost); draw(); },
+      }, 'בפוסט הזה');
+      chipRow.appendChild(b);
+    }
+
+    const search = el('input', {
+      class: 'field__input', type: 'search',
+      placeholder: 'חיפוש לפי שם, תווית או תגית',
+      oninput: () => { q = search.value.trim().toLowerCase(); draw(); },
+    });
+
+    // upload tile — the library is writable from inside the editor, so a
+    // reviewer never has to leave the slide to bring in a new photo or logo.
+    const file = el('input', {
+      type: 'file', accept: 'image/png,image/jpeg,image/webp,image/svg+xml',
+      multiple: true, style: { display: 'none' },
+    });
+    const upBtn = el('button', { class: 'btn btn--ghost', type: 'button', onclick: () => file.click() },
+      '+ העלאת קובץ (SVG · PNG · JPG · WEBP)');
+    file.addEventListener('change', async () => {
+      const files = [...file.files];
+      file.value = '';
+      if (!files.length) return;
+      const up = typeof opts.uploadAsset === 'function'
+        ? (f) => opts.uploadAsset(f)
+        : (typeof opts.uploadFile === 'function' ? (f) => opts.uploadFile(f) : null);
+      if (!up) { toast('העלאת נכסים לא מחוברת בעמוד הזה', 'err'); return; }
+      upBtn.disabled = true;
+      upBtn.textContent = 'מעלים…';
+      let last = null;
+      for (const f of files) {
+        try {
+          const res = await up(f);
+          if (res && res.url) last = res;
+        } catch (err) {
+          toast('ההעלאה של ' + (f.name || 'הקובץ') + ' נכשלה: ' + (err && err.message || err), 'err');
+        }
+      }
+      upBtn.disabled = false;
+      upBtn.textContent = '+ העלאת קובץ (SVG · PNG · JPG · WEBP)';
+      if (!last) return;
+      // one file: place it immediately (that is what "upload here" means);
+      // several: leave them in the grid so the reviewer chooses.
+      if (files.length === 1) {
+        if (m) m.close();
+        if (onPick) onPick(last.url);
+        else addPhotoExtra(last.url, 50, 52);
+        return;
+      }
+      toast(files.length + ' נכסים נוספו לספרייה');
+      draw();
+    });
+
+    draw();
+    m = edModal(
+      o.title || 'ספריית נכסים',
+      el('div', null,
+        el('div', { class: 'smr-edlibbar' }, search, upBtn, file),
+        chipRow,
+        count,
+        el('div', { style: { height: '8px' } }),
+        grid,
+      ));
+    setTimeout(() => search.focus(), 60);
   }
 
-  // «נכסי מותג» picker (v1.6): the 13 brand marks as inline-SVG previews
-  // (currentColor renders in the accent ink) with their Hebrew labels; a pick
-  // places a front-band brand extra (default w 30) and selects it so the full
-  // extra toolbar (drag/resize/rotate/front-back/delete + swatches) is live.
-  function pickBrand() {
-    let m = null;
-    const grid = el('div', { class: 'smr-edpick smr-edpick--br' },
-      brandAssets.map(({ name, label }) => {
-        const holder = el('span', { class: 'bsvg' });
-        brandSvgText(name).then((svg) => {
-          if (svg && !destroyed) holder.innerHTML = svg;
-        });
-        return el('button', {
-          type: 'button', title: name,
-          onclick: () => {
-            if (m) m.close();
-            design.extras.push({ type: 'brand', name, x: 35, y: 40, w: 30 });
-            commit();
-            select({ kind: 'extra', index: design.extras.length - 1 });
-          },
-        }, holder, el('span', { class: 'nm' }, label));
-      }));
-    m = edModal('איזה נכס מותג מוסיפים?', grid);
+  // Slot fill/replace still asks for "a picture" — same one library, opened
+  // on the תמונות chip, returning a URL through onPick.
+  function pickPhoto(o = {}) {
+    pickAsset({ ...o, kind: o.kind || 'photo' });
   }
 
   // ---------------- slot filling & crop (design.slots v1.2) ----------------
@@ -2378,8 +2788,10 @@ export function initEditor(handle, slide, opts = {}) {
         elKeys.length
           ? el('div', {
               class: 'smr-edlyr__band',
-              title: 'קווים, חתימת המותג ושפות קרועות של התבנית — אפשר להזיז, להגדיל ולהסתיר; הסדר קבוע',
-            }, 'עיטורי התבנית 🔒')
+              title: 'כל מה שהתבנית מציירת — איורים, שדות צבע, קווים, סימנים, ' +
+                'משיחות מרקר, חתימת המותג וטקסט קבוע. אפשר להזיז, להגדיל, ' +
+                'לצבוע ולהסתיר; הסדר קבוע. זה המסלול הבטוח לכל אלמנט שקשה ללחוץ עליו.',
+            }, 'עיטורי התבנית 🔒 (' + elKeys.length + ')')
           : null,
         elKeys.map((k) => templateRow({ kind: 'el', key: k }, elLabelOf(k))),
         el('div', { class: 'smr-edlyr__band' }, 'מאחורי הטקסט'),
@@ -2441,11 +2853,11 @@ export function initEditor(handle, slide, opts = {}) {
   // an ancestor transform (a template that scales a decorative group) would
   // show up here rather than drawing guides on a lying box.
   function measureElResponse(node, cur) {
-    const save = node.style.transform;
+    const save = [node.style.translate, node.style.scale];
     const r0 = node.getBoundingClientRect();
-    node.style.transform = elTransform((cur.dx || 0) + 5, (cur.dy || 0) + 5, cur.scale);
+    applyElTransform(node, (cur.dx || 0) + 5, (cur.dy || 0) + 5, cur.scale);
     const r1 = node.getBoundingClientRect();
-    node.style.transform = save;
+    [node.style.translate, node.style.scale] = save;
     return { ax: (r1.left - r0.left) / (0.05 * W), ay: (r1.top - r0.top) / (0.05 * H) };
   }
 
@@ -2576,9 +2988,10 @@ export function initEditor(handle, slide, opts = {}) {
       node.style.left = (nx * W / 100) + 'px';
       node.style.top = (ny * H / 100) + 'px';
     } else if (t.kind === 'el') {
-      // els carry ONE transform (translate + scale) — write the total the way
-      // designElStyle will on the next compose, scale included
-      node.style.transform = elTransform(nx, ny, ((design.els || {})[t.key] || {}).scale);
+      // els move on the individual translate/scale properties — write the
+      // total the way designElStyle will on the next compose, scale included,
+      // and leave any template `transform: rotate(...)` on the element alone
+      applyElTransform(node, nx, ny, ((design.els || {})[t.key] || {}).scale);
     } else {
       node.style.left = nx + '%';
       node.style.top = ny + '%';
@@ -2612,9 +3025,20 @@ export function initEditor(handle, slide, opts = {}) {
       return;
     }
 
-    const hit = hitAt(e);
+    // v1.8: pickAt returns the whole stack under the pointer and steps one
+    // level deeper when the same spot is clicked again — the only way to
+    // reach a line behind text or a colour field behind a drawing by
+    // pointing at it. Alt is NOT the cycle key here: it already means
+    // "free the magnets / bleed past the frame" for the drag that may follow
+    // this very pointerdown, and one modifier cannot mean two things in one
+    // gesture. Repeat-click cycles, the peek box says what is next, and the
+    // layers panel reaches anything the geometry hides completely.
+    const pick = pickAt(e);
+    const hit = pick && pick.target;
     if (!hit) { deselect(); return; }
-    if (!sameSel(hit, sel)) select(hit);
+    const d = { i: pick.index, n: pick.count };
+    if (!sameSel(hit, sel) || (depth && depth.i !== pick.index)) select(hit, d);
+    else { depth = pick.count > 1 ? d : null; renderToolbar(); }
 
     // crop-pan: a selected FILLED slot is always in crop mode; a photo extra
     // only with ✂️ on — dragging pans `pos` inside the frame, not the frame
@@ -2758,6 +3182,14 @@ export function initEditor(handle, slide, opts = {}) {
       overlay.classList.toggle('is-hit', !!hit);
       if (hit && !sameSel(hit, sel)) placeBox(hoverBox, geomOf(hit));
       else hoverBox.hidden = true;
+      // v1.8 depth peek — what a second click here would reach, and how deep
+      // the stack goes. Only shown when it would say something new.
+      const pk = peekAt(e);
+      if (pk && !sameSel(pk.target, hit)) {
+        placeBox(peekBox, geomOf(pk.target));
+        peekTag.textContent = 'לחצו שוב · ' + labelOfTarget(pk.target) +
+          ' (' + (pk.index + 1) + '/' + pk.count + ')';
+      } else peekBox.hidden = true;
     });
   }
 
@@ -2915,6 +3347,12 @@ export function initEditor(handle, slide, opts = {}) {
     setPhotos(list) {
       photos = normalizePhotos(list);
       renderBgPanel();
+    },
+    // v2.0: the host refreshes the whole board library the same way it
+    // refreshes photos — the picker reads opts.assets on every open, so this
+    // is all it takes for a new upload to be pickable everywhere at once.
+    setAssets(list) {
+      opts.assets = Array.isArray(list) ? list : [];
     },
     getDesign() { return isEmptyDesign(design) ? null : deepCopy(design); },
     addPhotoExtra,   // (url, xPct, yPct) — host fallback for off-overlay drops

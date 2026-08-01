@@ -44,6 +44,18 @@ function need() {
   return driver;
 }
 
+// File extension for a storage path: the real one when the name carries a
+// sane one, otherwise derived from the MIME type. Never trusts the name for
+// anything but the suffix.
+function extOf(file) {
+  const raw = (file && file.name && file.name.includes('.')) ? file.name.split('.').pop() : '';
+  const clean = String(raw).toLowerCase().replace(/[^a-z0-9]/g, '').slice(0, 5);
+  return clean || ({
+    'image/png': 'png', 'image/jpeg': 'jpg', 'image/webp': 'webp',
+    'image/svg+xml': 'svg', 'image/gif': 'gif',
+  }[(file && file.type) || ''] || 'jpg');
+}
+
 function readAsDataUrl(file) {
   return new Promise((resolve, reject) => {
     const r = new FileReader();
@@ -157,6 +169,16 @@ export function photoUrl(row) {
   return `${need().url}/storage/v1/object/public/sm-photos/${row.storage_path}`;
 }
 
+// URL for an sm_assets row (v2.0 library). Two populations, two homes:
+// source='studio' rows point INTO the sm-assets board mirror (the same base
+// assetUrl() serves), reviewer uploads live in sm-photos exactly like
+// sm_photos rows. Both drivers, one function — nothing else resolves assets.
+export function assetRowUrl(row) {
+  if (!row || !row.storage_path) return '';
+  if (row.source === 'studio') return assetUrl(row.storage_path);
+  return photoUrl(row);
+}
+
 // ---------------------------------------------------------------- SupabaseDriver
 
 class SupabaseDriver {
@@ -245,10 +267,7 @@ class SupabaseDriver {
   }
 
   async uploadPhoto({ post_id, pin_id, file, note }, me) {
-    const rawExt = (file.name && file.name.includes('.')) ? file.name.split('.').pop() : '';
-    const ext = (rawExt.toLowerCase().replace(/[^a-z0-9]/g, '').slice(0, 5)) ||
-      ({ 'image/png': 'png', 'image/jpeg': 'jpg', 'image/webp': 'webp' }[file.type] || 'jpg');
-    const path = `boards/${this.board}/${post_id}/${crypto.randomUUID()}.${ext}`;
+    const path = `boards/${this.board}/${post_id}/${crypto.randomUUID()}.${extOf(file)}`;
     const res = await fetch(`${this.url}/storage/v1/object/sm-photos/${path}`, {
       method: 'POST',
       headers: {
@@ -268,6 +287,60 @@ class SupabaseDriver {
       author: me.name,          // sm_photos has no author_id column
     });
     return { url, row };
+  }
+
+  // ---- asset library (sm_assets, v2.0) ----
+  // Bytes go to sm-photos (same bucket, same policy as post photos); the row
+  // goes to sm_assets. `dir` is the folder under boards/<key>/ — 'library'
+  // for library uploads, the post id for post-scoped ones, so a post upload
+  // keeps its existing storage path and simply also earns a library row.
+  async uploadAssetBytes(file, dir) {
+    const path = `boards/${this.board}/${dir}/${crypto.randomUUID()}.${extOf(file)}`;
+    const res = await fetch(`${this.url}/storage/v1/object/sm-photos/${path}`, {
+      method: 'POST',
+      headers: {
+        apikey: this.anon,
+        Authorization: 'Bearer ' + this.anon,
+        'Content-Type': file.type || 'application/octet-stream',
+      },
+      body: file,
+    });
+    if (!res.ok) throw new Error(await errText(res));
+    return path;
+  }
+
+  listAssets() {
+    return this.select('sm_assets',
+      `select=*&board_key=eq.${enc(this.board)}&order=created_at.desc`);
+  }
+
+  insertAsset(row) {
+    return this.insert('sm_assets', row);
+  }
+
+  // Only label + tags are updatable (the anon grant is column-scoped to match).
+  updateAsset(id, fields) {
+    return this.update('sm_assets',
+      `board_key=eq.${enc(this.board)}&id=eq.${enc(id)}`, fields);
+  }
+
+  // Studio reconcile: a plain bulk INSERT of the rows the board is missing.
+  // The partial unique index (board_key, kind, name) where source='studio'
+  // makes a racing second reconcile fail loudly instead of duplicating — 409
+  // means someone else won, which is success from here.
+  async insertStudioAssets(rows) {
+    if (!rows.length) return [];
+    const res = await fetch(this.rest + 'sm_assets', {
+      method: 'POST',
+      headers: this.headers({
+        'Content-Type': 'application/json',
+        Prefer: 'return=representation',
+      }),
+      body: JSON.stringify(rows.map((r) => ({ ...r, board_key: this.board }))),
+    });
+    if (res.ok) return (await res.json().catch(() => [])) || [];
+    if (res.status === 409) return [];  // another tab reconciled first
+    throw new Error(await errText(res));
   }
 
   // ---- drafts (sm_drafts, v1.3) ----
@@ -360,7 +433,7 @@ class SupabaseDriver {
       });
       const ch = client.channel('smr-' + this.board);
       const tables = ['sm_posts', 'sm_votes', 'sm_pins', 'sm_replies', 'sm_edits',
-                      'sm_publish', 'sm_post_versions'];
+                      'sm_publish', 'sm_post_versions', 'sm_assets'];
       for (const table of tables) {
         ch.on('postgres_changes',
           { event: '*', schema: 'public', table, filter: `board_key=eq.${this.board}` },
@@ -481,6 +554,34 @@ class LocalDriver {
       author: me.name,
       dataUrl,
     });
+  }
+
+  // ---- asset library (serve.mjs /api/assets, v2.0) ----
+  // serve.mjs takes bytes + row in ONE call (it writes the file and inserts
+  // the row together), so the local upload is a single request rather than
+  // the Supabase bytes-then-row pair; uploadAsset() below hides the seam.
+  async uploadAssetFull(file, dir, row) {
+    const dataUrl = await readAsDataUrl(file);
+    return this.req('POST', '/assets/upload', {
+      ...row, dir, name: row.name || file.name || 'asset', dataUrl,
+    });
+  }
+
+  async listAssets() {
+    return (await this.state()).assets || [];
+  }
+
+  insertAsset(row) {
+    return this.insert('assets', row);
+  }
+
+  updateAsset(id, fields) {
+    return this.patch('assets', id, fields);
+  }
+
+  async insertStudioAssets(rows) {
+    if (!rows.length) return [];
+    return (await this.req('POST', '/assets/studio', { rows })) || [];
   }
 
   // ---- drafts (serve.mjs /api/drafts, v1.3) ----
@@ -781,9 +882,35 @@ export async function setCaption(post_id, caption) {
   return row;
 }
 
+// v2.0: EVERY upload path also earns a library row. uploadPhoto stays the
+// post-scoped entry point (post page תמונות tab, editor drop-on-slide,
+// drop-on-slot, the builder) — it keeps writing sm_photos exactly as before
+// AND mirrors an sm_assets row with post_id set, so the same file appears in
+// that post's תמונות tab and in the board-wide library. The mirror is
+// deliberately non-fatal: a library row is bookkeeping, and losing it must
+// never cost a reviewer the upload they just made.
 export async function uploadPhoto({ post_id, pin_id, file, note }) {
   const me = await ensureName();
-  return need().uploadPhoto({ post_id, pin_id, file, note }, me);
+  const res = await need().uploadPhoto({ post_id, pin_id, file, note }, me);
+  try {
+    const dim = await measure(file);
+    await need().insertAsset({
+      kind: defaultKind(file),
+      source: 'upload',
+      name: file.name || 'photo',
+      storage_path: (res.row && res.row.storage_path) || '',
+      mime: file.type || '',
+      width: dim.width, height: dim.height, bytes: file.size || null,
+      label: note || '',
+      tags: [],
+      post_id: post_id || null,
+      author: me.name,
+      author_id: me.author_id,
+    });
+  } catch (e) {
+    console.warn('sm_assets mirror failed (upload itself succeeded):', e && e.message);
+  }
+  return res;
 }
 
 export async function createBuilderPost({ id, title, caption, slides, slide_count }) {
@@ -913,6 +1040,127 @@ export async function listVersions(post_id) {
 // badges for 100+ cards and must not fan out per post.
 export async function listAllVersions() {
   return (await need().listAllVersions()) || [];
+}
+
+// ------------------------------------------------ asset library (v2.0)
+// ONE board-wide library of every photo, logo, illustration and brand mark,
+// all of it on the cloud. Two populations behind one list (PLAN «The cloud
+// asset library»): reviewer uploads (bytes in sm-photos, `source:'upload'`)
+// and the studio's own SVGs (bytes already in sm-assets via ingest → go-live,
+// `source:'studio'`, reconciled into rows so one list covers everything).
+// A post-scoped upload carries post_id — it shows in that post's תמונות tab
+// AND here; a library upload leaves it null.
+
+const IMAGE_MIME = /^image\/(png|jpeg|jpg|webp|gif|svg\+xml)$/i;
+
+// Uploaded SVG is markup, and markup we did not author never gets inlined
+// into a composed slide (that document is also what render.mjs rasterizes).
+// Belt AND braces: strip the executable surface here, and place uploaded
+// vectors through <img> only — an <img>-embedded SVG cannot run script even
+// if this missed something.
+function sanitizeSvg(text) {
+  let out = String(text);
+  out = out.replace(/<\s*(script|foreignObject)\b[\s\S]*?<\s*\/\s*\1\s*>/gi, '');
+  out = out.replace(/<\s*(script|foreignObject)\b[^>]*\/\s*>/gi, '');
+  out = out.replace(/\son[a-z]+\s*=\s*("[^"]*"|'[^']*'|[^\s>]+)/gi, '');
+  out = out.replace(/(href|xlink:href)\s*=\s*("|')\s*javascript:[^"']*\2/gi, '');
+  return out;
+}
+
+async function svgFileSafe(file) {
+  const clean = sanitizeSvg(await file.text());
+  return new File([clean], file.name || 'asset.svg', { type: 'image/svg+xml' });
+}
+
+// Best-effort intrinsic size — the library grid and the placement maths both
+// want it, but a failure to measure must never block an upload.
+function measure(file) {
+  return new Promise((resolve) => {
+    const url = URL.createObjectURL(file);
+    const img = new Image();
+    const done = (v) => { URL.revokeObjectURL(url); resolve(v); };
+    img.onload = () => done({ width: img.naturalWidth || null, height: img.naturalHeight || null });
+    img.onerror = () => done({ width: null, height: null });
+    img.src = url;
+    setTimeout(() => done({ width: null, height: null }), 4000);
+  });
+}
+
+function defaultKind(file) {
+  return /svg/i.test(file.type || '') ? 'illustration' : 'photo';
+}
+
+// every sm_assets row for the board, newest first
+export async function listAssets() {
+  return (await need().listAssets()) || [];
+}
+
+// Upload bytes + create the library row. `post_id` set = uploaded ON a post.
+// Returns {url, row} like uploadPhoto, so callers are interchangeable.
+export async function uploadAsset({ file, kind, label, tags, post_id }) {
+  if (!file) throw new Error('לא נבחר קובץ');
+  if (!IMAGE_MIME.test(file.type || '')) {
+    throw new Error('אפשר להעלות רק SVG, PNG, JPG או WEBP');
+  }
+  const me = await ensureName();
+  const clean = /svg/i.test(file.type || '') ? await svgFileSafe(file) : file;
+  const dim = await measure(clean);
+  const row = {
+    kind: kind || defaultKind(clean),
+    source: 'upload',
+    name: clean.name || 'asset',
+    mime: clean.type || '',
+    width: dim.width, height: dim.height, bytes: clean.size || null,
+    label: label || '',
+    tags: Array.isArray(tags) ? tags : [],
+    post_id: post_id || null,
+    author: me.name,
+    author_id: me.author_id,
+  };
+  const dir = post_id || 'library';
+  const d = need();
+  if (isLocal) {
+    const res = await d.uploadAssetFull(clean, dir, row);
+    return { url: res.url, row: res.row };
+  }
+  const storage_path = await d.uploadAssetBytes(clean, dir);
+  const saved = await d.insertAsset({ ...row, storage_path });
+  return { url: assetRowUrl(saved), row: saved };
+}
+
+// Only label + tags are editable from the browser (matching the grant).
+export async function updateAsset(id, { label, tags }) {
+  const fields = {};
+  if (label !== undefined) fields.label = label;
+  if (tags !== undefined) fields.tags = Array.isArray(tags) ? tags : [];
+  return need().updateAsset(id, fields);
+}
+
+// Reconcile the studio's own assets into library rows, idempotent and keyed
+// by kind+name (PLAN contract). `entries` is manifest.library — ingest emits
+// it, go-live seeds these rows server-side, and this is the browser-side
+// catch-up for boards that predate that (and for the local driver).
+export async function reconcileStudioAssets(entries) {
+  const want = (entries || []).filter((e) => e && e.name && e.storage_path);
+  if (!want.length) return [];
+  const have = new Set(
+    (await listAssets())
+      .filter((a) => a.source === 'studio')
+      .map((a) => a.kind + ' ' + a.name));
+  const missing = want
+    .filter((e) => !have.has((e.kind || 'other') + ' ' + e.name))
+    .map((e) => ({
+      kind: e.kind || 'other',
+      source: 'studio',
+      name: e.name,
+      storage_path: e.storage_path,
+      mime: e.mime || 'image/svg+xml',
+      label: e.label || '',
+      tags: Array.isArray(e.tags) ? e.tags : [],
+      post_id: null,
+    }));
+  if (!missing.length) return [];
+  return need().insertStudioAssets(missing);
 }
 
 // ---------------------------------------------------------------- subscribe
