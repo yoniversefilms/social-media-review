@@ -120,13 +120,24 @@ function buildUsage(assets, posts) {
 
 function visible() {
   const q = S.q;
-  return S.assets.filter((a) => {
+  const list = S.assets.filter((a) => {
     if (S.kind !== 'all' && (a.kind || 'other') !== S.kind) return false;
     if (S.onlyUploads && a.source === 'studio') return false;
     if (!q) return true;
     const hay = [a.name, a.label, ...(Array.isArray(a.tags) ? a.tags : [])]
       .join(' ').toLowerCase();
     return hay.includes(q);
+  });
+  // Studio drawings sort by filename; reviewer uploads keep their existing order
+  // and stay first. Filename order matters because the library now ships graded
+  // SETS — em-water-1..5, cn-chairs-1..5 — that only teach anything in sequence.
+  // Unsorted, the grid rendered them in DB insertion order (1,2,5,4,3) and the
+  // scale read as five unrelated drawings.
+  return list.sort((x, y) => {
+    const sx = x.source === 'studio', sy = y.source === 'studio';
+    if (sx !== sy) return sx ? 1 : -1;
+    if (!sx) return 0;
+    return String(x.name || '').localeCompare(String(y.name || ''), 'en', { numeric: true });
   });
 }
 
@@ -239,7 +250,16 @@ function card(a) {
     class: 'a-thumb' + (isVec ? ' a-thumb--vec' : ' a-thumb--cover'),
     title: 'הגדלה',
     onclick: () => openAsset(a, url),
-  }, el('img', { src: url, alt: a.label || a.name || 'נכס', loading: 'lazy' }));
+  }, isVec
+    // Monochrome vectors paint as a mask so they take the brand colour (see the
+    // .a-thumb--vec note in assets.html). role/aria-label keep it announced, since
+    // a masked div is not an <img>.
+    ? el('div', {
+        class: 'a-vec', role: 'img',
+        'aria-label': a.label || a.name || 'נכס',
+        style: `--vec:url("${url}")`,
+      })
+    : el('img', { src: url, alt: a.label || a.name || 'נכס', loading: 'lazy' }));
   if (a.post_id) thumb.appendChild(el('span', { class: 'a-badge' }, 'מפוסט'));
 
   const used = S.usage.get(a.id) || [];
