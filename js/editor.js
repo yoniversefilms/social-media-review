@@ -3,7 +3,7 @@
 //
 // Works ON TOP of a compose.js mountSlide handle ({iframe, update, doc}).
 // Every piece of interaction UI — selection outline, drag/resize/rotate
-// handles, the floating toolbar, the add-illustration / add-photo flows —
+// handles, the editing sidebar, the asset library —
 // (see the v1.6 note at the bottom of this header for els + brand assets and
 // the frame-edge stop that every drag now respects)
 // lives in the PARENT document, positioned over the iframe, so re-composition
@@ -19,16 +19,28 @@
 // Alt = free drag; drag gestures only — never crop-pan/resize/rotate). It
 // NEVER talks to store.js — host pages wire saving.
 //
-// opts.actionBar (optional): a host container ABOVE the slide that receives
-// the non-contextual action buttons (הוסף איור/תמונה, רקע, שכבות, איפוס)
-// instead of floating them over the artwork. Contextual UI (selection
-// toolbar, handles, guides, slot hints) always stays on the slide.
+// THE SIDEBAR (v2.1) — Canva's model, replacing the old scatter of chrome.
+// Everything that is not literally a handle on the artwork now lives in ONE
+// sidebar: an icon rail (מאפיינים · ספרייה · רקע · שכבות + איפוס עיצוב at its
+// foot) and one panel body that shows the active tab. What used to be a
+// floating toolbar pinned near the selection is now the «מאפיינים» tab; the
+// two fixed side panels are two more tabs; the asset-library MODAL is now the
+// «ספרייה» tab (the modal survives only for pick-and-return flows — filling a
+// photo slot, choosing a background photo — where a return value is owed to a
+// caller). Nothing overlays the artwork but the selection box, the handles,
+// the snap guides, the slot hints and the in-place text ✓/✗.
+//
+// opts.sidebar (optional): a host element that RECEIVES the sidebar, so the
+// page can dock it as a real column (post.html puts it where the review panel
+// sits). Without it the sidebar mounts to <body> as a fixed drawer on the
+// inline-end edge — which is what build.html gets, and what any unwired host
+// gets for free.
 //
 //   initEditor(handle, slide, {onChange, manifest, photos, assets, postId,
 //                              assetUrl, photosEmptyText, uploadFile,
-//                              uploadAsset, onTextChange, actionBar})
+//                              uploadAsset, onTextChange, sidebar})
 //     -> {destroy, refresh, setPhotos, setAssets, getDesign, addPhotoExtra,
-//         dropFiles, startTextEdit}
+//         dropFiles, startTextEdit, openTab}
 //
 // Asset library (v2.0): opts.assets is the board's WHOLE library — reviewer
 // uploads and studio drawings alike, each row {id, kind, source, name, label,
@@ -208,6 +220,24 @@ const PALETTE_FALLBACK = [
   { name: 'gold-7',    css: '#f7f2ec' },
 ];
 
+// The three approved gradients (brand guide p.10), for an older manifest that
+// predates ingest.mjs's buildGradients(). Same role PALETTE_FALLBACK plays:
+// the «רקע» panel renders in the APP document and cannot read tokens.css
+// custom properties, so it needs the literal CSS. `worst` is the minimum
+// contrast of --on-deep across the whole sweep (docs/GRADIENTS-AND-TINTS.md).
+const GRADIENT_FALLBACK = [
+  { name: 'grad-1', label: 'אדום → פטל',  family: 'red',    safe: true,  worst: 5.39,
+    css: 'linear-gradient(to left, #830051 0%, #B73948 100%)' },
+  { name: 'grad-2', label: 'אדום → כתום', family: 'orange', safe: false, worst: 3.05,
+    css: 'linear-gradient(to left, #830051 0%, #E17000 100%)' },
+  { name: 'grad-3', label: 'אדום → כחול', family: 'blue',   safe: true,  worst: 6.94,
+    css: 'linear-gradient(to left, #830051 0%, #005996 100%)' },
+];
+// The guide's four tint groups and six steps. TINT_FAMS mirrors compose.js's
+// copy in the PARITY BLOCK — if one moves, both move.
+const TINT_FAMS = ['red', 'blue', 'orange', 'gold'];
+const TINT_STEP_LIST = [100, 70, 50, 35, 18, 7];
+
 // ---------------------------------------------------------------- canonical
 
 // Stable stringify (sorted object keys, arrays in order) — the wire format of
@@ -246,7 +276,12 @@ export function designSummary(d) {
   if (nBr) parts.push(nBr === 1 ? 'נכס מותג' : nBr + ' נכסי מותג');
   const nEls = d.els && typeof d.els === 'object' ? Object.keys(d.els).length : 0;
   if (nEls) parts.push(nEls === 1 ? 'אלמנט מעוצב' : nEls + ' אלמנטים מעוצבים');
-  if (d.bg) parts.push(d.bg.photo ? 'תמונת רקע' : 'רקע');
+  if (d.bg) {
+    parts.push(d.bg.photo ? 'תמונת רקע'
+      : d.bg.gradient ? 'מעבר צבע'
+      : d.bg.tint ? 'גוון'
+      : 'רקע');
+  }
   const nSlots = d.slots && typeof d.slots === 'object' ? Object.keys(d.slots).length : 0;
   if (nSlots) parts.push(nSlots === 1 ? 'תמונה במשבצת' : nSlots + ' תמונות במשבצות');
   const nHid = Array.isArray(d.hidden) ? d.hidden.length : 0;
@@ -288,14 +323,9 @@ function isEmptyDesign(d) {
     !(d.hidden && d.hidden.length);
 }
 
-// The ten element kinds the engine tags (PLAN «design.els … v1.8»). Order is
-// the priority order hit-testing uses when several sit under one pointer:
-// the smallest, most specific marks first, the slide-sized colour fields last,
-// so a tick sitting on a band selects the tick. docs/ELEMENT-INVENTORY.md is
-// the measured audit behind the kind list.
-const EL_KINDS = ['mark', 'line', 'type', 'rule', 'torn', 'ill', 'edge',
-  'sweep', 'field', 'lockup'];
-// data-el keys the engine tags (PLAN «design.els + brand assets v1.6 → v1.8»)
+// data-el keys the engine tags (PLAN «design.els + brand assets v1.6 → v1.8»):
+// the ten kinds derived in docs/ELEMENT-INVENTORY.md from a measured walk of
+// all 47 templates.
 const RE_EL_KEY = /^(?:lockup|(?:rule|torn|ill|edge|field|mark|line|type|sweep):\d+)$/;
 // design.hidden — var names + "slot:N" + "el:<key>" (v1.2 + els v1.6 + v1.8)
 const RE_HIDDEN_KEY =
@@ -333,18 +363,36 @@ function pruneBg(bg) {
   const o = {};
   if (BG_FIELDS.includes(bg.field)) o.field = bg.field;
   if (typeof bg.color === 'string' && bg.color) o.color = bg.color;
+  // gradient + tint (v1.9). Validated against the same shapes the engines
+  // accept, so a design that survives pruning is a design render.mjs will not
+  // die on. Step is normalised to a NUMBER here — the wire format has one
+  // spelling, whatever a form handed us.
+  if (typeof bg.gradient === 'string' && /^grad-[123](-ltr)?$/.test(bg.gradient)) {
+    o.gradient = bg.gradient;
+  }
+  if (bg.tint && typeof bg.tint === 'object' &&
+      TINT_FAMS.includes(String(bg.tint.color)) &&
+      TINT_STEP_LIST.includes(Number(bg.tint.step))) {
+    o.tint = { color: String(bg.tint.color), step: Number(bg.tint.step) };
+  }
   if (typeof bg.photo === 'string' && bg.photo) {
     o.photo = bg.photo;
     if (Array.isArray(bg.pos) && bg.pos.length === 2) {
       o.pos = [round1(clamp(Number(bg.pos[0]) || 0, 0, 100)),
                round1(clamp(Number(bg.pos[1]) || 0, 0, 100))];
     }
-    if (bg.overlay && typeof bg.overlay === 'object' && bg.overlay.color) {
-      o.overlay = {
-        color: String(bg.overlay.color),
-        opacity: clamp(Math.round((Number(bg.overlay.opacity) || 0) * 100) / 100, 0, 0.8),
-      };
-    }
+  }
+  // The scrim used to live inside the photo branch, because a photo was the
+  // only thing it could sit on. It now also scrims a gradient or tint — which
+  // is what makes gradient 2 usable for type at all (3.05:1 bare, 4.73:1 under
+  // red-100 at 0.35) — so it is pruned against ANY of the three surfaces.
+  // Flat bg.color still takes no overlay: that is existing engine behaviour.
+  if ((o.photo || o.gradient || o.tint) &&
+      bg.overlay && typeof bg.overlay === 'object' && bg.overlay.color) {
+    o.overlay = {
+      color: String(bg.overlay.color),
+      opacity: clamp(Math.round((Number(bg.overlay.opacity) || 0) * 100) / 100, 0, 0.8),
+    };
   }
   return Object.keys(o).length ? o : null;
 }
@@ -426,9 +474,6 @@ function injectStyles() {
 .smr-edh--rot{top:-30px;left:50%;transform:translateX(-50%);cursor:grab}
 .smr-edh--rot::after{content:'';position:absolute;top:14px;left:50%;width:2px;height:14px;
   background:#830051;transform:translateX(-50%)}
-.smr-edadd{position:absolute;top:8px;inset-inline-start:8px;display:flex;gap:6px;z-index:3}
-.smr-edadd .btn{padding:5px 10px;font-size:.8rem;background:rgba(255,253,249,.92);
-  box-shadow:0 2px 8px rgba(0,0,0,.14)}
 .smr-eddrop[hidden],.smr-edbusy[hidden]{display:none}
 .smr-eddrop{position:absolute;inset:10px;z-index:6;pointer-events:none;
   display:flex;align-items:center;justify-content:center;border-radius:14px;
@@ -440,16 +485,71 @@ function injectStyles() {
   border:1px solid var(--line,rgba(36,29,32,.12));border-radius:999px;
   padding:6px 14px;font-size:.85rem;font-weight:600;color:var(--ink,#241d20);
   box-shadow:0 2px 10px rgba(0,0,0,.15)}
+/* ============ the editing sidebar (v2.1) ============
+   One shell for every non-artwork control. Two parts side by side: the icon
+   rail on the OUTER edge and the panel body next to the slide — Canva's
+   geometry, mirrored into RTL by the flex direction, not by hand-written
+   left/right. The whole thing is in normal flow when a host hands us a
+   container; ".smr-sb--float" is the fixed-drawer fallback. */
+.smr-sb{display:flex;align-items:stretch;gap:0;min-height:0;
+  background:var(--paper,#fffdf9);border:1px solid var(--line,rgba(36,29,32,.12));
+  border-radius:14px;overflow:hidden;box-shadow:var(--shadow,0 2px 12px rgba(36,29,32,.08));
+  font-size:.88rem;color:var(--ink,#241d20)}
+.smr-sb[hidden]{display:none}
+/* fallback for hosts that pass no container: a drawer pinned to the
+   viewport's inline-end edge. z-index stays UNDER .modal-overlay (100) so a
+   pick-and-return modal is never covered by it. */
+.smr-sb--float{position:fixed;z-index:90;inset-block:12px;inset-inline-end:12px;
+  width:min(392px,94vw);border-radius:14px;
+  box-shadow:0 18px 54px rgba(36,29,32,.26);
+  animation:smr-sb-in .18s ease-out}
+@keyframes smr-sb-in{from{opacity:0;transform:translateX(0) scale(.985)}to{opacity:1;transform:none}}
+
+.smr-sb__rail{order:2;flex:none;width:74px;display:flex;flex-direction:column;
+  gap:2px;padding:8px 6px;background:color-mix(in srgb,var(--ink,#241d20) 4%,var(--paper,#fffdf9));
+  border-inline-start:1px solid var(--line,rgba(36,29,32,.12))}
+.smr-sb__tab{appearance:none;border:0;background:none;cursor:pointer;font:inherit;
+  border-radius:10px;padding:8px 2px 6px;display:flex;flex-direction:column;
+  align-items:center;gap:3px;color:var(--ink-soft,#6b5f63);line-height:1.1;
+  transition:background .12s ease,color .12s ease}
+.smr-sb__tab:hover{background:rgba(131,0,81,.07);color:var(--ink,#241d20)}
+.smr-sb__tab.on{background:color-mix(in srgb,var(--accent,#830051) 12%,transparent);
+  color:var(--accent,#830051);font-weight:700}
+.smr-sb__tab .ic{font-size:1.15rem;line-height:1}
+.smr-sb__tab .lb{font-size:.66rem}
+.smr-sb__tab:disabled{opacity:.38;cursor:default;background:none}
+.smr-sb__railgap{flex:1}
+.smr-sb__tab--danger:hover{background:rgba(179,64,58,.12);color:#b3403a}
+
+.smr-sb__panel{order:1;flex:1;min-width:0;display:flex;flex-direction:column}
+.smr-sb__head{display:flex;align-items:center;gap:8px;padding:11px 13px 9px;
+  border-bottom:1px solid var(--line,rgba(36,29,32,.12))}
+.smr-sb__title{margin:0;font-size:.92rem;font-weight:700;color:var(--ink,#241d20)}
+.smr-sb__body{flex:1;min-height:0;overflow-y:auto;padding:12px 13px 16px;
+  display:grid;gap:10px;align-content:start}
+/* one scroller only (Canva's rule): panes stretch, the body scrolls */
+.smr-sb__pane[hidden]{display:none}
+.smr-sb__pane{display:grid;gap:10px;align-content:start;min-width:0}
+.smr-sb__empty{color:var(--ink-soft,#6b5f63);line-height:1.55;font-size:.86rem}
+.smr-sb__hint{color:var(--ink-soft,#6b5f63);font-size:.78rem;line-height:1.5}
+
+/* narrow: the sidebar becomes a bottom sheet so the slide stays on screen */
+@media (max-width:920px){
+  .smr-sb,.smr-sb--float{position:fixed;z-index:90;inset-inline:0;inset-block:auto 0;
+    width:auto;max-height:58vh;border-radius:16px 16px 0 0;border-bottom:0;
+    box-shadow:0 -12px 40px rgba(36,29,32,.24);animation:smr-sb-up .2s ease-out}
+  .smr-sb__rail{width:64px}
+}
+@keyframes smr-sb-up{from{transform:translateY(14px);opacity:0}to{transform:none;opacity:1}}
+
+/* the selection toolbar, docked: same rows, stacked full-width in the panel */
 .smr-edtb[hidden]{display:none}
-.smr-edtb{position:fixed;z-index:1200;background:var(--paper,#fffdf9);
-  border:1px solid var(--line,rgba(36,29,32,.12));border-radius:12px;
-  box-shadow:0 14px 44px rgba(36,29,32,.28);padding:10px;display:grid;gap:8px;
-  max-width:min(420px,92vw);font-size:.88rem}
+.smr-edtb{display:grid;gap:9px;font-size:.88rem}
 .smr-edtb__row{display:flex;align-items:center;gap:8px;flex-wrap:wrap}
 .smr-edtb__name{font-weight:700;font-size:.8rem;color:var(--ink-soft,#6b5f63);
   direction:ltr;font-family:ui-monospace,monospace}
-.smr-edtb select{max-width:190px}
-.smr-edtb input[type=range]{width:130px;accent-color:var(--accent,#830051)}
+.smr-edtb select{max-width:100%;flex:1;min-width:120px}
+.smr-edtb input[type=range]{flex:1;min-width:110px;max-width:100%;accent-color:var(--accent,#830051)}
 .smr-edtb__sz{font-size:.78rem;color:var(--ink-soft,#6b5f63);min-width:44px;direction:ltr}
 .smr-edtg{appearance:none;border:1px solid var(--line,rgba(36,29,32,.15));background:var(--paper,#fffdf9);
   border-radius:8px;width:32px;height:32px;cursor:pointer;font-size:.95rem;color:var(--ink,#241d20)}
@@ -484,6 +584,13 @@ function injectStyles() {
   height:84px;color:var(--accent,#830051)}
 .smr-edpick--lib .bsvg svg{width:86%;max-height:100%;overflow:visible}
 .smr-edpick--lib .bsvg img{width:100%;height:84px;object-fit:contain}
+/* inside the sidebar the library is the whole pane: no nested scroller (the
+   body scrolls), and a tighter grid for the narrower column */
+.smr-sb .smr-edpick{max-height:none;overflow:visible;padding:0}
+.smr-sb .smr-edpick--lib{grid-template-columns:repeat(auto-fill,minmax(88px,1fr));gap:8px}
+.smr-sb .smr-edlibbar{margin-bottom:0}
+.smr-sb .smr-edlibbar .btn{width:100%}
+.smr-sb .smr-edchips{margin-bottom:0}
 .smr-edbadge{position:absolute;inset-block-start:4px;inset-inline-start:4px;
   background:var(--accent,#830051);color:#fff;border-radius:999px;
   font-size:.62rem;line-height:1;padding:3px 6px}
@@ -495,14 +602,9 @@ function injectStyles() {
 .smr-edcta__ok{color:#2e7d4f;font-weight:700}
 .smr-edcta__no{color:#b3403a}
 .smr-edpanel[hidden]{display:none}
-.smr-edpanel{position:fixed;z-index:1150;width:264px;background:var(--paper,#fffdf9);
-  border:1px solid var(--line,rgba(36,29,32,.12));border-radius:14px;
-  box-shadow:0 14px 44px rgba(36,29,32,.28);padding:12px;display:grid;gap:10px;
-  font-size:.86rem;max-height:min(76vh,720px);overflow-y:auto}
+.smr-edpanel{display:grid;gap:10px;align-content:start;font-size:.86rem;min-width:0}
 .smr-edpanel h5{margin:0;font-size:.8rem;color:var(--ink-soft,#6b5f63);font-weight:700;
   display:flex;align-items:center;gap:6px}
-.smr-edpanel__x{margin-inline-start:auto;appearance:none;border:0;background:none;
-  cursor:pointer;font-size:1rem;color:var(--ink-soft,#6b5f63);line-height:1}
 .smr-edpanel .rec{font-size:.68rem;background:var(--accent,#830051);color:#fff;
   border-radius:999px;padding:2px 8px;font-weight:600}
 .smr-edbgf{display:flex;gap:8px}
@@ -511,6 +613,26 @@ function injectStyles() {
   justify-content:center;padding:4px;font:inherit;font-size:.7rem;font-weight:600}
 .smr-edbgf button.on{outline:2px solid var(--accent,#830051);outline-offset:2px}
 .smr-edwarn{font-size:.78rem;color:#8a5a00;background:#fdf3dd;border-radius:8px;padding:6px 10px}
+/* gradients (v1.9) — wide bars, because a gradient read at swatch size is
+   just a muddy colour; the sweep IS the thing being chosen */
+.smr-edgrad{display:grid;gap:6px}
+.smr-edgrad button{appearance:none;cursor:pointer;height:34px;border-radius:8px;
+  border:1px solid var(--line,rgba(36,29,32,.18));padding:0 9px;font:inherit;
+  font-size:.72rem;font-weight:600;color:#fdf8f4;display:flex;align-items:center;
+  justify-content:space-between;gap:8px;text-shadow:0 1px 2px rgba(0,0,0,.45)}
+.smr-edgrad button.on{outline:2px solid var(--accent,#830051);outline-offset:2px}
+.smr-edgrad .warn{font-size:.66rem;opacity:.95;font-weight:500}
+/* tint ramps (v1.9) — one row per family, the guide's six steps in order.
+   The family label sits outside the row so these read as four separate
+   groups, which is what the guide's "do not mix colors" rule means. */
+.smr-edtint{display:grid;gap:5px}
+.smr-edtint__fam{display:flex;align-items:center;gap:7px}
+.smr-edtint__nm{font-size:.7rem;color:var(--ink-soft,#6b5f63);min-width:32px;font-weight:600}
+.smr-edtint__ramp{display:flex;flex:1;border-radius:7px;overflow:hidden;
+  border:1px solid var(--line,rgba(36,29,32,.18))}
+.smr-edtint__ramp button{appearance:none;border:0;cursor:pointer;flex:1;height:26px;padding:0}
+.smr-edtint__ramp button.on{outline:2px solid var(--accent,#830051);outline-offset:-2px;
+  position:relative;z-index:1}
 .smr-edfoc{position:relative;width:128px;height:160px;border-radius:10px;background-size:cover;
   background-position:center;border:1px solid var(--line,rgba(36,29,32,.18));
   cursor:crosshair;touch-action:none;justify-self:center}
@@ -567,7 +689,6 @@ function injectStyles() {
 .smr-edguide--v{width:1px}
 .smr-edguide--h{height:1px}
 .smr-edguide.on{opacity:1}
-.smr-edadd--bar{position:static;inset-inline-start:auto}
 .smr-edtg--w{width:auto;padding:0 10px;font-size:.8rem}
 .smr-edpick--br button{align-items:stretch}
 .smr-edpick--br .bsvg{display:flex;align-items:center;justify-content:center;
@@ -681,23 +802,6 @@ export function initEditor(handle, slide, opts = {}) {
   const hRot = el('div', { class: 'smr-edh smr-edh--rot', title: 'סיבוב' });
   const hRz = el('div', { class: 'smr-edh smr-edh--rz', title: 'שינוי גודל' });
   selBox.append(hRot, hRz);
-  // opts.actionBar: a host-provided container ABOVE the slide for the
-  // non-contextual action buttons (they don't sit on the artwork). Without
-  // it the row floats over the slide's top corner as before. Either way the
-  // row keeps the .smr-edadd class — hosts/tests target the buttons by it.
-  const barHost = (opts.actionBar && opts.actionBar.nodeType === 1) ? opts.actionBar : null;
-  const addBar = el('div', { class: 'smr-edadd' + (barHost ? ' smr-edadd--bar' : '') },
-    // v2.0: one door to everything — photos, logos, illustrations and brand
-    // marks are one library now, so they are one button (was three).
-    el('button', {
-      class: 'btn btn--ghost', type: 'button',
-      title: 'תמונות, לוגו, איורים וחותמות מותג — הכול במקום אחד',
-      onclick: () => pickAsset(),
-    }, '+ ספריית נכסים'),
-    el('button', { class: 'btn btn--ghost', type: 'button', onclick: () => togglePanel('bg') }, 'רקע'),
-    el('button', { class: 'btn btn--ghost', type: 'button', onclick: () => togglePanel('layers') }, 'שכבות'),
-    el('button', { class: 'btn btn--ghost', type: 'button', title: 'איפוס העיצוב — שקף אחד או כל הקרוסלה', onclick: () => resetDialog() }, 'איפוס עיצוב'),
-  );
   const dropHint = el('div', { class: 'smr-eddrop', hidden: true }, 'שחררו כאן כדי להוסיף את התמונה');
   const busyEl = el('div', { class: 'smr-edbusy', hidden: true }, 'מעלים תמונה…');
   // UI-only hints over empty photo slots (parent document — never rendered
@@ -709,12 +813,7 @@ export function initEditor(handle, slide, opts = {}) {
   const guideH = el('div', { class: 'smr-edguide smr-edguide--h' });
   const overlay = el('div', { class: 'smr-edov', dir: 'rtl' },
     slotHints, hoverBox, peekBox, selBox, gridBox, guideV, guideH, dropHint, busyEl);
-  if (barHost) barHost.appendChild(addBar); else overlay.appendChild(addBar);
   wrapper.appendChild(overlay);
-
-  const toolbar = el('div', { class: 'smr-edtb', dir: 'rtl', hidden: true });
-  toolbar.addEventListener('pointerdown', (e) => e.stopPropagation());
-  document.body.appendChild(toolbar);
 
   // in-place text editing: floating ✓/✗ near the edited block. pointerdown +
   // preventDefault so pressing them never steals focus (focus loss = blur =
@@ -726,12 +825,82 @@ export function initEditor(handle, slide, opts = {}) {
   const editBar = el('div', { class: 'smr-edcta', dir: 'rtl', hidden: true }, ctaOk, ctaNo);
   document.body.appendChild(editBar);
 
-  // side panels (רקע / שכבות) — one open at a time
-  const bgPanel = el('div', { class: 'smr-edpanel', dir: 'rtl', hidden: true });
-  const layersPanel = el('div', { class: 'smr-edpanel', dir: 'rtl', hidden: true });
-  bgPanel.addEventListener('pointerdown', (e) => e.stopPropagation());
-  layersPanel.addEventListener('pointerdown', (e) => e.stopPropagation());
-  document.body.append(bgPanel, layersPanel);
+  // ---------------- the sidebar (v2.1) ----------------
+  //
+  // Four panes, one visible at a time, in ONE shell. The panes are built once
+  // and kept in the DOM (hidden), because every renderer here writes into its
+  // own element with replaceChildren and re-parenting them per tab switch
+  // would strip the listeners the library grid's drag sources depend on.
+
+  const toolbar = el('div', { class: 'smr-edtb', dir: 'rtl', hidden: true });
+  const propsEmpty = el('p', { class: 'smr-sb__empty' },
+    'לוחצים על טקסט, תמונה או צורה בשקף — וכל האפשרויות שלהם מופיעות כאן.');
+  const propsPane = el('div', { class: 'smr-sb__pane', hidden: true }, toolbar, propsEmpty);
+  const libPane = el('div', { class: 'smr-sb__pane', hidden: true });
+  // the two former floating panels keep their own class + renderers; they are
+  // panes now, so their .hidden tracks the active tab and nothing else
+  const bgPanel = el('div', { class: 'smr-edpanel smr-sb__pane', hidden: true });
+  const layersPanel = el('div', { class: 'smr-edpanel smr-sb__pane', hidden: true });
+
+  const TABS = [
+    { key: 'props', icon: '✎', label: 'מאפיינים', title: 'מאפייני הבחירה', pane: propsPane },
+    { key: 'lib', icon: '🖼', label: 'ספרייה', title: 'ספריית נכסים', pane: libPane },
+    { key: 'bg', icon: '🎨', label: 'רקע', title: 'רקע השקף', pane: bgPanel },
+    { key: 'layers', icon: '☰', label: 'שכבות', title: 'שכבות השקף', pane: layersPanel },
+  ];
+  let activeTab = 'props';
+
+  const sbTitle = el('h4', { class: 'smr-sb__title' }, 'מאפייני הבחירה');
+  const sbBody = el('div', { class: 'smr-sb__body' }, ...TABS.map((t) => t.pane));
+  const sbPanel = el('div', { class: 'smr-sb__panel' },
+    el('div', { class: 'smr-sb__head' }, sbTitle), sbBody);
+  const railBtns = new Map();
+  const sbRail = el('div', { class: 'smr-sb__rail' },
+    TABS.map((t) => {
+      const b = el('button', {
+        class: 'smr-sb__tab', type: 'button', title: t.title,
+        'aria-pressed': 'false',
+        onclick: () => openTab(t.key),
+      }, el('span', { class: 'ic' }, t.icon), el('span', { class: 'lb' }, t.label));
+      railBtns.set(t.key, b);
+      return b;
+    }),
+    el('span', { class: 'smr-sb__railgap' }),
+    el('button', {
+      class: 'smr-sb__tab smr-sb__tab--danger', type: 'button',
+      title: 'איפוס העיצוב — שקף אחד או כל הקרוסלה',
+      onclick: () => resetDialog(),
+    }, el('span', { class: 'ic' }, '⟲'), el('span', { class: 'lb' }, 'איפוס')),
+  );
+  const sbHost = (opts.sidebar && opts.sidebar.nodeType === 1) ? opts.sidebar : null;
+  const sidebar = el('aside', {
+    class: 'smr-sb' + (sbHost ? '' : ' smr-sb--float'), dir: 'rtl',
+    'aria-label': 'כלי עריכת השקף',
+  }, sbPanel, sbRail);
+  // clicks inside the sidebar must never reach the slide's deselect handler
+  sidebar.addEventListener('pointerdown', (e) => e.stopPropagation());
+  (sbHost || document.body).appendChild(sidebar);
+
+  function openTab(key, o = {}) {
+    if (!TABS.some((t) => t.key === key)) return;
+    activeTab = key;
+    for (const t of TABS) {
+      t.pane.hidden = t.key !== key;
+      const b = railBtns.get(t.key);
+      b.classList.toggle('on', t.key === key);
+      b.setAttribute('aria-pressed', t.key === key ? 'true' : 'false');
+      if (t.key === key) sbTitle.textContent = t.title;
+    }
+    if (key === 'lib') renderLibraryPane();
+    if (key === 'bg') renderBgPanel();
+    if (key === 'layers') renderLayersPanel();
+    if (key === 'props') syncPropsPane();
+    if (!o.keepScroll) sbBody.scrollTop = 0;
+  }
+
+  function syncPropsPane() {
+    propsEmpty.hidden = !toolbar.hidden;
+  }
 
   // ---------------- geometry ----------------
 
@@ -942,18 +1111,20 @@ export function initEditor(handle, slide, opts = {}) {
   // underneath. `elementsFromPoint` returns the whole stack, so the editor
   // can rank EVERY candidate at the point and offer the ones below the top.
   //
-  // candidatesAt() is the single source of truth for both: click selects
-  // candidates[0], Alt-click (or clicking the same spot again) steps one
-  // deeper and wraps at the bottom. The ranking is deliberate:
-  //   extras (reviewer-placed, topmost first) → photo slots → text blocks →
-  //   decorative els, smallest kind first → nothing.
-  // Slots stay above text because a slot's pending label IS a text block —
-  // clicking it must fill the slot, not edit the label (v1.2). Els stay below
-  // text so the ordinary click on a paragraph still edits the paragraph;
-  // everything underneath is one Alt-click away, and the layers panel lists
-  // it unconditionally for the cases where the geometry is hopeless.
-  const EL_RANK = new Map(EL_KINDS.map((k, i) => [k, i]));
-
+  // Ordering is by STACK DEPTH first, and only then by kind — which is the
+  // one thing a flat "slots → blocks → els" ranking gets wrong. A rule nudged
+  // up over a paragraph is painted on top of it and is the thing the reviewer
+  // is pointing at; ranking all text above all decoration would hand them the
+  // paragraph underneath instead. (The v1.6 regression suite caught exactly
+  // that: a dragged rule stopped being re-selectable.)
+  //
+  // So: walk the elementsFromPoint stack top-down, and for each node collect
+  // its own tagged ancestor-or-self chain. Within one chain a photo slot wins
+  // outright — a slot's pending label IS a text block, and clicking it must
+  // fill the slot, not edit the label (v1.2) — and everything else is
+  // innermost-first, so the colour fill inside a portrait beats the portrait.
+  // candidates[0] is therefore byte-for-byte what the old top-of-stack walk
+  // returned; everything the old walk could never see follows behind it.
   function candidatesAt(e) {
     const p = docPoint(e);
     const out = [];
@@ -976,28 +1147,23 @@ export function initEditor(handle, slide, opts = {}) {
       stack = d.elementsFromPoint ? [...d.elementsFromPoint(p.x, p.y)]
         : [d.elementFromPoint(p.x, p.y)].filter(Boolean);
     } catch { /* ignore */ }
-    // Every tagged ancestor-or-self of every node in the stack is reachable
-    // at this point, not just the tagged ancestors of the TOP node — that
-    // distinction is the whole fix.
-    const slots = [], blocks = [], els = [];
     for (const top of stack) {
+      const chain = [];
+      let slot = null;
       for (let n = top; n && n.nodeType === 1; n = n.parentElement) {
-        if (n.hasAttribute && n.hasAttribute('data-slot') && !n.hasAttribute('data-extra')) {
-          slots.push({ kind: 'slot', n: Number(n.getAttribute('data-slot')) });
+        if (!n.hasAttribute) continue;
+        if (slot == null && n.hasAttribute('data-slot') && !n.hasAttribute('data-extra')) {
+          slot = { kind: 'slot', n: Number(n.getAttribute('data-slot')) };
         }
-        if (n.hasAttribute && n.hasAttribute('data-var')) {
-          blocks.push({ kind: 'block', name: n.getAttribute('data-var') });
-        }
-        if (n.hasAttribute && n.hasAttribute('data-el')) {
+        if (n.hasAttribute('data-var')) chain.push({ kind: 'block', name: n.getAttribute('data-var') });
+        if (n.hasAttribute('data-el')) {
           const key = n.getAttribute('data-el');
-          if (RE_EL_KEY.test(key)) els.push({ kind: 'el', key });
+          if (RE_EL_KEY.test(key)) chain.push({ kind: 'el', key });
         }
       }
+      if (slot) push(slot);
+      chain.forEach(push);
     }
-    // a tick lying on a band should select the tick, so rank els by kind
-    els.sort((a, b) => (EL_RANK.get(a.key.split(':')[0]) ?? 99) -
-      (EL_RANK.get(b.key.split(':')[0]) ?? 99));
-    slots.forEach(push); blocks.forEach(push); els.forEach(push);
     return out;
   }
 
@@ -1007,42 +1173,37 @@ export function initEditor(handle, slide, opts = {}) {
     return c.length ? c[0] : null;
   }
 
-  // Where the last cycle left off, so a second click on the same spot goes
-  // deeper instead of re-selecting the top. Reset by any click that lands
-  // more than CYCLE_R doc-px away, so ordinary clicking never feels sticky.
-  const CYCLE_R = 6;
-  let cycle = null;   // {x, y, i}
+  // Where the last click landed, so the toolbar's depth stepper can re-probe
+  // the same point without a pointer event of its own.
+  let cycle = null;   // {x, y, cx, cy, i}
 
-  // The full pick used by pointerdown: returns {target, index, count} so the
-  // caller can show the reviewer where in the stack it landed. A repeat click
-  // within CYCLE_R of the last one, on something already selected, steps one
-  // level deeper and wraps at the bottom.
+  // The pick used by pointerdown: the TOP candidate, always, plus how deep the
+  // stack goes so the caller can offer the way down.
+  //
+  // Stepping deeper is deliberately NOT bound to a repeat click or to
+  // Alt-click, which is what this brief first proposed. Both collide with
+  // bindings a reviewer already relies on: a second click on a selected
+  // element is the ordinary "I'm about to drag this" gesture (and the v1.6
+  // regression suite caught the selection silently jumping away when it
+  // cycled), and Alt is the free-the-magnets / bleed-past-the-frame modifier
+  // for the drag that may follow this very pointerdown. Double-click is taken
+  // twice over (edit text, fill a slot). So the way down is an explicit
+  // control — «מתחת N/M ▼» in the toolbar — advertised by the peek box and
+  // backed by the layers panel. Same reach, no gesture stolen.
   function pickAt(e) {
     const list = candidatesAt(e);
     if (!list.length) { cycle = null; return null; }
     const p = docPoint(e);
-    const near = cycle && Math.abs(cycle.x - p.x) <= CYCLE_R &&
-      Math.abs(cycle.y - p.y) <= CYCLE_R;
-    let i = 0;
-    if (near && cycle.i < list.length && sameSel(sel, list[cycle.i])) {
-      i = (cycle.i + 1) % list.length;
-    }
-    // client coords ride along so the toolbar's depth stepper can re-probe
-    // the same point without a pointer event of its own
-    cycle = { x: p.x, y: p.y, cx: e.clientX, cy: e.clientY, i };
-    return { target: list[i], index: i, count: list.length };
+    cycle = { x: p.x, y: p.y, cx: e.clientX, cy: e.clientY, i: 0 };
+    return { target: list[0], index: 0, count: list.length };
   }
 
-  // What the NEXT click at this point would step to (drives the peek box).
+  // What is directly UNDER the top candidate at this point (drives the peek
+  // box). Null when the point is unambiguous, so ordinary hovering is quiet.
   function peekAt(e) {
     const list = candidatesAt(e);
     if (list.length < 2) return null;
-    const p = docPoint(e);
-    const near = cycle && Math.abs(cycle.x - p.x) <= CYCLE_R &&
-      Math.abs(cycle.y - p.y) <= CYCLE_R;
-    const at = (near && cycle.i < list.length && sameSel(sel, list[cycle.i]))
-      ? (cycle.i + 1) % list.length : 0;
-    return { target: list[at], index: at, count: list.length };
+    return { target: list[1], index: 1, count: list.length };
   }
 
   function labelOfTarget(t) {
@@ -1096,22 +1257,6 @@ export function initEditor(handle, slide, opts = {}) {
     } else guideH.classList.remove('on');
   }
 
-  function positionToolbar(g) {
-    if (!g || toolbar.hidden) return;
-    const s = scale(), ir = irect();
-    const tw = toolbar.offsetWidth || 300, th = toolbar.offsetHeight || 60;
-    const ax = ir.left + g.cx * s;
-    // extras carry a rotate handle 30px above the box and a resize handle on
-    // the bottom corner — keep the toolbar clear of both
-    const gap = sel && sel.kind === 'extra' ? 52 : 14;
-    let top = ir.top + (g.cy - g.h / 2) * s - th - gap;
-    if (top < 8) top = ir.top + (g.cy + g.h / 2) * s + gap;
-    top = clamp(top, 8, Math.max(8, window.innerHeight - th - 8));
-    const left = clamp(ax - tw / 2, 8, Math.max(8, window.innerWidth - tw - 8));
-    toolbar.style.left = left + 'px';
-    toolbar.style.top = top + 'px';
-  }
-
   // the target whose crop gestures (pan drag / wheel / grid) are live:
   // a selected FILLED slot is always in crop mode; a photo extra only with ✂️ on
   function cropTarget() {
@@ -1141,8 +1286,33 @@ export function initEditor(handle, slide, opts = {}) {
     slotHints.replaceChildren(...boxes);
   }
 
+  // UI-ONLY, injected into the composed iframe after every compose — it is
+  // never part of a render (like the empty-slot hints, PLAN v1.2).
+  //
+  // Some decorations are `pointer-events: none` in the template on purpose
+  // (house-b-statement's .glow is a 1020px scrim; letting it eat clicks would
+  // be wrong in a page). In a render that property means nothing, and in the
+  // editor it means the element is unhittable at every pixel — the exact
+  // failure v1.8 exists to end, and one that no amount of depth-cycling can
+  // fix, because `elementsFromPoint` never reports the element at all.
+  // Re-enabling it here (not in the parity block) keeps the composed output a
+  // faithful render and still makes every tagged element reachable.
+  // !important is load-bearing: the templates scope pointer-events onto their
+  // own classes (.t-house-b-statement-v2 .glow), which outranks [data-el].
+  const EDITOR_ONLY_CSS = '[data-el]{pointer-events:auto!important}';
+  function armIframeHitTesting() {
+    const d = doc();
+    if (!d || !d.head) return;
+    if (d.getElementById('smr-ed-hit')) return;   // survives until the next srcdoc
+    const st = d.createElement('style');
+    st.id = 'smr-ed-hit';
+    st.textContent = EDITOR_ONLY_CSS;
+    d.head.appendChild(st);
+  }
+
   function refreshUI() {
     if (destroyed) return;
+    armIframeHitTesting();
     paintSlotHints();
     if (sel && sel.kind === 'extra' && !design.extras[sel.index]) sel = null;
     if (sel && sel.kind === 'slot' && !slotEl(sel.n)) sel = null;
@@ -1156,7 +1326,7 @@ export function initEditor(handle, slide, opts = {}) {
     const ct = cropTarget();
     if (ct && g) placeBox(gridBox, g); else gridBox.hidden = true;
     toolbar.hidden = false;
-    positionToolbar(g);
+    syncPropsPane();
   }
 
   // ---------------- mutations ----------------
@@ -1244,7 +1414,11 @@ export function initEditor(handle, slide, opts = {}) {
   // `d` = {i, n} when the caller picked out of a stack under a point (v1.8);
   // omitted for layers-panel and programmatic selection, which carry no
   // position and so have no stack to step through.
-  function select(t, d) {
+  // v2.1: selecting something on the slide swings the sidebar to «מאפיינים»,
+  // the way clicking an object in Canva brings up its controls — EXCEPT when
+  // the click came from the layers list (o.keepTab), where yanking the list
+  // out from under the pointer would make the next row unreachable.
+  function select(t, d, o = {}) {
     if (!sameSel(t, sel)) extraCropOn = false; // crop mode never survives retargeting
     sel = t;
     depth = (d && d.n > 1) ? d : null;
@@ -1253,6 +1427,7 @@ export function initEditor(handle, slide, opts = {}) {
     renderToolbar();
     refreshUI();
     renderLayersPanel(); // highlight follows selection
+    if (!o.keepTab && activeTab !== 'props') openTab('props');
   }
 
   function deselect() {
@@ -1264,6 +1439,7 @@ export function initEditor(handle, slide, opts = {}) {
     peekBox.hidden = true;
     toolbar.hidden = true;
     gridBox.hidden = true;
+    syncPropsPane();
     renderLayersPanel();
   }
 
@@ -1278,7 +1454,7 @@ export function initEditor(handle, slide, opts = {}) {
     return el('button', {
       class: 'btn btn--ghost smr-edtb__depth', type: 'button',
       title: 'מתחת לסימון הזה יש עוד ' + (depth.n - 1) +
-        ' — לחיצה עוברת לשכבה הבאה (גם לחיצה חוזרת על אותה נקודה)',
+        ' — לחיצה כאן עוברת לשכבה הבאה. גם לוח «שכבות» מגיע לכל אחת מהן.',
       onclick: () => {
         const at = { clientX: cycle.cx, clientY: cycle.cy };
         const list = candidatesAt(at);
@@ -1337,7 +1513,7 @@ export function initEditor(handle, slide, opts = {}) {
       toolbar.appendChild(el('div', { class: 'smr-edtb__row' },
         el('span', { class: 'smr-edtb__depthlbl' }, 'מתחת'), st));
     }
-    requestAnimationFrame(() => positionToolbar(sel ? geomOf(sel) : null));
+    syncPropsPane();
   }
 
   // «נייר» = the .photo paper mat (default) · «קו» = gold hairline · «בלי» = bare mask
@@ -1754,29 +1930,13 @@ export function initEditor(handle, slide, opts = {}) {
 
   // ---------------- add flows ----------------
 
-  // Every modal the editor opens goes through here: the floating toolbar and
-  // side panels are position:fixed ABOVE the shared modal overlay (z 1200/
-  // 1150 vs .modal-overlay's z 100 — shell-owned CSS), so an open toolbar
-  // can sit on top of a picker and swallow its clicks (bug found when the
-  // host layout shifted: the block toolbar covered the illustration grid).
-  // Hide them for the modal's lifetime; ui.js modal() has no close hook, so
-  // restoration watches for the modal root leaving the DOM (covers ✕,
-  // backdrop, Esc and action-button closes alike).
+  // v2.1: the editor's chrome lives in the sidebar now, which sits in normal
+  // flow (or, floating, at z 90 — deliberately UNDER .modal-overlay's z 100),
+  // so nothing of ours can cover a picker any more. The old hide-and-restore
+  // dance around every modal is gone; this stays as the single door so that
+  // rule has one place to live if the z-order ever moves again.
   function edModal(title, body, opts) {
-    const prev = { tb: toolbar.hidden, bg: bgPanel.hidden, ly: layersPanel.hidden };
-    toolbar.hidden = true;
-    bgPanel.hidden = true;
-    layersPanel.hidden = true;
-    const m = modal(title, body, opts);
-    const watch = () => {
-      if (destroyed) return;
-      if (document.body.contains(m.root)) { requestAnimationFrame(watch); return; }
-      if (!prev.tb && sel) renderToolbar();
-      if (!prev.bg) { bgPanel.hidden = false; renderBgPanel(); placePanel(bgPanel); }
-      if (!prev.ly) { layersPanel.hidden = false; renderLayersPanel(); placePanel(layersPanel); }
-    };
-    requestAnimationFrame(watch);
-    return m;
+    return modal(title, body, opts);
   }
 
   // ---------------- «ספריית נכסים» — ONE picker (v2.0) ----------------
@@ -1867,11 +2027,21 @@ export function initEditor(handle, slide, opts = {}) {
     addPhotoExtra(a.url, 50, 52);
   }
 
-  // o.onPick(url) redirects the choice to the caller (slot fill/replace) —
-  // in that mode every asset resolves to a URL, studio drawings included.
-  // o.kind pre-selects a filter chip. o.title labels the modal.
-  function pickAsset(o = {}) {
-    let m = null;
+  // buildLibrary — the one library UI, in two dresses (v2.1).
+  //
+  //   sidebar «ספרייה» tab : o.inline — a pick PLACES the asset and the pane
+  //                          stays open, so adding three things is three
+  //                          clicks and no re-opening.
+  //   pick-and-return modal: o.onPick(url) — a pick resolves to a URL for the
+  //                          caller (fill a photo slot, choose a background)
+  //                          and o.dismiss() closes the host modal.
+  //
+  // o.kind pre-selects a filter chip. Returns {root, draw, focus} — draw() is
+  // how the host refreshes it after the board library changes.
+  function buildLibrary(o = {}) {
+    const inline = !!o.inline;
+    const dismiss = typeof o.dismiss === 'function' ? o.dismiss : () => {};
+    const hideHost = typeof o.hideHost === 'function' ? o.hideHost : () => {};
     let kind = o.kind || 'all';
     let onlyPost = false;
     let q = '';
@@ -1903,7 +2073,7 @@ export function initEditor(handle, slide, opts = {}) {
         type: 'button', title: a.name || a.label || '',
         draggable: onPick ? 'false' : 'true',
         onclick: () => {
-          if (m) m.close();
+          dismiss();
           if (onPick) onPick(a.url);
           else placeAsset(a);
         },
@@ -1913,16 +2083,17 @@ export function initEditor(handle, slide, opts = {}) {
         a.post_id && postId && a.post_id === postId
           ? el('span', { class: 'smr-edbadge' }, 'בפוסט הזה') : null,
       );
-      // uploads stay draggable straight onto the slide (no re-upload). Hide
-      // the modal a tick after dragstart — removing the source synchronously
-      // aborts the drag.
+      // uploads stay draggable straight onto the slide (no re-upload). In the
+      // modal, hide it a tick after dragstart — removing the source
+      // synchronously aborts the drag. In the sidebar there is nothing in the
+      // way, so the drag just runs and the pane stays put.
       if (!onPick && a.source !== 'studio') {
         btn.addEventListener('dragstart', (e) => {
           e.dataTransfer.setData(PHOTO_DRAG_MIME, a.url);
           e.dataTransfer.effectAllowed = 'copy';
-          setTimeout(() => { if (m) m.root.style.display = 'none'; }, 0);
+          setTimeout(hideHost, 0);
         });
-        btn.addEventListener('dragend', () => { if (m) m.close(); });
+        btn.addEventListener('dragend', () => dismiss());
       }
       return btn;
     }
@@ -1970,8 +2141,14 @@ export function initEditor(handle, slide, opts = {}) {
       type: 'file', accept: 'image/png,image/jpeg,image/webp,image/svg+xml',
       multiple: true, style: { display: 'none' },
     });
-    const upBtn = el('button', { class: 'btn btn--ghost', type: 'button', onclick: () => file.click() },
-      '+ העלאת קובץ (SVG · PNG · JPG · WEBP)');
+    // the label stays short: full-width in the sidebar's narrow panel, the old
+    // «(SVG · PNG · JPG · WEBP)» tail wrapped mid-parenthesis in RTL
+    const UP_LABEL = '+ העלאת קובץ';
+    const upBtn = el('button', {
+      class: 'btn btn--ghost', type: 'button',
+      title: 'SVG · PNG · JPG · WEBP',
+      onclick: () => file.click(),
+    }, UP_LABEL);
     file.addEventListener('change', async () => {
       const files = [...file.files];
       file.value = '';
@@ -1992,14 +2169,15 @@ export function initEditor(handle, slide, opts = {}) {
         }
       }
       upBtn.disabled = false;
-      upBtn.textContent = '+ העלאת קובץ (SVG · PNG · JPG · WEBP)';
+      upBtn.textContent = UP_LABEL;
       if (!last) return;
       // one file: place it immediately (that is what "upload here" means);
       // several: leave them in the grid so the reviewer chooses.
       if (files.length === 1) {
-        if (m) m.close();
+        dismiss();
         if (onPick) onPick(last.url);
         else addPhotoExtra(last.url, 50, 52);
+        draw();
         return;
       }
       toast(files.length + ' נכסים נוספו לספרייה');
@@ -2007,16 +2185,43 @@ export function initEditor(handle, slide, opts = {}) {
     });
 
     draw();
-    m = edModal(
-      o.title || 'ספריית נכסים',
-      el('div', null,
-        el('div', { class: 'smr-edlibbar' }, search, upBtn, file),
-        chipRow,
-        count,
-        el('div', { style: { height: '8px' } }),
-        grid,
-      ));
-    setTimeout(() => search.focus(), 60);
+    const root = el('div', { class: inline ? 'smr-sb__pane' : null },
+      el('div', { class: 'smr-edlibbar' }, search, upBtn, file),
+      chipRow,
+      count,
+      inline ? null : el('div', { style: { height: '8px' } }),
+      grid,
+    );
+    return { root, draw, focus: () => search.focus() };
+  }
+
+  // the sidebar's «ספרייה» tab — built once, redrawn whenever it is opened or
+  // the host swaps the board library under us (setAssets)
+  let libUI = null;
+  function renderLibraryPane() {
+    if (!libUI) {
+      libUI = buildLibrary({ inline: true });
+      libPane.replaceChildren(
+        el('p', { class: 'smr-sb__hint' },
+          'לחיצה מוסיפה לשקף · אפשר גם לגרור נכס ישירות למקום שרוצים.'),
+        libUI.root,
+      );
+    } else {
+      libUI.draw();
+    }
+  }
+
+  // pick-and-return: the library in a modal, handing a URL back to the caller
+  function pickAsset(o = {}) {
+    let m = null;
+    const lib = buildLibrary({
+      ...o,
+      dismiss: () => { if (m) m.close(); },
+      hideHost: () => { if (m) m.root.style.display = 'none'; },
+    });
+    m = edModal(o.title || 'ספריית נכסים', lib.root);
+    setTimeout(() => lib.focus(), 60);
+    return m;
   }
 
   // Slot fill/replace still asks for "a picture" — same one library, opened
@@ -2427,9 +2632,51 @@ export function initEditor(handle, slide, opts = {}) {
     warm: '#f7f2ec',
   };
 
+  // Gradients + tints (v1.9). The manifest carries the resolved CSS because
+  // this panel renders in the app document, not the slide iframe.
+  const gradients = (Array.isArray(man.gradients) && man.gradients.length)
+    ? man.gradients : GRADIENT_FALLBACK;
+  const TINT_FAM_LABELS = { red: 'אדום', gold: 'זהב', blue: 'כחול', orange: 'כתום' };
+  // House families first — red is the primary and gold is the chosen
+  // secondary (BRAND.md open decision #1). Blue and orange are the guide's
+  // other two groups, available but not the system's default reach.
+  const TINT_FAM_ORDER = ['red', 'gold', 'blue', 'orange'];
+
   function paletteCss(name) {
     const p = palette.find((x) => x.name === name);
     return p ? p.css : null;
+  }
+
+  // Every tint family this slide is committed to, from ANY source — the
+  // background, but also every recoloured block, element and extra. The
+  // guide's rule is about the slide, not the background: "select one group of
+  // tints (do not mix colors)".
+  // Scoping this to design.bg (as it was first written) made it very nearly
+  // unfireable, because choosing a tint clears the gradient AND the flat
+  // colour, so nothing was left for it to disagree with. The real mixing
+  // happens between a tinted background and recoloured marks.
+  function tintFamiliesInUse(exclude) {
+    const fams = new Set();
+    const addToken = (v) => {
+      const m = /^(red|blue|orange|gold)-\d+$/.exec(String(v || ''));
+      if (m) fams.add(m[1]);
+    };
+    const bg = design.bg || {};
+    if (bg.tint && TINT_FAM_LABELS[bg.tint.color]) fams.add(bg.tint.color);
+    addToken(bg.color);
+    if (bg.overlay) addToken(bg.overlay.color);
+    const g = bg.gradient && gradients.find((x) => x.name === bg.gradient);
+    if (g && g.family) fams.add(g.family);
+    for (const src of [design.blocks, design.els]) {
+      for (const k of Object.keys(src || {})) addToken((src[k] || {}).color);
+    }
+    for (const ex of (design.extras || [])) addToken((ex || {}).color);
+    // Red is every gradient's anchor and the system's primary, so it never
+    // makes a slide "mixed" — flagging it would fire on nearly every slide
+    // and the warning would stop meaning anything.
+    fams.delete('red');
+    if (exclude) fams.delete(exclude);
+    return [...fams];
   }
 
   function currentField() {
@@ -2465,56 +2712,132 @@ export function initEditor(handle, slide, opts = {}) {
     renderLayersPanel();
   }
 
-  function togglePanel(which) {
-    const p = which === 'bg' ? bgPanel : layersPanel;
-    const other = which === 'bg' ? layersPanel : bgPanel;
-    if (p.hidden) {
-      other.hidden = true;              // one panel open at a time
-      p.hidden = false;
-      if (which === 'bg') renderBgPanel(); else renderLayersPanel();
-      placePanel(p);
-    } else {
-      p.hidden = true;
-    }
-  }
-
-  function placePanel(p) {
-    if (!p || p.hidden) return;
-    const ir = irect();
-    const pw = p.offsetWidth || 264;
-    let left = ir.left - pw - 14;                  // beside the slide…
-    if (left < 8) left = Math.min(ir.right + 14, window.innerWidth - pw - 8);
-    p.style.left = Math.max(8, left) + 'px';
-    p.style.top = clamp(ir.top, 8, Math.max(8, window.innerHeight - (p.offsetHeight || 320) - 8)) + 'px';
-  }
-
   function renderBgPanel() {
     if (bgPanel.hidden) return;
     const bg = design.bg || {};
     const kids = [];
+    // (the pane's own title is the sidebar header — no in-pane heading here)
 
-    kids.push(el('h5', null, 'רקע השקף',
-      el('button', { class: 'smr-edpanel__x', type: 'button', title: 'סגירה', onclick: () => { bgPanel.hidden = true; } }, '✕')));
+    // The scrim control, shared by all three surfaces that can carry one:
+    // a photo (as before) and, since v1.9, a gradient or tint. It is the fix
+    // for gradient 2's 3.05:1 light end, so it has to be reachable without a
+    // photo in play.
+    function scrimUI() {
+      kids.push(el('h5', null, 'כיסוי לקריאות'));
+      const ovl = bg.overlay || null;
+      kids.push(swatchRow(ovl ? ovl.color : null, (color) => mutateBg((b) => {
+        if (color) b.overlay = { color, opacity: (b.overlay && b.overlay.opacity) || 0.35 };
+        else delete b.overlay;
+      })));
+      if (ovl) {
+        const opVal = el('span', { class: 'smr-edtb__sz' }, Math.round((ovl.opacity || 0.35) * 100) + '%');
+        const opRange = el('input', { type: 'range', min: '0', max: '0.8', step: '0.05', value: String(ovl.opacity ?? 0.35) });
+        opRange.addEventListener('input', () => {
+          if (design.bg && design.bg.overlay) design.bg.overlay.opacity = Number(opRange.value);
+          opVal.textContent = Math.round(Number(opRange.value) * 100) + '%';
+          commit({ defer: 150 });
+        });
+        opRange.addEventListener('change', () => commit());
+        kids.push(el('div', { class: 'smr-edtb__row' }, el('span', null, 'עוצמה'), opRange, opVal));
+      }
+    }
 
     // --- brand fields (recommended) ---
     kids.push(el('h5', null, 'שדות המותג', el('span', { class: 'rec' }, 'מומלץ')));
     kids.push(el('div', { class: 'smr-edbgf' },
       BG_FIELDS.map((f) => el('button', {
         type: 'button',
-        class: bg.field === f && !bg.color && !bg.photo ? 'on' : '',
+        class: bg.field === f && !bg.color && !bg.photo && !bg.gradient && !bg.tint ? 'on' : '',
         style: { background: FIELD_PREVIEW[f], color: f === 'deep' ? '#fff' : 'inherit' },
         title: 'החלפת שדה הרקע — הטקסט מתאים את עצמו אוטומטית',
         onclick: () => mutateBg((b) => {
           b.field = f;
           delete b.color; delete b.photo; delete b.pos; delete b.overlay;
+          delete b.gradient; delete b.tint;
         }),
       }, FIELD_LABELS[f]))));
+
+    // --- gradients (guide p.10) ---
+    // Second, per the brief. Three bars, real sweeps, drawn in reading order.
+    kids.push(el('h5', null, 'מעברי צבע'));
+    kids.push(el('div', { class: 'smr-edgrad' },
+      gradients.map((g) => el('button', {
+        type: 'button',
+        class: bg.gradient === g.name ? 'on' : '',
+        style: { background: g.css },
+        title: g.safe
+          ? `${g.name} — ניגודיות ${g.worst}:1 לאורך כל המעבר`
+          : `${g.name} — יורד ל־${g.worst}:1 בקצה הבהיר; לכותרות בלבד, או עם שכבת הכהיה`,
+        onclick: () => mutateBg((b) => {
+          if (b.gradient === g.name) { delete b.gradient; return; }
+          b.gradient = g.name;
+          delete b.tint; delete b.color; delete b.photo; delete b.pos;
+        }),
+      }, el('span', null, g.label), g.safe ? null : el('span', { class: 'warn' }, '⚠')))));
+
+    // Gradient 2 is the measured failure: --on-deep decays 9.55 -> 3.05 and
+    // crosses the 4.5:1 floor at 68% of the sweep. Offer the fix inline rather
+    // than only naming the problem — the scrim is one tap away.
+    const gSel = bg.gradient && gradients.find((x) => x.name === bg.gradient);
+    if (gSel && !gSel.safe && !bg.overlay) {
+      kids.push(el('div', { class: 'smr-edwarn' },
+        'המעבר הזה בהיר מדי בקצה אחד לטקסט גוף. מתאים לכותרות ולעיטורים, ',
+        el('button', {
+          class: 'btn btn--ghost', type: 'button',
+          style: { padding: '2px 8px', fontSize: '.74rem' },
+          onclick: () => mutateBg((b) => { b.overlay = { color: 'red-100', opacity: 0.35 }; }),
+        }, 'או הוסיפו שכבת הכהיה')));
+    }
+
+    // --- tint ramps (guide p.9) ---
+    kids.push(el('h5', null, 'גוונים'));
+    kids.push(el('div', { class: 'smr-edtint' },
+      TINT_FAM_ORDER.map((fam) => el('div', { class: 'smr-edtint__fam' },
+        el('span', { class: 'smr-edtint__nm' }, TINT_FAM_LABELS[fam]),
+        el('div', { class: 'smr-edtint__ramp' },
+          TINT_STEP_LIST.map((step) => {
+            const css = paletteCss(`${fam}-${step}`);
+            if (!css) return null;
+            const on = bg.tint && bg.tint.color === fam && Number(bg.tint.step) === step;
+            return el('button', {
+              type: 'button',
+              class: on ? 'on' : '',
+              style: { background: css },
+              title: `${fam}-${step} · ${css}`,
+              onclick: () => mutateBg((b) => {
+                if (b.tint && b.tint.color === fam && Number(b.tint.step) === step) {
+                  delete b.tint; return;
+                }
+                b.tint = { color: fam, step };
+                delete b.gradient; delete b.color; delete b.photo; delete b.pos;
+              }),
+            });
+          })),
+      ))));
+
+    // The guide's one rule about tints, enforced as a warning. Never a block:
+    // a deliberate two-family slide is the operator's call, not the tool's.
+    if (bg.tint) {
+      const others = tintFamiliesInUse(bg.tint.color);
+      if (others.length) {
+        kids.push(el('div', { class: 'smr-edwarn' },
+          '⚠ המדריך מתיר קבוצת גוונים אחת לשקף. כאן מעורבות גם: ' +
+          others.map((f) => TINT_FAM_LABELS[f] || f).join(', ')));
+      }
+    }
+
+    // Scrim for a gradient/tint surface. With a photo it renders further down,
+    // beside the focal-point control, where it has always lived.
+    if ((bg.gradient || bg.tint) && !bg.photo) scrimUI();
 
     // --- flat color ---
     kids.push(el('h5', null, 'צבע אחיד'));
     kids.push(swatchRow(bg.color || null, (color) => mutateBg((b) => {
-      if (color) { b.color = color; delete b.photo; delete b.pos; delete b.overlay; }
-      else delete b.color;
+      if (color) {
+        b.color = color;
+        delete b.photo; delete b.pos; delete b.overlay;
+        delete b.gradient; delete b.tint;
+      } else delete b.color;
     })));
     if (bgClash()) {
       kids.push(el('div', { class: 'smr-edwarn' }, '⚠ כדאי לבדוק את קריאות הטקסט על הצבע הזה'));
@@ -2549,24 +2872,7 @@ export function initEditor(handle, slide, opts = {}) {
       foc.addEventListener('pointerup', () => { if (focDrag) { focDrag = false; commit(); } });
       kids.push(foc);
 
-      // scrim (overlay) for legibility
-      kids.push(el('h5', null, 'כיסוי לקריאות'));
-      const ovl = bg.overlay || null;
-      kids.push(swatchRow(ovl ? ovl.color : null, (color) => mutateBg((b) => {
-        if (color) b.overlay = { color, opacity: (b.overlay && b.overlay.opacity) || 0.35 };
-        else delete b.overlay;
-      })));
-      if (ovl) {
-        const opVal = el('span', { class: 'smr-edtb__sz' }, Math.round((ovl.opacity || 0.35) * 100) + '%');
-        const opRange = el('input', { type: 'range', min: '0', max: '0.8', step: '0.05', value: String(ovl.opacity ?? 0.35) });
-        opRange.addEventListener('input', () => {
-          if (design.bg && design.bg.overlay) design.bg.overlay.opacity = Number(opRange.value);
-          opVal.textContent = Math.round(Number(opRange.value) * 100) + '%';
-          commit({ defer: 150 });
-        });
-        opRange.addEventListener('change', () => commit());
-        kids.push(el('div', { class: 'smr-edtb__row' }, el('span', null, 'עוצמה'), opRange, opVal));
-      }
+      scrimUI();
       kids.push(el('button', {
         class: 'btn btn--ghost smr-edtb__del', type: 'button',
         onclick: () => mutateBg((b) => { delete b.photo; delete b.pos; delete b.overlay; }),
@@ -2619,7 +2925,6 @@ export function initEditor(handle, slide, opts = {}) {
     }
 
     bgPanel.replaceChildren(...kids);
-    requestAnimationFrame(() => placePanel(bgPanel));
   }
 
   // ---------------- layers panel ----------------
@@ -2642,7 +2947,7 @@ export function initEditor(handle, slide, opts = {}) {
     design.extras = [...backs, ...fronts];
     const idx = keepEx ? design.extras.indexOf(keepEx) : -1;
     commit(); // prune() replaces the objects, so resolve the index FIRST
-    if (idx >= 0) select({ kind: 'extra', index: idx });
+    if (idx >= 0) select({ kind: 'extra', index: idx }, null, { keepTab: true });
     else if (sel && sel.kind === 'extra') deselect();
     renderLayersPanel();
   }
@@ -2682,7 +2987,7 @@ export function initEditor(handle, slide, opts = {}) {
     const row = el('div', {
       class: 'smr-edlyr__row' + (isSel ? ' on' : ''),
       draggable: 'true',
-      onclick: () => select({ kind: 'extra', index: design.extras.indexOf(ex) }),
+      onclick: () => select({ kind: 'extra', index: design.extras.indexOf(ex) }, null, { keepTab: true }),
     },
       el('span', { class: 'smr-edlyr__grip', title: 'גוררים לשינוי הסדר' }, '⋮⋮'),
       thumb,
@@ -2723,6 +3028,14 @@ export function initEditor(handle, slide, opts = {}) {
     const bg = design.bg;
     if (!bg) return 'ברירת המחדל של התבנית';
     if (bg.photo) return 'תמונת רקע' + (bg.overlay ? ' + כיסוי' : '');
+    if (bg.gradient) {
+      const g = gradients.find((x) => x.name === bg.gradient);
+      return 'מעבר: ' + ((g && g.label) || bg.gradient) + (bg.overlay ? ' + כיסוי' : '');
+    }
+    if (bg.tint) {
+      return 'גוון: ' + (TINT_FAM_LABELS[bg.tint.color] || bg.tint.color) +
+        ' ' + bg.tint.step + '%' + (bg.overlay ? ' + כיסוי' : '');
+    }
     if (bg.color) return 'צבע: ' + bg.color;
     if (bg.field) return 'שדה: ' + (FIELD_LABELS[bg.field] || bg.field);
     return 'ברירת המחדל של התבנית';
@@ -2749,7 +3062,7 @@ export function initEditor(handle, slide, opts = {}) {
         onclick: (e) => { e.stopPropagation(); restoreKey(key); },
       }, 'שחזר') : null,
     );
-    if (!off) row.addEventListener('click', () => select(t));
+    if (!off) row.addEventListener('click', () => select(t, null, { keepTab: true }));
     return row;
   }
 
@@ -2772,8 +3085,6 @@ export function initEditor(handle, slide, opts = {}) {
     // selectable and stylable, but the stacking order is the template's.
     const elKeys = elKeysInDoc();
     const kids = [
-      el('h5', null, 'שכבות',
-        el('button', { class: 'smr-edpanel__x', type: 'button', title: 'סגירה', onclick: () => { layersPanel.hidden = true; } }, '✕')),
       el('div', { class: 'smr-edlyr' },
         el('div', { class: 'smr-edlyr__band' }, 'מעל הטקסט'),
         fronts.length
@@ -2801,7 +3112,7 @@ export function initEditor(handle, slide, opts = {}) {
         el('div', { class: 'smr-edlyr__band' }, 'רקע'),
         el('div', {
           class: 'smr-edlyr__row', title: 'פתיחת עורך הרקע',
-          onclick: () => { layersPanel.hidden = true; togglePanel('bg'); },
+          onclick: () => openTab('bg'),
         },
           el('span', { class: 'smr-edlyr__grip', style: { visibility: 'hidden' } }, '⋮⋮'),
           el('span', { class: 'smr-edlyr__nm' }, bgRowSummary()),
@@ -2809,7 +3120,6 @@ export function initEditor(handle, slide, opts = {}) {
       ),
     ];
     layersPanel.replaceChildren(...kids);
-    requestAnimationFrame(() => placePanel(layersPanel));
   }
 
   // ---------------- pointer interactions ----------------
@@ -3037,8 +3347,8 @@ export function initEditor(handle, slide, opts = {}) {
     const hit = pick && pick.target;
     if (!hit) { deselect(); return; }
     const d = { i: pick.index, n: pick.count };
-    if (!sameSel(hit, sel) || (depth && depth.i !== pick.index)) select(hit, d);
-    else { depth = pick.count > 1 ? d : null; renderToolbar(); }
+    if (!sameSel(hit, sel)) select(hit, d);
+    else if (!depth || depth.n !== pick.count) { depth = pick.count > 1 ? d : null; renderToolbar(); }
 
     // crop-pan: a selected FILLED slot is always in crop mode; a photo extra
     // only with ✂️ on — dragging pans `pos` inside the frame, not the frame
@@ -3133,7 +3443,6 @@ export function initEditor(handle, slide, opts = {}) {
           g.cy += (ny - ges.baseDy) / 100 * H;
         }
         placeBox(selBox, g);
-        positionToolbar(g);
       } else if (ges.mode === 'resize') {
         const rot = (ges.baseRot || 0) * Math.PI / 180;
         // project pointer delta on the box's local x axis (handle sits on a corner)
@@ -3143,7 +3452,6 @@ export function initEditor(handle, slide, opts = {}) {
         const g = geomOf(ges.target);
         if (g && !ges.el) { const w = ges.liveW / 100 * W; g.h *= w / g.w; g.w = w; }
         placeBox(selBox, g);
-        positionToolbar(g);
       } else if (ges.mode === 'croppan') {
         // pointer delta (doc units) -> object-position %: pos runs 0..100
         // across the overflow band, and moving content right = revealing the
@@ -3187,7 +3495,9 @@ export function initEditor(handle, slide, opts = {}) {
       const pk = peekAt(e);
       if (pk && !sameSel(pk.target, hit)) {
         placeBox(peekBox, geomOf(pk.target));
-        peekTag.textContent = 'לחצו שוב · ' + labelOfTarget(pk.target) +
+        // Short on purpose: the tag hangs over whatever is above the box, and
+        // the «מתחת ▼» button it points at is already on screen.
+        peekTag.textContent = '▼ ' + labelOfTarget(pk.target) +
           ' (' + (pk.index + 1) + '/' + pk.count + ')';
       } else peekBox.hidden = true;
     });
@@ -3301,8 +3611,6 @@ export function initEditor(handle, slide, opts = {}) {
     if (ges) return;
     refreshUI();
     if (editing) placeEditBar();
-    placePanel(bgPanel);
-    placePanel(layersPanel);
   };
 
   overlay.addEventListener('pointerdown', onDown);
@@ -3322,6 +3630,10 @@ export function initEditor(handle, slide, opts = {}) {
   const ro = new ResizeObserver(reposition);
   ro.observe(wrapper);
 
+  // open on «מאפיינים» with its empty state: the first thing the sidebar says
+  // is what to do next (click something on the slide), not a wall of controls
+  openTab('props');
+
   // ---------------- public handle ----------------
 
   return {
@@ -3332,11 +3644,8 @@ export function initEditor(handle, slide, opts = {}) {
       clearTimeout(changeT);
       clearTimeout(applyT);
       overlay.remove();
-      addBar.remove(); // no-op inside the overlay; needed in a host actionBar
-      toolbar.remove();
+      sidebar.remove(); // takes the rail, the toolbar and both panes with it
       editBar.remove();
-      bgPanel.remove();
-      layersPanel.remove();
       document.removeEventListener('keydown', onKey);
       window.removeEventListener('scroll', reposition, true);
       window.removeEventListener('resize', reposition);
@@ -3353,10 +3662,12 @@ export function initEditor(handle, slide, opts = {}) {
     // is all it takes for a new upload to be pickable everywhere at once.
     setAssets(list) {
       opts.assets = Array.isArray(list) ? list : [];
+      if (activeTab === 'lib' && libUI) libUI.draw();
     },
     getDesign() { return isEmptyDesign(design) ? null : deepCopy(design); },
     addPhotoExtra,   // (url, xPct, yPct) — host fallback for off-overlay drops
     dropFiles,       // (files, xPct, yPct) — same, for file drops
     startTextEdit,   // (name, ev?) — in-place text editing entry point
+    openTab,         // ('props'|'lib'|'bg'|'layers') — host-driven tab switch
   };
 }
