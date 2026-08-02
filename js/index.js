@@ -4,6 +4,7 @@
 import {
   initStore, whoAmI, ensureName, slideUrl, assetUrl,
   listPosts, listVotes, latestVotes, listAllPins, listAllVersions,
+  listAllApprovals, approvalState, getRole,
   setStage, savePostOrder, subscribe,
 } from './store.js';
 import { initCompose, mountSlide } from './compose.js';
@@ -20,6 +21,8 @@ let me = { name: '', author_id: '' };
 let posts = [];
 let agg = new Map();              // post_id -> {yes,no,maybe,mine,discuss,last}
 let versions = new Map();         // post_id -> [sm_post_versions row] vnum desc
+let approvalsByPost = new Map();  // post_id -> [sm_approvals row] (v2.3)
+let waitingOnly = false;          // «ממתינים לאישור שיווק» toggle (v2.3, plan §7)
 const viewing = new Map();        // post_id -> vnum | 'studio' (per-card VIEW state only)
 const filters = { cat: 'all', stage: 'all', sort: 'manual', q: '' };
 let refreshing = false;
@@ -41,6 +44,11 @@ const $ = (id) => document.getElementById(id);
     return;
   }
   me = safeWho();
+  // §7 — declared-not-enforced: ON by default for the marketing hat at load,
+  // available to everyone regardless (a therapist/no-role reviewer can still
+  // click it). Never re-checked after boot — a role change mid-session does
+  // not silently flip a toggle the reviewer may have set deliberately.
+  waitingOnly = getRole() === 'marketing';
   $('nav').replaceChildren(navBar('index'));
   wireToolbar();
   await refresh(true);
@@ -56,18 +64,22 @@ function safeWho() {
 async function refresh(first) {
   if (refreshing || dragging) return; refreshing = true;
   try {
-    const [p, voteRows, pinRows, verRows] = await Promise.all([
+    // listAllApprovals() rides alongside listAllVersions() — ONE extra
+    // request for the whole board, never per-card (plan §7).
+    const [p, voteRows, pinRows, verRows, apprRows] = await Promise.all([
       listPosts(), listVotes(), listAllPins(), listAllVersions().catch(() => []),
+      listAllApprovals().catch(() => []),
     ]);
     posts = p || [];
     me = safeWho();
     agg = aggregate(posts, voteRows || [], pinRows || []);
     versions = groupVersions(verRows || []);
+    approvalsByPost = groupApprovals(apprRows || []);
     // A poll that changed nothing must NOT rebuild the grid: re-rendering
     // tears down every live-composed cover and re-mounts it. And an open
     // popup means the reviewer is mid-interaction — leave the DOM alone and
     // let the next refresh (digest still unrecorded) pick the change up.
-    const d = stateDigest(posts, voteRows, pinRows, verRows);
+    const d = stateDigest(posts, voteRows, pinRows, verRows, apprRows);
     if (!first && d === lastDigest) return;
     if (!first && openMenu) return;
     lastDigest = d;
@@ -126,9 +138,21 @@ function groupVersions(rows) {
   return out;
 }
 
+// post_id -> [sm_approvals row] (v2.3). Order doesn't matter here —
+// approvalState() finds the latest by created_at itself.
+function groupApprovals(rows) {
+  const out = new Map();
+  for (const r of rows || []) {
+    if (!r || !r.post_id) continue;
+    if (!out.has(r.post_id)) out.set(r.post_id, []);
+    out.get(r.post_id).push(r);
+  }
+  return out;
+}
+
 // Cheap fingerprint of everything the grid draws. sm_posts.updated_at is
 // bumped by every PATCH in BOTH drivers, so it covers slide edits too.
-function stateDigest(postRows, voteRows, pinRows, verRows) {
+function stateDigest(postRows, voteRows, pinRows, verRows, apprRows) {
   const tail = (rows) => {
     let n = 0; let last = '';
     for (const r of rows || []) { n++; const c = String(r.created_at || ''); if (c > last) last = c; }
@@ -138,7 +162,7 @@ function stateDigest(postRows, voteRows, pinRows, verRows) {
   for (const r of pinRows || []) replies += Number(r.reply_count ?? 0) || 0;
   const p = (postRows || []).map((x) =>
     `${x.id}|${x.sort}|${x.stage}|${x.category}|${x.version}|${x.updated_at}|${x.title}`).join('~');
-  return `${p}#${tail(voteRows)}#${tail(pinRows)}/${replies}#${tail(verRows)}`;
+  return `${p}#${tail(voteRows)}#${tail(pinRows)}/${replies}#${tail(verRows)}#${tail(apprRows)}`;
 }
 
 /* ── URL helpers (always preserve board + local) ── */
@@ -167,7 +191,13 @@ function wireToolbar() {
 
 function matches(p, { skipCat = false, skipStage = false } = {}) {
   if (!skipCat && filters.cat !== 'all' && p.category !== filters.cat) return false;
-  if (!skipStage && filters.stage !== 'all' && p.stage !== filters.stage) return false;
+  if (!skipStage) {
+    // The waiting-on-marketing view IS the stage filter while it's on (its
+    // own stage∉{parked,complete} clause, plan §7) — it composes with
+    // category/search below, not with the stage tabs (picking a tab exits it).
+    if (waitingOnly) { if (!isWaiting(p)) return false; }
+    else if (filters.stage !== 'all' && p.stage !== filters.stage) return false;
+  }
   if (filters.q) {
     const q = filters.q.toLowerCase();
     const hay = `${p.title || ''} ${p.caption || ''}`.toLowerCase();
@@ -176,7 +206,15 @@ function matches(p, { skipCat = false, skipStage = false } = {}) {
   return true;
 }
 
-function renderAll() { renderChips(); renderTabs(); renderProgress(); renderGrid(); }
+function renderAll() { renderChips(); renderTabs(); renderProgress(); renderGrid(); syncToolbarState(); }
+
+// The sort dropdown has no effect while the waiting view forces its own
+// order — disable it rather than leave a control that silently does nothing.
+function syncToolbarState() {
+  $('sort').disabled = waitingOnly;
+  $('sort').title = waitingOnly
+    ? 'מוצג לפי עדכון אחרון בזמן שהתצוגה «ממתינים לאישור שיווק» פעילה' : '';
+}
 
 function renderChips() {
   const pool = posts.filter((p) => matches(p, { skipCat: true }));
@@ -194,16 +232,30 @@ function renderChips() {
 }
 
 function renderTabs() {
+  // Counted against category+search only (skipStage) — same base pool the
+  // ordinary stage tabs count against, so the waiting chip's <n> is directly
+  // comparable to them and matches exactly what toggling it on will show.
   const pool = posts.filter((p) => matches(p, { skipStage: true }));
   const count = (st) => (st === 'all' ? pool.length : pool.filter((p) => p.stage === st).length);
   const tab = (st, label) => h('button', {
-    class: `g-tab${filters.stage === st ? ' is-on' : ''}`,
-    type: 'button', role: 'tab', 'aria-selected': String(filters.stage === st),
-    onclick: () => { filters.stage = st; renderAll(); },
+    class: `g-tab${!waitingOnly && filters.stage === st ? ' is-on' : ''}`,
+    type: 'button', role: 'tab', 'aria-selected': String(!waitingOnly && filters.stage === st),
+    onclick: () => { waitingOnly = false; filters.stage = st; renderAll(); },
   }, `${label} `, h('span', { class: 'g-chip-n' }, count(st)));
+  const waitBtn = h('button', {
+    class: `g-tab g-tab--wait${waitingOnly ? ' is-on' : ''}`,
+    type: 'button', role: 'tab', 'aria-selected': String(waitingOnly),
+    title: 'פוסטים בלי חתימת שיווק תקפה, שעדיין לא בהמתנה ולא הושלמו',
+    onclick: () => {
+      waitingOnly = !waitingOnly;
+      if (waitingOnly) filters.stage = 'all';
+      renderAll();
+    },
+  }, 'ממתינים לאישור שיווק ', h('span', { class: 'g-chip-n' }, pool.filter(isWaiting).length));
   $('stage-tabs').replaceChildren(
     tab('all', 'הכל'),
-    ...STAGES.map((s) => tab(s.key, s.label)));
+    ...STAGES.map((s) => tab(s.key, s.label)),
+    waitBtn);
 }
 
 /* ── progress strip: personal review-pass progress over the whole board ── */
@@ -237,6 +289,13 @@ function manualKey(p) {
 }
 const byManual = (a, b) => manualKey(a) - manualKey(b) || String(a.id).localeCompare(String(b.id));
 function sortPosts(list) {
+  // §7: the waiting view has its own fixed order (updated_at desc) — it
+  // overrides the sort dropdown rather than fighting it (the dropdown is
+  // disabled while this view is on; see syncToolbarState).
+  if (waitingOnly) {
+    const upd = (p) => ts(p.updated_at || p.created_at);
+    return [...list].sort((a, b) => upd(b) - upd(a) || byNew(a, b));
+  }
   const s = filters.sort;
   const n = (id, k) => agg.get(id)?.[k] || 0;
   const last = (id) => ts(agg.get(id)?.last);
@@ -259,7 +318,7 @@ function sortPosts(list) {
 // chips — stage, search — and any other sort still override the manual layout;
 // clearing them reverts to it untouched, because overriding never writes.
 function arrangeEligible() {
-  return filters.sort === 'manual'
+  return filters.sort === 'manual' && !waitingOnly
       && filters.stage === 'all' && !filters.q && posts.length > 1;
 }
 
@@ -392,6 +451,27 @@ function latestVnum(p) {
   const rows = versions.get(p.id) || [];
   return rows.length ? Number(rows[0].vnum) : studioVnum(p);
 }
+
+/* ── marketing sign-off (v2.3, plan §7) ──────────────────────────────
+   I1/I2 (PLAN.md): sm_approvals is the ONLY answer to "is this
+   marketing-approved, and for which version" — never inferred from
+   sm_posts.stage. approvalState() is the pure store.js derivation; this file
+   only feeds it this post's rows and reads .status back. */
+
+function postApprovalStatus(p) {
+  return approvalState(p, approvalsByPost.get(p.id) || [], versions.get(p.id) || []).status;
+}
+
+// The «ממתינים לאישור שיווק» predicate: no fresh signature AND still in a
+// lane marketing would act on — a parked or already-complete post is done
+// either way, signed or not.
+function isWaiting(p) {
+  if (p.stage === 'parked' || p.stage === 'complete') return false;
+  const st = postApprovalStatus(p);
+  return st === 'none' || st === 'stale' || st === 'revoked';
+}
+
+const WAIT_BADGE = { none: 'ללא חתימה', stale: 'נערך אחרי חתימה', revoked: 'החתימה בוטלה' };
 
 // Which slide 0 this card should show right now: the live shared state, or a
 // snapshot the viewer picked. 'studio' means "the original render" — no slide,
@@ -656,7 +736,16 @@ function card(p) {
   const version = p.version == null ? null
     : (/^v/i.test(String(p.version)) ? String(p.version) : `v${p.version}`);
 
+  // §7: the reason badge only appears inside the waiting view itself — every
+  // card shown there is, by construction, none/stale/revoked, so exactly one
+  // of the three labels always applies.
+  const waitStatus = waitingOnly ? postApprovalStatus(p) : null;
+  const waitBadge = waitStatus && WAIT_BADGE[waitStatus]
+    ? h('span', { class: `tag tag--wait tag--wait-${waitStatus}` }, WAIT_BADGE[waitStatus])
+    : null;
+
   const tags = [
+    waitBadge,
     CATEGORY_LABELS[p.category] ? h('span', { class: 'tag' }, CATEGORY_LABELS[p.category]) : null,
     STAGE_LABELS[p.stage] ? h('span', { class: 'tag' }, STAGE_LABELS[p.stage]) : null,
     edited ? versionBadge(p) : (version ? h('span', { class: 'tag' }, version) : null),
@@ -685,11 +774,26 @@ function card(p) {
     h('div', { class: 'g-meta' },
       tally,
       h('span', { title: 'הערות ותגובות' }, `💬 ${a.discuss}`),
-      h('span', {}, slideCountLabel(p.slide_count ?? (p.slides ? p.slides.length : 0))),
+      h('span', {}, slideCountLabel(slideTotalOf(p))),
       filters.sort === 'activity' && a.last
         ? h('span', { class: 'g-when', title: 'פעילות אחרונה' }, fmtDate(a.last))
         : null),
     menuBtn);
+}
+
+// v2.3 — `slide_count` is the STUDIO's number and nothing on the board ever
+// updates it (anon holds no update grant on that column). The previous
+// `p.slide_count ?? p.slides.length` never once reached its fallback, because
+// `??` only fires on null/undefined and ingest always sets slide_count — so a
+// post whose board slides had grown or shrunk (an uploaded re-render) still
+// advertised the studio's count on its card while the viewer showed a
+// different number of slides. Same rule as post.js slideTotal(): board slide
+// DATA is the render source and wins; slide_count is the fallback for
+// render-only posts (studio PNGs, no slides array) and nothing else.
+function slideTotalOf(p) {
+  const slides = p && p.slides;
+  if (Array.isArray(slides) && slides.length) return slides.length;
+  return Number(p && p.slide_count) || 0;
 }
 
 function slideCountLabel(n) {

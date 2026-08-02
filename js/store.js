@@ -4,9 +4,12 @@
 //   LocalDriver    — REST to scripts/serve.mjs on http://localhost:8907 (?local=1)
 // All functions are async and throw Error(message) on failure.
 
-import { el, modal, injectFonts } from './ui.js';
+import { el, modal, toast, injectFonts } from './ui.js';
 
-const LS = { board: 'smr:board', name: 'smr:name', aid: 'smr:aid', bname: 'smr:bname' };
+const LS = {
+  board: 'smr:board', name: 'smr:name', aid: 'smr:aid', bname: 'smr:bname',
+  role: 'smr:role',
+};
 const LOCAL_ORIGIN = 'http://localhost:8907';
 
 let driver = null;
@@ -37,6 +40,26 @@ async function errText(res) {
     if (body.details) msg += ` — ${body.details}`;
   } catch { /* not json */ }
   return msg;
+}
+
+// Same message as errText, but the HTTP status and PostgREST's SQLSTATE ride
+// ALONG on the Error. A caller that wants to recover from ONE specific failure
+// (see listPosts' 42703 fallback) can then branch on that failure alone instead
+// of on `catch (e)`, which is every failure — offline, RLS, expired key —
+// looking identical. Same idea as savePostSlides' `e.conflict`.
+async function restError(res) {
+  let msg = `${res.status} ${res.statusText}`;
+  let code = '';
+  try {
+    const body = await res.json();
+    msg = body.message || body.error || body.msg || msg;
+    if (body.details) msg += ` — ${body.details}`;
+    code = String(body.code || '');
+  } catch { /* not json */ }
+  const e = new Error(msg);
+  e.status = res.status;
+  e.code = code;          // PostgreSQL SQLSTATE, e.g. '42703' undefined_column
+  return e;
 }
 
 function need() {
@@ -110,12 +133,47 @@ export function ensureName() {
   return namePromise;
 }
 
+// ---------------------------------------------------------------- role (v2.3)
+// DECLARED, never enforced: the role decides what is PROMINENT, never what is
+// possible. Everything a marketing hat can do, a therapist hat can do too —
+// it is just less in the way. Set once via ?role=marketing|therapist on any
+// page URL (the operator hands out two links); persisted in localStorage so it
+// survives navigation without riding internal links.
+//
+// ui.js's navBar owns the chip + picker and reads/writes the SAME key
+// directly (it must never import store.js — that would be a cycle), so both
+// sides dispatch the same 'smr:role' event.
+
+const ROLES = ['marketing', 'therapist'];
+
+// 'marketing' | 'therapist' | ''  ('' = no declared role)
+export function getRole() {
+  const v = localStorage.getItem(LS.role) || '';
+  return ROLES.includes(v) ? v : '';
+}
+
+export function setRole(role) {
+  const v = ROLES.includes(role) ? role : '';
+  if (v) localStorage.setItem(LS.role, v);
+  else localStorage.removeItem(LS.role);
+  window.dispatchEvent(new CustomEvent('smr:role', { detail: { role: v } }));
+  return v;
+}
+
 // ---------------------------------------------------------------- init
 
 export async function initStore() {
   const params = new URLSearchParams(location.search);
   isLocal = params.get('local') === '1';
   let board = params.get('board') || '';
+
+  // ?role= is a one-time declaration: seen once, it persists. An unknown value
+  // is ignored rather than clearing an existing role (a typo must not silently
+  // strip the hat someone already declared); ?role= empty CLEARS deliberately.
+  if (params.has('role')) {
+    const want = String(params.get('role') || '').toLowerCase();
+    if (ROLES.includes(want) || want === '') setRole(want);
+  }
 
   if (isLocal) {
     boardKey = board || 'local';
@@ -212,7 +270,10 @@ class SupabaseDriver {
       opts.body = JSON.stringify(body);
     }
     const res = await fetch(this.rest + pathAndQuery, opts);
-    if (!res.ok) throw new Error(await errText(res));
+    // restError, not errText: same message, plus .status/.code so one caller can
+    // recognise ONE failure. Everything that used to `throw new Error(msg)` here
+    // still throws an Error with that same msg — nothing downstream changes.
+    if (!res.ok) throw await restError(res);
     if (res.status === 204) return null;
     const text = await res.text();
     return text ? JSON.parse(text) : null;
@@ -249,10 +310,29 @@ class SupabaseDriver {
   // expected_updated_at is the optimistic guard — it rides as an eq filter,
   // so a concurrent write (different updated_at) matches zero rows and we
   // throw a distinguishable conflict error the caller can rebase on.
+  //
+  // slide_count rides the SAME PATCH (migration 023). It is a denormalization
+  // of slides.length and nothing on the board used to maintain it, so an
+  // uploaded re-render that changed the number of slides (uploadRenderVersion
+  // is the only writer that can) left the column permanently lying — a 5 on a
+  // 2-slide post. Readers inside this repo were patched to prefer the array
+  // (post.js slideTotal(), sync.mjs), but the STORED number is what leaves the
+  // repo: both publishers and anything not yet patched read it. Every writer of
+  // `slides` therefore writes `slide_count` in the same statement — a derived
+  // column maintained anywhere but beside its source drifts by construction.
+  // This PATCH REQUIRES migration 023, which adds slide_count to the anon
+  // column grant (and does the §14 revoke that makes that list binding at all).
+  // Without it the whole statement is rejected — probed live: HTTP 401
+  // `42501 permission denied for table sm_posts`, with `slides` unwritten too.
+  // PostgREST does not apply the columns it may and drop the rest, so this
+  // fails loudly rather than half-saving; do not "harden" it by dropping
+  // slide_count on error, which is the drift this exists to end.
   async savePostSlides(post_id, slides, expected_updated_at, me) {
     let filter = `board_key=eq.${enc(this.board)}&id=eq.${enc(post_id)}`;
     if (expected_updated_at) filter += `&updated_at=eq.${enc(expected_updated_at)}`;
-    const row = await this.update('sm_posts', filter, { slides, updated_by: me.name });
+    const row = await this.update('sm_posts', filter, {
+      slides, slide_count: slides.length, updated_by: me.name,
+    });
     if (!row) {
       const e = new Error('הפוסט עודכן בינתיים על ידי מישהו נוסף');
       e.conflict = true;
@@ -422,6 +502,45 @@ class SupabaseDriver {
       `select=*&board_key=eq.${enc(this.board)}&order=post_id.asc,vnum.desc`);
   }
 
+  // ---- marketing sign-off (sm_approvals, v2.3) ----
+  // Append-only and grant-enforced: anon holds select+insert and NOTHING else
+  // (relacl anon=ar — ENGINEERING-NOTES §14). A revocation is a new row with
+  // action='revoked'; nothing ever rewrites a signature.
+  insertApproval(row) {
+    return this.insert('sm_approvals', row);
+  }
+
+  listApprovals(post_id) {
+    return this.select('sm_approvals',
+      `select=*&board_key=eq.${enc(this.board)}&post_id=eq.${enc(post_id)}` +
+      `&order=created_at.desc`);
+  }
+
+  listAllApprovals() {
+    return this.select('sm_approvals',
+      `select=*&board_key=eq.${enc(this.board)}&order=created_at.desc`);
+  }
+
+  // Bytes for an uploaded re-render (v2.3). sm-photos is the ONLY anon-writable
+  // bucket, and its policy is PATH-shaped ([1]='boards', [2]=a real board key)
+  // because storage-api never sees the x-board-key header — so this path is
+  // already permitted and no storage policy change is needed or possible.
+  async uploadVersionBytes(file, post_id, vnum, i) {
+    const n = String(i + 1).padStart(2, '0');
+    const path = `boards/${this.board}/${post_id}/v${vnum}/slide-${n}-${crypto.randomUUID()}.${extOf(file)}`;
+    const res = await fetch(`${this.url}/storage/v1/object/sm-photos/${path}`, {
+      method: 'POST',
+      headers: {
+        apikey: this.anon,
+        Authorization: 'Bearer ' + this.anon,
+        'Content-Type': file.type || 'application/octet-stream',
+      },
+      body: file,
+    });
+    if (!res.ok) throw new Error(await errText(res));
+    return `${this.url}/storage/v1/object/public/sm-photos/${path}`;
+  }
+
   // Realtime via supabase-js from jsDelivr; ANY failure -> 10s polling.
   // Even with realtime up, a slow 60s safety poll runs (realtime + RLS with
   // header-based board_key can silently deliver nothing in some setups).
@@ -432,8 +551,12 @@ class SupabaseDriver {
         global: { headers: { 'x-board-key': this.board } },
       });
       const ch = client.channel('smr-' + this.board);
+      // sm_approvals is in the publication, but header-scoped RLS means anon
+      // subscribers receive ZERO events from it (references/supabase.md) — the
+      // 10s/60s polling below is what actually carries approval freshness.
+      // Listed anyway so the day that changes needs no edit here.
       const tables = ['sm_posts', 'sm_votes', 'sm_pins', 'sm_replies', 'sm_edits',
-                      'sm_publish', 'sm_post_versions', 'sm_assets'];
+                      'sm_publish', 'sm_post_versions', 'sm_assets', 'sm_approvals'];
       for (const table of tables) {
         ch.on('postgres_changes',
           { event: '*', schema: 'public', table, filter: `board_key=eq.${this.board}` },
@@ -536,7 +659,10 @@ class LocalDriver {
         throw e;
       }
     }
-    return this.patch('posts', post_id, { slides, updated_by: me.name });
+    // slide_count in the SAME PATCH — see the SupabaseDriver twin for why.
+    return this.patch('posts', post_id, {
+      slides, slide_count: slides.length, updated_by: me.name,
+    });
   }
 
   async fetchBoardName() {
@@ -640,6 +766,46 @@ class LocalDriver {
       String(a.post_id).localeCompare(String(b.post_id)) || Number(b.vnum) - Number(a.vnum));
   }
 
+  // ---- marketing sign-off (v2.3) — serve.mjs /api/approvals ----
+  // Same split as versions: the write goes through the route (one place owns
+  // the row shape), the reads come off the cached /api/state payload, which
+  // carries `approvals` — the gallery and the queue want every approval row on
+  // every refresh and must not pay a round-trip for it.
+  insertApproval(row) {
+    return this.req('POST', '/approvals', row);
+  }
+
+  async listApprovals(post_id) {
+    const s = await this.state();
+    return (s.approvals || []).filter((a) => a.post_id === post_id).sort(byCreatedDesc);
+  }
+
+  async listAllApprovals() {
+    return [...((await this.state()).approvals || [])].sort(byCreatedDesc);
+  }
+
+  // Local byte sink for an uploaded re-render. serve.mjs's /api/assets/upload
+  // is the one local route that takes arbitrary image bytes and hands back a
+  // servable URL, so the uploaded slides land in assets-local/<board>/library/
+  // and ALSO earn a local sm_assets row. Cloud-side there is no assets row —
+  // a documented, deliberate local-only extra (bookkeeping, never behaviour).
+  async uploadVersionBytes(file, post_id, vnum, i) {
+    const dataUrl = await readAsDataUrl(file);
+    const n = String(i + 1).padStart(2, '0');
+    const res = await this.req('POST', '/assets/upload', {
+      kind: 'photo',
+      source: 'upload',
+      name: file.name || `slide-${n}.png`,
+      label: `v${vnum} · שקף ${i + 1}`,
+      mime: file.type || '',
+      bytes: file.size || null,
+      post_id,
+      dir: post_id,
+      dataUrl,
+    });
+    return res && res.url;
+  }
+
   startNotifications(fire) {
     this.pollTimer = setInterval(() => { this.invalidate(); fire(); }, 10000);
   }
@@ -651,13 +817,92 @@ function byCreatedAsc(a, b) {
   return new Date(a.created_at) - new Date(b.created_at);
 }
 
+function byCreatedDesc(a, b) {
+  return new Date(b.created_at) - new Date(a.created_at);
+}
+
+// v2.3 «English translation panel» — every sm_posts column EXCEPT `translation`.
+// EXTEND THIS LIST DELIBERATELY WHEN COLUMNS ARE ADDED (a missing name here is
+// a silently absent feature in the gallery — ENGINEERING-NOTES §13).
+//
+// Why a list and not `select=*`: `translation` is a stored English rendering of
+// a whole carousel (~0.5–1 MB across 149 posts). `select=*` would drag it into
+// every gallery refresh — including the 10s `subscribe()` polling fallback —
+// for a payload no list surface reads. `getPost()` below keeps `select=*`, and
+// is how post.html receives the translation. LocalDriver returns whole state
+// rows either way (no network, so no cost); the asymmetry is deliberate.
+//
+// NOT LISTED, deliberately: `review_at` / `review_note`. They are in
+// schema.sql §2 but migration 019 is still PENDING, so they do not exist on the
+// live table — naming them here returns HTTP 400 (SQLSTATE 42703) for the whole
+// query. **When 019 is applied, add them to this list**, or index.js's
+// «👀 מתוזמן לבדיקה» tag silently disappears. Naming them EARLY no longer empties
+// the gallery: listPosts drops the offending name and says so out loud (below).
+// That safety net is for a mistake, not a plan — a dropped column is a feature
+// missing from every list surface until someone fixes it.
+const POST_LIST_COLS = [
+  'board_key', 'id', 'category', 'title', 'caption', 'version',
+  'slides', 'slide_count', 'asset_prefix', 'stage', 'origin', 'author', 'sort',
+  'created_at', 'updated_at', 'updated_by',
+];
+
+// PostgREST answers an unknown column name with HTTP 400 + SQLSTATE 42703 and
+// the message «column sm_posts.<name> does not exist». That — and ONLY that —
+// is what listPosts' fallback may recover from. Returns the offending column
+// name, or '' for every other failure: offline, DNS, RLS, an expired anon key,
+// a malformed filter. Those must propagate exactly as they did before a
+// fallback existed; swallowing them is how a board goes quietly wrong.
+function undefinedColumnName(e) {
+  if (!e || e.status !== 400) return '';
+  const m = /column\s+(?:[\w"]+\.)?"?([a-z0-9_]+)"?\s+does not exist/i.exec(String(e.message || ''));
+  if (String(e.code || '') !== '42703' && !m) return '';
+  return m ? m[1] : '';
+}
+
+// Loud, and exactly once per page load — NOT once per 10s poll tick. A silent
+// degrade is the whole failure mode being fixed here: the old fallback's only
+// signal was a console.warn nobody reads, on a path that repeats every tick.
+let listFallbackReported = false;
+function reportListFallback(dropped) {
+  if (listFallbackReported) return;
+  listFallbackReported = true;
+  console.error(
+    `listPosts(): sm_posts has no column ${dropped.map((c) => `"${c}"`).join(', ')} — ` +
+    'the gallery loaded WITHOUT it, so anything that column feeds is missing from ' +
+    'the list surfaces. Either a migration that adds it is unapplied, or ' +
+    'POST_LIST_COLS names a column that does not exist. Fix one of those. Do NOT ' +
+    '"fix" it by going back to select=*: that drags sm_posts.translation into ' +
+    'every gallery read, including the 10s polling fallback, for every reviewer.');
+  toast('חלק מנתוני הפוסטים לא נטענו — עמודה חסרה בשרת. ייתכן שתגיות מסוימות לא יופיעו', 'err');
+}
+
 export async function listPosts() {
   const d = need();
   if (isLocal) {
     const s = await d.state();
     return [...(s.posts || [])].sort((a, b) => (a.sort - b.sort) || String(a.id).localeCompare(b.id));
   }
-  return d.select('sm_posts', `select=*&board_key=eq.${enc(boardKey)}&order=sort.asc,id.asc`);
+  const q = `board_key=eq.${enc(boardKey)}&order=sort.asc,id.asc`;
+  // The fallback is NARROW (only «that column does not exist») and it never
+  // widens the select: it can only DROP names from POST_LIST_COLS, which never
+  // contained `translation`. So a fired fallback cannot re-introduce the ~0.5–1
+  // MB payload the explicit list exists to keep out of every poll tick — the
+  // gallery loses one column's worth of decoration, never the board, and never
+  // silently. Bounded by the list length: each pass removes exactly one name.
+  let cols = POST_LIST_COLS.slice();
+  const dropped = [];
+  for (;;) {
+    try {
+      const rows = await d.select('sm_posts', `select=${cols.join(',')}&${q}`);
+      if (dropped.length) reportListFallback(dropped);
+      return rows;
+    } catch (e) {
+      const missing = undefinedColumnName(e);
+      if (!missing || !cols.includes(missing) || cols.length === 1) throw e;
+      cols = cols.filter((c) => c !== missing);
+      dropped.push(missing);
+    }
+  }
 }
 
 export async function getPost(id) {
@@ -759,19 +1004,30 @@ export async function listQueue() {
 // Every write stamps author + author_id (updated_by on updates); ensureName()
 // resolves instantly once a name exists, otherwise asks first.
 
-export async function castVote({ post_id, vote, reason }) {
+// v2.3 review rounds: every reviewer write may stamp the version it was made
+// against. The field is OPTIONAL and the column is nullable on purpose — an
+// old cached client that never sends vnum stays valid, and the 119 pre-v2.3
+// rows keep their honest NULL (no backfill; a pin made on v4 must not claim
+// v6). Only a finite number is ever sent, so `vnum: undefined` never reaches
+// PostgREST as a null that would overwrite anything.
+function withVnum(row, vnum) {
+  const n = Number(vnum);
+  return Number.isFinite(n) ? { ...row, vnum: n } : row;
+}
+
+export async function castVote({ post_id, vote, reason, vnum }) {
   const me = await ensureName();
-  return need().insert(isLocal ? 'votes' : 'sm_votes', {
+  return need().insert(isLocal ? 'votes' : 'sm_votes', withVnum({
     post_id, vote,
     reason: reason || '',
     author: me.name,
     author_id: me.author_id,
-  });
+  }, vnum));
 }
 
-export async function addPin({ post_id, slide, x, y, body }) {
+export async function addPin({ post_id, slide, x, y, body, vnum }) {
   const me = await ensureName();
-  return need().insert(isLocal ? 'pins' : 'sm_pins', {
+  return need().insert(isLocal ? 'pins' : 'sm_pins', withVnum({
     post_id,
     slide: slide || 0,
     x, y,
@@ -779,7 +1035,7 @@ export async function addPin({ post_id, slide, x, y, body }) {
     author: me.name,
     author_id: me.author_id,
     status: 'open',
-  });
+  }, vnum));
 }
 
 export async function deletePin(id) {
@@ -816,30 +1072,30 @@ export async function savePostSlides(post_id, slides, { expected_updated_at } = 
 
 // The audit/learning row for a direct write: same field/old/new format as
 // proposals, but status 'applied' — it IS the record, not a request.
-export async function logEdit({ post_id, field, old_text, new_text }) {
+export async function logEdit({ post_id, field, old_text, new_text, vnum }) {
   const me = await ensureName();
-  return need().insert(isLocal ? 'edits' : 'sm_edits', {
+  return need().insert(isLocal ? 'edits' : 'sm_edits', withVnum({
     post_id, field,
     old_text: old_text || '',
     new_text: new_text || '',
     author: me.name,
     author_id: me.author_id,
     status: 'applied',
-  });
+  }, vnum));
 }
 
 // Kept for backward compatibility (older flows / external tools). The post
 // page no longer proposes — it writes directly via savePostSlides + logEdit.
-export async function proposeEdit({ post_id, field, old_text, new_text }) {
+export async function proposeEdit({ post_id, field, old_text, new_text, vnum }) {
   const me = await ensureName();
-  return need().insert(isLocal ? 'edits' : 'sm_edits', {
+  return need().insert(isLocal ? 'edits' : 'sm_edits', withVnum({
     post_id, field,
     old_text: old_text || '',
     new_text: new_text || '',
     author: me.name,
     author_id: me.author_id,
     status: 'proposed',
-  });
+  }, vnum));
 }
 
 export async function setEditStatus(id, status) {
@@ -1092,6 +1348,332 @@ export async function listVersions(post_id) {
 // badges for 100+ cards and must not fan out per post.
 export async function listAllVersions() {
   return (await need().listAllVersions()) || [];
+}
+
+// ------------------------------------------------ marketing sign-off (v2.3)
+// A named, content-bound approval: WHO signed, WHEN, WHICH version (display)
+// and — since migration 022 — a fingerprint of EXACTLY WHAT they signed.
+// sm_approvals is append-only and anon holds select+insert only (relacl
+// anon=ar) — a signature nobody can PATCH is the whole point of the table.
+// Revoking is a NEW row with action='revoked'; staleness is never stored,
+// it is derived by approvalState() comparing the signed content_hash to the
+// post's CURRENT content (the version trail supplies display numbers only).
+//
+// PLAN invariants I1–I5 govern this section. The derivations below are PURE
+// (no network, no driver, no localStorage) so they are unit-testable and so
+// every surface — post header, gallery card, queue row — computes the same
+// answer from the same three inputs.
+//
+// ⚠️ LOCKSTEP: scripts/sync.mjs carries a DELIBERATE character-for-character
+// duplicate of studioVnum / currentVnum / canon / fnv1a64 / contentHash /
+// approvalState, inside a block marked «LOCKSTEP BLOCK — sync.mjs ⇄ store.js».
+// It cannot import this file (browser ESM: localStorage/fetch/DOM at module
+// scope). CHANGE ONE SIDE AND YOU MUST CHANGE THE OTHER, IN THE SAME COMMIT.
+// The failure is SILENT and has already happened once: this file moved to the
+// 022 content fingerprint while sync.mjs kept the vnum compare, so generated
+// factory briefs printed «fresh ✓» for three posts every screen here correctly
+// showed as stale. Nothing threw. Prove it instead of promising it:
+//     node scripts/lockstep-check.mjs
+// which imports THIS module and evaluates sync.mjs's block from the shipped
+// file, then runs both over the fixture plus a synthetic matrix (matching /
+// mismatched / NULL hash, revocation, jsonb key-reorder). Run it after
+// touching either side.
+
+// The studio's own version number for a post ('v4' -> 4). Free-text and
+// occasionally absent, so it floors at 1 rather than throwing.
+function studioVnum(post) {
+  const n = parseInt(String((post && post.version) || 'v1').replace(/[^0-9]/g, ''), 10);
+  return Number.isFinite(n) && n > 0 ? n : 1;
+}
+
+// PURE. The number of what is on screen RIGHT NOW: the studio's version, or
+// the highest board snapshot if reviewers have taken it further. post.js's
+// nextVnum() is exactly currentVnum() + 1 — one definition, no drift.
+// `versionRows` may be one post's rows or the whole board's; rows belonging to
+// another post are ignored.
+export function currentVnum(post, versionRows) {
+  const id = post && post.id;
+  const highest = (Array.isArray(versionRows) ? versionRows : []).reduce((m, r) => {
+    if (!r) return m;
+    if (id && r.post_id !== undefined && r.post_id !== id) return m;
+    const n = Number(r.vnum);
+    return Number.isFinite(n) ? Math.max(m, n) : m;
+  }, 0);
+  return Math.max(studioVnum(post), highest);
+}
+
+// ---- the content fingerprint (migration 022) ----
+// A signature must name the exact pixels it blessed, not a version NUMBER:
+// numbers proved forgeable two ways (delete the newest sm_post_versions row
+// and currentVnum drops back to the signed number; a studio re-render that
+// reuses a board vnum swaps the pixels under an unchanged number). So every
+// approval row stores contentHash(post) — a fingerprint of the exact
+// slides+caption on screen at signing time — inside sm_approvals, which is
+// append-only and anon=ar (verified live). Staleness is then a CONTENT
+// compare; vnum stays in the row for display only.
+
+// Canonical stringify: sorted object keys, so the hash is independent of key
+// order. jsonb re-orders keys server-side; without this, hashing a locally
+// built object and hashing the same object read back from PostgREST would
+// disagree while the content is identical.
+function canon(v) {
+  if (Array.isArray(v)) return '[' + v.map(canon).join(',') + ']';
+  if (v && typeof v === 'object') {
+    return '{' + Object.keys(v).sort()
+      .map((k) => JSON.stringify(k) + ':' + canon(v[k])).join(',') + '}';
+  }
+  const s = JSON.stringify(v);
+  return s === undefined ? 'null' : s;
+}
+
+// FNV-1a 64-bit over UTF-16 code units (both bytes of each unit, so Hebrew
+// participates fully), hex output. NOT cryptographic, deliberately: the table
+// it lands in is append-only, so the threat is silent DRIFT, not forgery —
+// anyone holding the board key can already INSERT a visible, named row, and
+// that boundary is the security model. Sync on purpose: approvalState() is
+// PURE and synchronous, and SubtleCrypto would force async on every surface.
+function fnv1a64(str) {
+  const P = 0x100000001b3n;
+  const M = 0xffffffffffffffffn;
+  let h = 0xcbf29ce484222325n;
+  for (let i = 0; i < str.length; i++) {
+    const c = str.charCodeAt(i);
+    h ^= BigInt(c & 0xff); h = (h * P) & M;
+    h ^= BigInt(c >> 8); h = (h * P) & M;
+  }
+  return h.toString(16).padStart(16, '0');
+}
+
+// PURE. The fingerprint of what is on screen NOW — hash of the canonical
+// slides JSON + caption. Same inputs on every surface, same answer.
+export function contentHash(post) {
+  const slides = Array.isArray(post && post.slides) ? post.slides : [];
+  const caption = String((post && post.caption) || '');
+  return fnv1a64(canon(slides) + '\n' + canon(caption));
+}
+
+// PURE. I2 — the ONLY answer to "is this marketing-approved, and for which
+// version". Never infer an approval from sm_posts.stage (I1).
+//   no rows                                  -> 'none'
+//   newest row action='revoked'              -> 'revoked'
+//   signed fingerprint == current content    -> 'fresh'
+//   anything else (mismatch OR no fingerprint) -> 'stale'
+// A row with no content_hash (pre-022 signature, or an old cached client)
+// reads STALE, never fresh: we cannot prove WHAT it signed, and "unprovable"
+// must not display as "verified". Those signatures need one honest re-sign.
+// Returns {status, latest, vnum} where `vnum` is the CURRENT number (what is
+// on screen); the number the signature bound to is `latest.vnum`. That pair is
+// exactly what the stale chip needs: «נחתם על v<latest.vnum> — נערך מאז (v<vnum>)».
+// `approvalRows` may be one post's rows or the whole board's, in any order.
+export function approvalState(post, approvalRows, versionRows) {
+  const vnum = currentVnum(post, versionRows);
+  const id = post && post.id;
+  let latest = null;
+  for (const r of (Array.isArray(approvalRows) ? approvalRows : [])) {
+    if (!r) continue;
+    if (id && r.post_id !== undefined && r.post_id !== id) continue;
+    if (!latest || new Date(r.created_at) - new Date(latest.created_at) > 0) latest = r;
+  }
+  if (!latest) return { status: 'none', latest: null, vnum };
+  if (latest.action === 'revoked') return { status: 'revoked', latest, vnum };
+  const signed = (typeof latest.content_hash === 'string' && latest.content_hash)
+    ? latest.content_hash : null;
+  return { status: (signed && signed === contentHash(post)) ? 'fresh' : 'stale', latest, vnum };
+}
+
+function approvalRow(action, { post_id, vnum, note }, me) {
+  const n = Number(vnum);
+  if (!post_id) throw new Error('חסר מזהה פוסט לחתימה');
+  if (!Number.isFinite(n)) throw new Error('חסר מספר גרסה לחתימה');
+  return {
+    post_id,
+    action,
+    // The DECLARED hat at signing time is part of the audit record — not a
+    // permission. Everyone can sign; the role only says which chair they sat in.
+    role: getRole() || 'marketing',
+    vnum: n,
+    note: note || '',
+    author: me.name,
+    author_id: me.author_id,
+  };
+}
+
+// I4 — one-directional convenience coupling: signing also moves a post that is
+// still in_review/editing into the «מאושר» lane, because a human who just
+// signed means it. The reverse is NOT true: a manual stage flip writes no
+// approval row, and a stage-approved post without a fresh signature must
+// everywhere carry «ללא חתימת שיווק». The stage flip is best-effort — losing
+// it must never cost the signature that already landed.
+//
+// I5 (second half, the SEEN guard) — `expected_hash` is contentHash of what
+// was ON SCREEN when the signer opened the modal, captured there and carried
+// here. It is REQUIRED, not optional: an optional guard is a guard that the
+// next caller forgets, and the failure is silent (a signature that names
+// content nobody read). A caller with nothing to declare has no business
+// signing.
+//
+// The old comment here claimed "I5 guarantees the caller flushed before
+// calling, so this IS what the signer saw". That was FALSE. Flushing only
+// settles the SIGNER's own writes; it says nothing about ANOTHER device. The
+// modal can sit open for minutes while the reviewer types a note, and the 10s
+// poll adopts remote edits underneath it — so the post read here could be
+// content the signer never saw, fingerprinted into a row that then renders as
+// a specific, verified-looking claim that they approved exactly that. The
+// fingerprint made the bug WORSE than a bare vnum would have, because the
+// whole value of the row is that it names exactly what was signed.
+//
+// So: read the post AFTER the caller's flush, hash it, and compare. Equal ⇒
+// the only writes since the modal opened were the signer's own (already inside
+// expected_hash) ⇒ sign. Different ⇒ somebody else wrote ⇒ REFUSE with
+// e.stale, the same distinguishable-error shape savePostSlides uses for
+// e.conflict. Never "sign anyway, it is probably fine".
+export async function approvePost({ post_id, vnum, note, expected_hash }) {
+  const me = await ensureName();
+  if (typeof expected_hash !== 'string' || !/^[0-9a-f]{16}$/.test(expected_hash)) {
+    throw new Error('חסרה טביעת התוכן שנחתם — לא חתמנו');
+  }
+  // The read below has to be a FRESH read, or the guard is decorative.
+  // LocalDriver.state() is a client-side cache that only this client's own
+  // writes and the 10s poll clear, so without this line the guard compares the
+  // signer's screen against a snapshot of the board that is exactly as old as
+  // that screen — and passes. Not theory: the first two-profile run of the race
+  // test signed through a warm cache and produced a row fingerprinting content
+  // the other reviewer had already replaced. LocalDriver.savePostSlides's
+  // optimistic guard invalidates first for precisely this reason. SupabaseDriver
+  // holds no cache (getPost is a live GET), so this is a no-op there.
+  if (isLocal && driver) driver.invalidate();
+  // If the post cannot be read, refuse to sign — a signature whose content we
+  // could not hash would be exactly the unverifiable row the content
+  // fingerprint exists to eliminate.
+  const post = await getPost(post_id);
+  if (!post) throw new Error('הפוסט לא נמצא — אי אפשר לחתום');
+  const live = contentHash(post);
+  if (live !== expected_hash) {
+    const e = new Error('הפוסט השתנה מאז שנפתח חלון החתימה — החתימה לא נרשמה');
+    e.stale = true;              // distinguishable, like savePostSlides' e.conflict
+    e.expected_hash = expected_hash;
+    e.live_hash = live;
+    throw e;
+  }
+  const row = await need().insertApproval({
+    ...approvalRow('approved', { post_id, vnum, note }, me),
+    content_hash: live,
+  });
+  try {
+    if (post.stage === 'in_review' || post.stage === 'editing') {
+      await setStage(post_id, 'approved');
+    }
+  } catch (e) {
+    console.warn('stage convenience flip failed (the signature itself is saved):', e && e.message);
+  }
+  return row;
+}
+
+// Revocation is an INSERT, never an update — the signature stays in the trail
+// and the revocation stands beside it. No stage change: un-approving the lane
+// is a human decision, and I1 forbids inferring one from the other.
+export async function revokeApproval({ post_id, vnum, note }) {
+  const me = await ensureName();
+  return need().insertApproval(approvalRow('revoked', { post_id, vnum, note }, me));
+}
+
+// one post's approval rows, newest first
+export async function listApprovals(post_id) {
+  return (await need().listApprovals(post_id)) || [];
+}
+
+// EVERY approval row on the board in ONE request — the gallery's
+// «ממתינים לאישור שיווק» view and the queue's chips need state for 100+ posts
+// and must not fan out per post.
+export async function listAllApprovals() {
+  return (await need().listAllApprovals()) || [];
+}
+
+// ------------------------------------------------ uploaded re-renders (v2.3)
+// The SECOND producer of versions (the first is a studio re-render arriving
+// through ingest --update && go-live, which needs nothing new). This is for
+// finished pixels made outside the studio — an agency file, a designer export.
+// Three writes, one trail:
+//   1. bytes  -> sm-photos boards/<key>/<post_id>/v<N>/slide-NN-<uuid>.<ext>
+//   2. row    -> sm_post_versions with image slides {"image": "<public URL>"}
+//   3. live   -> sm_posts.slides = the same slides, so the uploaded version IS
+//                what everyone reviews
+// The version row is written BEFORE the live post so a failure at step 3 still
+// leaves the upload in the trail. compose.js resolves {image} with an early
+// return; render.mjs deliberately does NOT learn the shape (an image version is
+// final pixels — the factory never re-renders it) and apply-edits --from-board
+// skips such posts.
+
+const VERSION_IMAGE_MIME = /^image\/(png|jpeg|jpg|webp)$/i;
+const MAX_VERSION_BYTES = 8 * 1024 * 1024;   // the sm-photos bucket cap
+
+// Natural order, so slide-2.png comes before slide-10.png. A plain sort puts
+// 10 first and silently reorders somebody's carousel.
+function naturalByName(a, b) {
+  return String((a && a.name) || '').localeCompare(
+    String((b && b.name) || ''), 'he', { numeric: true, sensitivity: 'base' });
+}
+
+export async function uploadRenderVersion({ post_id, files, note }) {
+  const list = Array.from(files || []);
+  if (!list.length) throw new Error('לא נבחרו קבצים');
+  for (const f of list) {
+    const fname = (f && f.name) ? String(f.name) : '';
+    if (!VERSION_IMAGE_MIME.test((f && f.type) || '')) {
+      throw new Error(`אפשר להעלות רק PNG, JPG או WEBP — ${fname}`);
+    }
+    if (((f && f.size) || 0) > MAX_VERSION_BYTES) {
+      throw new Error(`הקובץ חורג מ־8MB — ${fname}`);
+    }
+  }
+  await ensureName();   // ask for the name BEFORE uploading megabytes, not after
+  const ordered = [...list].sort(naturalByName);
+  const post = await getPost(post_id);
+  const vnum = currentVnum(post, await listVersions(post_id)) + 1;
+
+  const d = need();
+  const slides = [];
+  for (let i = 0; i < ordered.length; i++) {
+    slides.push({ image: await d.uploadVersionBytes(ordered[i], post_id, vnum, i) });
+  }
+
+  const row = await saveVersion({ post_id, vnum, slides, caption: post.caption || '' });
+
+  // Double-submit guard. Two concurrent uploads both resolve the same target
+  // vnum; the unique (board_key, post_id, vnum) index lets exactly one row in
+  // and saveVersion's 409 path hands the LOSER the winner's existing row.
+  // Every upload mints fresh UUID paths, so two calls can never produce the
+  // same slides — if the returned row's slides are not ours, we lost. The
+  // loser must NOT touch the live post: its savePostSlides would overwrite
+  // the winner's pixels with slides that exist in no version row, and a
+  // signature on that vnum would name slides never on screen. Fail loudly
+  // instead; the winner's own call makes the live post match its row.
+  if (canon(row && row.slides) !== canon(slides)) {
+    throw new Error(`מישהו נוסף שמר גרסה v${vnum} באותו רגע — הפוסט מציג את הגרסה שנשמרה ראשונה`);
+  }
+  // The live post becomes the uploaded pixels. This is the ONE write path that
+  // can change how MANY slides a post has, so it is the one that made
+  // sm_posts.slide_count lie; savePostSlides now sends slide_count in the same
+  // PATCH (migration 023 grants anon the column), so the stored number matches
+  // the stored array for every consumer — including the two publishers, which
+  // read the column and not the array.
+  await savePostSlides(post_id, slides);
+
+  // sm_post_versions has no note column and inventing one is not this
+  // package's call, so the operator's note rides an audit sm_edits row —
+  // deliberately OUTSIDE the `slides.<i>.<var>` shape learn.mjs categorizes as
+  // language. Non-fatal: bookkeeping must never cost an upload that landed.
+  if (note) {
+    try {
+      await logEdit({
+        post_id, field: 'version.upload',
+        old_text: '', new_text: String(note), vnum,
+      });
+    } catch (e) {
+      console.warn('upload note audit row failed (the version itself is saved):', e && e.message);
+    }
+  }
+  return { vnum: Number(row && row.vnum) || vnum, row };
 }
 
 // ------------------------------------------------ asset library (v2.0)

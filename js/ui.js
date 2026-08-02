@@ -14,7 +14,9 @@
 //   STAGES / CATEGORIES              ordered [{key, label}] arrays
 //   STAGE_LABELS / CATEGORY_LABELS   plain {key: label} maps
 //   navBar(active)                   shared top bar ('index'|'build'|'discuss'|
-//                                    'assets'|'queue'|'backend')
+//                                    'assets'|'queue'|'backend') — carries the
+//                                    name chip AND the v2.3 role chip
+//   ROLE_LABELS                      {marketing, therapist} Hebrew chip labels
 //   injectFonts(assetUrlFn)          runtime @font-face for Assistant
 
 // ---------------------------------------------------------------- el
@@ -225,6 +227,10 @@ export const CATEGORIES = [
   { key: 'ser',     label: 'סדרות' },
   { key: 'orig',    label: 'ליבה' },
   { key: 'builder', label: 'נבנה בכלי' },
+  // Posts written end-to-end with illustrations generated in the same pass
+  // (studio/art/). Membership is an explicit id list in ingest.mjs, not a
+  // prefix rule — these posts keep their own series prefix.
+  { key: 'pcv1',    label: 'יצירת פוסט v1' },
 ];
 
 export const STAGE_LABELS = Object.fromEntries(STAGES.map((s) => [s.key, s.label]));
@@ -260,10 +266,26 @@ export function injectFonts(assetUrlFn) {
 
 // ---------------------------------------------------------------- navBar
 
+// The declared role (v2.3). ui.js reads and writes localStorage['smr:role']
+// directly and dispatches the same 'smr:role' event store.setRole() does — it
+// must never import store.js (that would be a cycle, store.js imports this).
+// The two labels below are the chip's; the picker's own copy is in rolePicker.
+export const ROLE_LABELS = {
+  marketing: 'תפקיד: שיווק',
+  therapist: 'תפקיד: צוות טיפולי',
+};
+
+const ROLE_OPTIONS = [
+  { key: 'therapist', label: 'צוות טיפולי — בדיקת דיוק קליני' },
+  { key: 'marketing', label: 'שיווק — אישור מותג ופרסום' },
+  { key: '',          label: 'בלי תפקיד מוגדר' },
+];
+
 // Identity + board name are read from localStorage (written by store.js) and
 // refreshed via window events, so ui.js never imports store.js (no cycle):
 //   'smr:board' {detail:{name}}  — board display name resolved
 //   'smr:name'  {detail:{name}}  — reviewer renamed / named themselves
+//   'smr:role'  {detail:{role}}  — declared hat changed (v2.3)
 export function navBar(active) {
   const params = new URLSearchParams(location.search);
   const keep = new URLSearchParams();
@@ -283,13 +305,57 @@ export function navBar(active) {
   const boardName = () => localStorage.getItem('smr:bname') || 'לוח ביקורת';
   const meName = () => localStorage.getItem('smr:name') || 'אורח';
 
+  const myRole = () => {
+    const v = localStorage.getItem('smr:role') || '';
+    return (v === 'marketing' || v === 'therapist') ? v : '';
+  };
+
   const boardEl = el('a', { class: 'nav__board', href: 'index.html' + q }, boardName());
   const chip = el('button', {
     class: 'nav__me chip', type: 'button', title: 'שינוי שם', onclick: rename,
   }, meName());
 
+  // The role chip sits beside the name chip and is open to everyone, exactly
+  // like it — a declared role changes what is prominent, never what is
+  // possible, so nobody is ever stranded behind a hat they did not pick.
+  const roleChip = el('button', {
+    class: 'nav__role chip', type: 'button', title: 'בחירת תפקיד', onclick: rolePicker,
+  });
+  const paintRole = () => {
+    const r = myRole();
+    roleChip.textContent = r ? ROLE_LABELS[r] : 'בחירת תפקיד';
+    roleChip.classList.toggle('chip--on', !!r);
+    roleChip.classList.toggle('nav__role--unset', !r);
+    roleChip.dataset.role = r;
+  };
+  paintRole();
+
   window.addEventListener('smr:board', () => { boardEl.textContent = boardName(); });
   window.addEventListener('smr:name', () => { chip.textContent = meName(); });
+  window.addEventListener('smr:role', paintRole);
+
+  function rolePicker() {
+    const current = myRole();
+    const pick = (key, close) => {
+      if (key) localStorage.setItem('smr:role', key);
+      else localStorage.removeItem('smr:role');
+      window.dispatchEvent(new CustomEvent('smr:role', { detail: { role: key } }));
+      if (close) close();
+    };
+    const list = el('div', { class: 'rolepick' },
+      ROLE_OPTIONS.map((o) => {
+        const b = el('button', {
+          class: 'rolepick__opt' + (o.key === current ? ' rolepick__opt--on' : ''),
+          type: 'button',
+          'aria-pressed': o.key === current ? 'true' : 'false',
+          onclick: () => pick(o.key, m.close),
+        }, o.label);
+        return b;
+      }),
+    );
+    const m = modal('באיזה כובע אתם כאן?', list);
+    return m;
+  }
 
   function rename() {
     const input = el('input', {
@@ -323,6 +389,7 @@ export function navBar(active) {
         href: l.href,
       }, l.label)),
     ),
+    roleChip,
     chip,
   );
 }

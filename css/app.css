@@ -110,6 +110,59 @@ img { max-width: 100%; display: block; }
 
 .nav__me { max-width: 20ch; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
 
+/* Role chip (v2.3) — a DECLARED hat, never a permission. It reads as a quiet
+   dashed nudge while unset and as a solid chip once chosen, so "no role" looks
+   like an invitation rather than a locked door. */
+.nav__role {
+  max-width: 22ch;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+.nav__role--unset {
+  border-style: dashed;
+  border-color: rgba(36, 29, 32, .28);
+  background: transparent;
+}
+.nav__role--unset:hover { border-style: dashed; background: rgba(36, 29, 32, .04); }
+
+/* Role picker — a stack of full-width choices; the current one is marked, and
+   every option stays reachable to everyone (declared, not enforced). */
+.rolepick { display: flex; flex-direction: column; gap: 8px; }
+
+.rolepick__opt {
+  display: block;
+  width: 100%;
+  padding: 14px 16px;
+  border: 1px solid var(--line);
+  border-radius: var(--radius);
+  background: var(--paper);
+  color: var(--ink);
+  font-family: inherit;
+  font-size: 1rem;
+  font-weight: 600;
+  line-height: 1.35;
+  text-align: start;      /* LOGICAL: the RIGHT edge in this RTL app */
+  cursor: pointer;
+  transition: background .15s ease, border-color .15s ease, color .15s ease;
+}
+.rolepick__opt:hover { border-color: rgba(36, 29, 32, .22); background: rgba(36, 29, 32, .04); }
+.rolepick__opt--on {
+  border-color: var(--accent);
+  background: rgba(131, 0, 81, .08);
+  color: var(--accent);
+}
+.rolepick__opt--on::after {
+  content: '✓';
+  margin-inline-start: 8px;
+  font-weight: 700;
+}
+
+@media (max-width: 720px) {
+  /* the hat matters less than the name on a phone — let it shrink first */
+  .nav__role { max-width: 12ch; }
+}
+
 /* ---------------------------------------------------------------- buttons */
 
 .btn {

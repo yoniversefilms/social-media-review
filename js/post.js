@@ -16,12 +16,20 @@ import {
   savePostSlides, logEdit,
   saveTemplate,
   saveVersion, listVersions,
+  // v2.3 marketing sign-off + review rounds + uploaded re-renders
+  getRole, currentVnum, approvalState, contentHash,
+  approvePost, revokeApproval, listApprovals, uploadRenderVersion,
 } from './store.js';
 import {
   el, modal, toast, fmtDate, fmtWhen, toLocalInput, fromLocalInput, voteGlyph,
   stageLabel, categoryLabel, STAGES, navBar,
 } from './ui.js';
 import { initCompose, mountSlide, manifest } from './compose.js';
+// v2.3 «English translation panel» — the ONE hash implementation, shared
+// verbatim with scripts/ingest.mjs and the factory's studio/translate.mjs.
+// Never re-implement it here: two implementations is precisely the
+// "silently stale" failure this module exists to prevent.
+import { fieldHash } from './thash.js';
 import { initEditor, canonicalJSON, designSummary, PHOTO_DRAG_MIME } from './editor.js';
 
 const $ = (id) => document.getElementById(id);
@@ -77,6 +85,16 @@ const S = {
   // Only 'queued' rows are a live schedule; the rest are history the modal
   // shows so a reviewer can see a post already went out.
   queue: [],
+  // v2.3 marketing sign-off: this post's sm_approvals rows (newest first) and
+  // its sm_post_versions rows. Together with S.post they are the three inputs
+  // approvalState() derives from — never a stored «is approved» flag (I1/I2).
+  approvals: [],
+  versionRows: [],
+  // v2.3 «English»: the READ-ONLY translation view is a TAB (operator change,
+  // 08-01), so its open/closed state is just `S.tab === 'trans'` — there is no
+  // second flag and no mode to keep mutually exclusive with design mode.
+  // Deliberately NOT a key in S.pending and NOT part of histSnapshot(): the
+  // panel has nothing to save and nothing to undo.
 };
 
 const params = new URLSearchParams(location.search);
@@ -89,11 +107,24 @@ function pageUrl(page, extra = {}) {
   return page + '?' + p.toString();
 }
 
-function slideTotal() {
-  return S.post.slide_count || S.slides.length || 1;
-}
+// v2.3: `slide_count` is the STUDIO's count and NOTHING on the board updates
+// it (anon holds no update grant on that column — see schema.sql:252/387), so
+// on any post carrying board slides it is stale in BOTH directions. The
+// earlier `Math.max` fixed only the GROW case and invented a shrink bug: two
+// uploaded slides on a `slide_count:5` post produced three ghost slides with
+// dots, arrows and a pin layer over pre-upload studio artwork.
+//
+// The rule that is correct in both directions: when the board carries slide
+// DATA, that array IS the render source and its length is the only honest
+// total. `slide_count` is the fallback for render-only posts (studio PNGs via
+// asset_prefix, no slides array) and for nothing else. For every ordinary
+// studio post the two agree and this is a no-op.
 function hasSlidesData() {
   return Array.isArray(S.slides) && S.slides.length > 0;
+}
+function slideTotal() {
+  if (hasSlidesData()) return S.slides.length;
+  return Number(S.post.slide_count) || 1;
 }
 
 function deepCopy(v) {
@@ -160,6 +191,11 @@ async function init() {
 
   subscribe(onRemoteChange);
   document.addEventListener('keydown', onKeydown);
+  // v2.3: the role chip lives in navBar (ui.js) and dispatches this — the
+  // header's sign-off shortcut appears/disappears with the declared hat
+  // WITHOUT a reload. Nothing else about the page changes: the same action
+  // stays reachable from the פרטים tab for every role and for none.
+  window.addEventListener('smr:role', () => renderApprovalBar());
 
   // builder posts may have no PNG renders at all — fall into live preview
   if (!S.post.asset_prefix && hasSlidesData()) setLive(true, { silent: true });
@@ -186,7 +222,7 @@ function onRemoteChange() {
 
 async function refreshAll() {
   const pid = S.post.id;
-  const [post, votes, pins, edits, photos, assets, queue] = await Promise.all([
+  const [post, votes, pins, edits, photos, assets, queue, approvals, versions] = await Promise.all([
     getPost(pid).catch(() => null),
     listVotes().catch(() => []),
     listPins(pid).catch(() => []),
@@ -199,7 +235,14 @@ async function refreshAll() {
     // the queue is board-wide and filtered here; a miss (older board without
     // sm_publish reachable) degrades to "no schedule", never to a broken page
     listQueue().catch(() => []),
+    // v2.3: sm_approvals inserts never reach anon Realtime subscribers, so the
+    // ONLY thing that flips another open client's chip to stale is this poll —
+    // approvals AND versions have to ride every refresh, not just adoptPost().
+    listApprovals(pid).catch(() => []),
+    listVersions(pid).catch(() => []),
   ]);
+  S.approvals = Array.isArray(approvals) ? approvals : [];
+  S.versionRows = Array.isArray(versions) ? versions : [];
   S.queue = (Array.isArray(queue) ? queue : [])
     .filter((q) => q.post_id === pid)
     .sort((a, b) => String(b.created_at || '').localeCompare(String(a.created_at || '')));
@@ -211,6 +254,7 @@ async function refreshAll() {
     if (!capOpen) renderCaption();
   } else {
     renderScheduleBar();            // post row unreadable this tick — queue still refreshed
+    renderApprovalBar();
   }
   S.votes = votes;
   if (typeof renderVoteBox === 'function') setTimeout(renderVoteBox, 0);
@@ -230,6 +274,10 @@ async function refreshAll() {
   renderPinLayer();
   renderTabBadges();
   renderActiveTab();
+  // v2.3 — the panel's staleness is derived from the CURRENT working copy, so
+  // it has to be recomputed whenever that copy or the stored translation could
+  // have moved. A no-op while the panel is closed.
+  renderTransPanel();
 }
 
 // v1.5: a subscribe() tick re-fetched the post row. If slides changed
@@ -274,6 +322,7 @@ function applyRemotePost(post) {
   destroyDesignEditor();
   S.designMountEl = null;
   renderViewer();
+  renderTransPanel();   // v2.3 — another device's Hebrew is under us now
 }
 
 // focus guard: never yank slides out from under a reviewer mid-gesture/typing
@@ -289,12 +338,22 @@ function renderHeader() {
   $('pvTitle').textContent = S.post.title || S.post.id;
   $('pvTags').replaceChildren(
     el('span', { class: 'tag' }, categoryLabel(S.post.category)),
-    el('span', { class: 'tag' }, stageLabel(S.post.stage)),
+    el('span', { class: 'tag' }, stageTagText()),
     S.post.version ? el('span', { class: 'tag', style: { direction: 'ltr' } }, S.post.version) : null,
     el('span', { class: 'tag' }, `${slideTotal()} שקפים`),
   );
   renderScheduleBar();
+  renderApprovalBar();
   renderPostNav();
+}
+
+// I4 — the stage is a LANE, never a signature. Wherever «מאושר» shows without a
+// fresh sm_approvals row, it has to say so in the same breath, or a manual
+// stage flip reads as marketing having signed something.
+function stageTagText() {
+  const base = stageLabel(S.post.stage);
+  if (S.post.stage !== 'approved') return base;
+  return approvalNow().status === 'fresh' ? base : 'מאושר · ללא חתימת שיווק';
 }
 
 // ------------------------------------------------------------- scheduling
@@ -582,10 +641,15 @@ async function loadVersionBase() {
   } catch { S.versionRows = []; }
 }
 
+// v2.3: ONE definition of «what number is on screen» — store.currentVnum —
+// and nextVnum() is exactly that plus one. The local copy this used to carry
+// drifted from store's the moment an uploaded version existed.
+function thisVnum() {
+  return currentVnum(S.post, S.versionRows || []);
+}
+
 function nextVnum() {
-  const studio = parseInt(String(S.post.version || 'v1').replace(/[^0-9]/g, ''), 10) || 1;
-  const highest = (S.versionRows || []).reduce((m, r) => Math.max(m, Number(r.vnum) || 0), 0);
-  return Math.max(studio, highest) + 1;
+  return thisVnum() + 1;
 }
 
 async function stampVersion() {
@@ -601,6 +665,353 @@ async function stampVersion() {
     S.sessionDirty = false;      // one stamp per burst of edits
   } catch { /* best effort: a lost snapshot must never block navigation */ }
   finally { S.stamping = false; }
+}
+
+// ------------------------------------------------ marketing sign-off (v2.3)
+// I1/I2 — the ONLY answer to «is this signed, and for which version» is
+// sm_approvals derived against the version trail. Nothing here reads stage.
+
+function approvalNow() {
+  return approvalState(S.post, S.approvals || [], S.versionRows || []);
+}
+
+// Everything the reviewer has typed but not yet pushed to everyone. I5 turns
+// on this: a signature must never name a version that does not exist, so a
+// dirty session is flushed and stamped BEFORE the row is written.
+function sessionUnsettled() {
+  return !!(saveTimer || S.saveInFlight || S.pending.size || S.sessionDirty);
+}
+
+// The number the signature WILL bind to if the reviewer signs right now.
+function signingVnum() {
+  return sessionUnsettled() ? nextVnum() : thisVnum();
+}
+
+// The fingerprint of what is ON SCREEN right now — the SEEN half of I5.
+// Deliberately NOT a re-read of the server row: the reviewer is looking at the
+// working copy, which includes their own edits that the 1.5s debounce has not
+// pushed yet. They DID see those, so those belong inside the fingerprint;
+// anything else that turns up on the server later is somebody else's writing
+// and must block the signature.
+//   slides  — S.slides, the render source (S.post.slides is the last SAVED
+//             truth and lags a dirty session).
+//   caption — S.post.caption, which IS the on-screen caption: the caption
+//             editor writes straight through (setCaption, no debounce) and
+//             assigns S.post.caption in the same breath.
+// Exactly the pair stampVersion() snapshots, so a version stamped at signing
+// time and the hash guarding it are built from one source.
+//
+// The JSON round-trip is not decoration. contentHash() hashes a canonical
+// stringify in which a key holding `undefined` survives as `null`, while jsonb
+// on the way back from the server has dropped that key entirely — a difference
+// that is invisible on screen and would refuse a perfectly honest signature.
+// Round-tripping first puts the local object in the shape the server will
+// return, so the compare is content-vs-content and never encoding-vs-encoding.
+function onScreenHash() {
+  return contentHash(JSON.parse(JSON.stringify({
+    slides: Array.isArray(S.slides) ? S.slides : [],
+    caption: S.post.caption ?? '',
+  })));
+}
+
+// There is something to revoke exactly when a signature is standing — fresh or
+// stale. A stale one is still a signature somebody's name is on, and «נערך מאז»
+// is not the same statement as «אני מושכת את החתימה».
+function canRevoke(st) {
+  return st.status === 'fresh' || st.status === 'stale';
+}
+
+function approvalChip() {
+  const st = approvalNow();
+  const who = (st.latest && st.latest.author) || 'מישהו';
+  // THE number this chip may show: the vnum somebody actually PUT THEIR NAME
+  // ON. `st.vnum` is the CURRENT version (approvalState's documented shape:
+  // {status, latest, vnum} where vnum = currentVnum and latest.vnum = signed).
+  // Rendering the current number as if it were the signed one fabricates a
+  // claim nobody made — an approval bound to v99 on a v4 post read «✓ · v4»
+  // while the audit trail one tab away read «נחתם ע״י … · v99». A chip must
+  // never contradict the audit trail: same row, same number, every surface.
+  const signed = st.latest ? Number(st.latest.vnum) : null;
+  const vSigned = Number.isFinite(signed) ? signed : '?';
+  if (st.status === 'fresh') {
+    return el('span', { class: 'ap-chip ap-chip--fresh', title: 'נחתם על הגרסה שמוצגת עכשיו' },
+      el('span', { class: 'g', 'aria-hidden': 'true' }, '✓'), `חתימת שיווק ${who} · v${vSigned}`);
+  }
+  if (st.status === 'stale') {
+    return el('span', { class: 'ap-chip ap-chip--stale', title: 'הפוסט נערך אחרי החתימה' },
+      el('span', { class: 'g', 'aria-hidden': 'true' }, '⚠️'), `נחתם על v${vSigned} — נערך מאז (v${st.vnum})`);
+  }
+  if (st.status === 'revoked') {
+    return el('span', { class: 'ap-chip ap-chip--revoked', title: `בוטלה על ידי ${who}` },
+      el('span', { class: 'g', 'aria-hidden': 'true' }, '⚠️'), 'החתימה בוטלה');
+  }
+  return el('span', { class: 'ap-chip ap-chip--none', title: 'אף אחד עוד לא חתם על הפוסט הזה' },
+    el('span', { class: 'g', 'aria-hidden': 'true' }, '⚠️'), 'ללא חתימת שיווק');
+}
+
+// The header row: the chip for everyone, the button for the marketing hat.
+// «Declared, never enforced» — the same action is always reachable from the
+// פרטים tab whatever role (or no role) the reader declared.
+function renderApprovalBar() {
+  const slot = $('pvApprove');
+  if (!slot) return;
+  const kids = [approvalChip()];
+  if (getRole() === 'marketing') {
+    const st = approvalNow();
+    const btn = el('button', {
+      class: 'btn btn--primary pv-approvebtn', type: 'button',
+      title: 'רישום חתימת שיווק על הגרסה המוצגת',
+    }, 'חתימת שיווק ✓');
+    btn.addEventListener('click', () => openApproveModal());
+    kids.push(btn);
+    if (canRevoke(st)) {
+      const rev = el('button', {
+        class: 'btn btn--ghost pv-approvebtn', type: 'button',
+      }, 'ביטול החתימה');
+      rev.addEventListener('click', () => openRevokeModal());
+      kids.push(rev);
+    }
+  }
+  slot.replaceChildren(...kids);
+}
+
+// I5 — flush first, stamp second, sign third. Each step is awaited so the
+// number in the row is the number of a version that is already in the trail.
+async function settleBeforeSigning() {
+  if (saveTimer || S.saveInFlight || S.pending.size) {
+    try { await flushSave(); } catch { /* the stamp below still runs */ }
+  }
+  if (S.sessionDirty) await stampVersion();   // stampVersion swallows its own errors
+  await loadVersionBase();                    // re-read: the stamp may have collided
+  return thisVnum();
+}
+
+// A note typed into a sign attempt that got REFUSED, held for the next open.
+// The refusal costs the reviewer a fresh look at the post; it must not also
+// cost them the sentence they just wrote. Keyed by post id — a note written
+// about one post must never turn up prefilled in another post's modal.
+let carriedApproveNote = null;   // {post_id, note} | null
+
+function openApproveModal() {
+  const shown = signingVnum();
+  // I5, SEEN half — the fingerprint of what is on screen AT THIS MOMENT, taken
+  // before the reviewer can start typing a note. Everything below signs
+  // against THIS, never against whatever is live when they finally click.
+  const seenHash = onScreenHash();
+  const note = el('input', { class: 'field__input', type: 'text', placeholder: '' });
+  if (carriedApproveNote && carriedApproveNote.post_id === S.post.id) {
+    note.value = carriedApproveNote.note;
+  }
+  carriedApproveNote = null;
+  const err = el('div', { class: 'ap-err', hidden: true });
+  const body = el('div', { class: 'ap-form' },
+    el('div', { class: 'ap-lead' },
+      `החתימה נרשמת על שמך, על גרסה v${shown}. עריכה מאוחרת יותר תסמן אותה כלא־עדכנית.`),
+    el('label', { class: 'field' },
+      el('div', { class: 'field__label' }, 'הערה (לא חובה)'),
+      note),
+    err,
+  );
+
+  let busy = false;
+  // The action OBJECT, not a literal in the array: ui.modal reads `a.onClick`
+  // at click time, so replacing it here re-arms the same button. On a refusal
+  // «חותמים» becomes «סוגרים ובודקים» and there is no second click that could
+  // sign — the reviewer has to reopen, which is what «a fresh look» means.
+  const signAction = {
+    label: 'חותמים', primary: true,
+    onClick: (close) => {
+      if (busy) return false;
+      busy = true;
+      (async () => {
+        const vnum = await settleBeforeSigning();
+        await approvePost({
+          post_id: S.post.id, vnum, note: note.value.trim(), expected_hash: seenHash,
+        });
+        await refreshAll();
+        toast(`נחתם ✓ גרסה v${vnum}`, 'ok');
+        close();
+      })().catch(async (e) => {
+        if (e && e.stale) {
+          // Somebody else wrote while this modal sat open. Nothing was signed.
+          // Pull their version onto the screen behind the modal first, so the
+          // reviewer's next look is at the NEW content and not at what they
+          // walked in with; then disarm signing and keep the note.
+          carriedApproveNote = { post_id: S.post.id, note: note.value };
+          // blur FIRST: applyRemotePost's midGesture() guard refuses to swap
+          // slides while an INPUT holds focus, and the note field is exactly
+          // that input — without this the refresh would leave the old content
+          // on screen behind the modal, which is the opposite of the point.
+          note.blur();
+          await refreshAll().catch(() => {});
+          err.textContent = 'הפוסט השתנה בזמן שהחלון היה פתוח — לא חתמנו. '
+            + 'סוגרים, בודקים את הגרסה החדשה, וחותמים מחדש. ההערה שכתבתם נשמרת.';
+          err.hidden = false;
+          signAction.label = 'סוגרים ובודקים';
+          signAction.onClick = null;   // no handler ⇒ ui.modal just closes
+          if (signBtn) signBtn.textContent = signAction.label;
+          return;                      // busy stays true: this button never signs again
+        }
+        busy = false;
+        err.textContent = 'החתימה לא נשמרה: ' + (e && e.message ? e.message : e);
+        err.hidden = false;
+      });
+      return false;   // close only once the row has landed
+    },
+  };
+
+  const m = modal('חתימת שיווק', body, { actions: [{ label: 'ביטול' }, signAction] });
+  const signBtn = m.root.querySelector('.modal__actions .btn--primary');
+}
+
+function openRevokeModal() {
+  const note = el('input', { class: 'field__input', type: 'text', placeholder: '' });
+  const err = el('div', { class: 'ap-err', hidden: true });
+  const body = el('div', { class: 'ap-form' },
+    el('div', { class: 'ap-lead' }, 'לבטל את חתימת השיווק? הביטול נרשם במסלול הפוסט.'),
+    el('label', { class: 'field' },
+      el('div', { class: 'field__label' }, 'הערה (לא חובה)'),
+      note),
+    err,
+  );
+
+  let busy = false;
+  modal('ביטול החתימה', body, {
+    actions: [
+      { label: 'ביטול' },
+      {
+        label: 'ביטול החתימה', primary: true,
+        onClick: (close) => {
+          if (busy) return false;
+          busy = true;
+          (async () => {
+            // A revocation binds to the number on screen NOW — it is a
+            // statement about what everyone is looking at, not about the
+            // version that happened to be signed.
+            await revokeApproval({
+              post_id: S.post.id, vnum: thisVnum(), note: note.value.trim(),
+            });
+            await refreshAll();
+            toast('החתימה בוטלה', 'ok');
+            close();
+          })().catch((e) => {
+            busy = false;
+            err.textContent = 'הביטול לא נשמר: ' + (e && e.message ? e.message : e);
+            err.hidden = false;
+          });
+          return false;
+        },
+      },
+    ],
+  });
+}
+
+// ------------------------------------------------ uploaded re-renders (v2.3)
+// «העלאת גרסה מעוצבת» — finished pixels made outside the studio become a
+// numbered version AND the live post, so the uploaded slides are what
+// everyone reviews. store.uploadRenderVersion owns all three writes.
+
+function isImageSlide(s) {
+  return !!(s && typeof s === 'object' && s.image);
+}
+
+// The post is «pixels» when its current slides are image slides. `some`, not
+// `every`: a half-image deck has no template to edit either, and the honest
+// answer to «can the in-app editor touch this» is no.
+function hasImageSlides() {
+  return (S.slides || []).some(isImageSlide);
+}
+
+function openUploadVersionModal() {
+  const file = el('input', {
+    class: 'field__input', type: 'file', multiple: true,
+    accept: 'image/png,image/jpeg,image/webp',
+  });
+  const note = el('input', { class: 'field__input', type: 'text', placeholder: '' });
+  const list = el('div', { class: 'up-files' });
+  const err = el('div', { class: 'up-err', hidden: true });
+
+  // Natural order, shown BEFORE the upload: slide-2 must read above slide-10,
+  // and the reviewer gets to see that it does before any bytes move.
+  const ordered = () => [...(file.files || [])].sort((a, b) =>
+    String(a.name || '').localeCompare(String(b.name || ''), 'he', { numeric: true, sensitivity: 'base' }));
+
+  file.addEventListener('change', () => {
+    err.hidden = true;
+    const fs = ordered();
+    list.replaceChildren(...fs.map((f, i) => el('div', null, `${i + 1}. ${f.name}`)));
+  });
+
+  const body = el('div', { class: 'up-form' },
+    el('div', { class: 'up-hint' }, 'מעלים את כל השקפים לפי הסדר · PNG/JPG עד 8MB לקובץ'),
+    el('label', { class: 'field' },
+      el('div', { class: 'field__label' }, 'קבצי השקפים'),
+      file, list),
+    el('label', { class: 'field' },
+      el('div', { class: 'field__label' }, 'הערה (לא חובה)'),
+      note),
+    err,
+  );
+
+  let busy = false;
+  modal('העלאת גרסה חדשה (קבצי שקפים)', body, {
+    actions: [
+      { label: 'ביטול' },
+      {
+        label: 'העלאה', primary: true,
+        onClick: (close) => {
+          if (busy) return false;
+          const files = ordered();
+          if (!files.length) {
+            err.textContent = 'לא נבחרו קבצים';
+            err.hidden = false;
+            return false;
+          }
+          const have = slideTotal();
+          if (files.length !== have &&
+              !confirm(`מספר הקבצים (${files.length}) שונה ממספר השקפים בגרסה הנוכחית (${have}) — להמשיך בכל זאת?`)) {
+            return false;
+          }
+          busy = true;
+          err.textContent = 'מעלים…';
+          err.hidden = false;
+          (async () => {
+            // Settle first for the same reason I5 does: an unflushed edit
+            // would otherwise be silently overwritten by the uploaded slides.
+            if (saveTimer || S.saveInFlight || S.pending.size) {
+              try { await flushSave(); } catch { /* upload still proceeds */ }
+            }
+            if (S.sessionDirty) await stampVersion();
+            const res = await uploadRenderVersion({
+              post_id: S.post.id, files, note: note.value.trim(),
+            });
+            close();
+            // the uploaded slides ARE the post now — re-adopt, don't patch
+            S.pending.clear();
+            S.sessionDirty = false;
+            clearHistory();
+            setDesign(false);
+            adoptPost(await getPost(S.post.id));
+            S.cur = Math.min(S.cur, slideTotal() - 1);
+            S.editAccEl = null;
+            destroyDesignEditor();
+            S.designMountEl = null;
+            await refreshAll();
+            renderViewer();
+            renderActiveTab(true);
+            toast(`נשמרה גרסה v${res.vnum} מהקבצים שהועלו`, 'ok');
+          })().catch((e) => {
+            busy = false;
+            const msg = (e && e.message) ? e.message : String(e);
+            err.textContent = `ההעלאה נכשלה: ${msg}`;
+            err.hidden = false;
+            toast(`ההעלאה נכשלה: ${msg}`, 'err');
+          });
+          return false;
+        },
+      },
+    ],
+  });
 }
 
 function renderPostNav() {
@@ -699,9 +1110,14 @@ function goTo(i) {
 function renderViewer() {
   const n = slideTotal();
   const img = $('slideImg');
-  const url = slideUrl(S.post, S.cur);
+  // v2.3: for an uploaded re-render the studio PNG does not exist (and would
+  // show the pre-upload artwork if it did) — the fallback layer is the
+  // uploaded file itself, so the two layers agree even when compose is down.
+  const cur = (S.slides || [])[S.cur];
+  const url = isImageSlide(cur) ? String(cur.image) : slideUrl(S.post, S.cur);
   if (img.getAttribute('src') !== url) { $('frame').classList.remove('noimg'); img.src = url; }
   img.alt = `שקף ${S.cur + 1}`;
+  renderDesignBtn();
 
   $('nextBtn').disabled = S.cur >= n - 1;
   $('prevBtn').disabled = S.cur <= 0;
@@ -780,9 +1196,12 @@ async function mountPreview() {
   try {
     const tmp = el('div', { style: { position: 'absolute', inset: '0' } });
     // the working copy IS the shared truth (plus any not-yet-flushed local
-    // commits) — vars and design come straight from it
-    const composed = { template: slide.template, vars: { ...slide.vars } };
-    if (slide.design) composed.design = slide.design;
+    // commits) — vars and design come straight from it. v2.3: an image slide
+    // has neither; it goes to compose.js's early return whole.
+    const composed = isImageSlide(slide)
+      ? { image: slide.image }
+      : { template: slide.template, vars: { ...slide.vars } };
+    if (!isImageSlide(slide) && slide.design) composed.design = slide.design;
     await mountSlide(tmp, composed);
     if (seq !== previewSeq) return; // a newer keystroke superseded this mount
     // mode may have flipped during the await — a stale preview must never
@@ -893,6 +1312,7 @@ function mountDesignSoon(delay = 0) {
 
 async function mountDesign() {
   if (!S.live || !designMode()) return;
+  if (hasImageSlides()) { setDesign(false); return; }   // v2.3: nothing to edit
   const i = S.cur;
   const slide = S.slides[i];
   const host = $('composeHost');
@@ -1189,7 +1609,8 @@ function openPinPopover(x, y) {
     if (!body) { ta.focus(); return; }
     save.disabled = true;
     try {
-      const row = await addPin({ post_id: S.post.id, slide: S.cur, x, y, body });
+      // v2.3: the pin remembers WHICH round it was written against
+      const row = await addPin({ post_id: S.post.id, slide: S.cur, x, y, body, vnum: thisVnum() });
       const f = file.files && file.files[0];
       if (f && row && row.id) {
         try { await uploadPhoto({ post_id: S.post.id, pin_id: row.id, file: f, note: '' }); }
@@ -1324,7 +1745,10 @@ async function flushSave() {
       S.post.updated_at = S.updatedAt;
       S.sessionDirty = true;   // this session changed the post → stamp on exit
     }
-    // audit log: one row per changed field, exact old→new
+    // audit log: one row per changed field, exact old→new. v2.3: each row
+    // stamps the ROUND it was made against, so a comment on v5 stays a comment
+    // on v5 once v6 exists.
+    const round = thisVnum();
     const logs = [];
     for (const [f, ch] of batch) {
       const cur = S.pending.get(f);
@@ -1333,13 +1757,27 @@ async function flushSave() {
         else cur.old_text = ch.new_text; // typed more mid-flight: next old = what we just saved
       }
       if (ch.old_text !== ch.new_text) {
-        logs.push(logEdit({ post_id: S.post.id, field: f, old_text: ch.old_text, new_text: ch.new_text }));
+        logs.push(logEdit({
+          post_id: S.post.id, field: f,
+          old_text: ch.old_text, new_text: ch.new_text, vnum: round,
+        }));
       }
     }
     await Promise.allSettled(logs);
+    // I3 — a direct edit to a post that is signed on THIS version stamps a new
+    // version immediately, instead of waiting for the session to end. Without
+    // it the signature keeps reading «fresh» on every other open client until
+    // whoever is typing closes the tab, which is exactly the window where a
+    // stale approval does damage.
+    if (row && approvalNow().status === 'fresh') {
+      await stampVersion();
+      renderHeader();
+      if (S.tab === 'info') renderActiveTab(true);
+    }
     if (!S.pending.size) closeUndoBatch(); // the batch landed — next commit is a new undo step
     setSaveChip(S.pending.size ? 'saving' : 'saved');
     refreshEditMarks();
+    renderTransPanel();   // v2.3 — the Hebrew just moved; fields flip stale WITHOUT a reload
     refreshAll().catch(() => {}); // history list + everything else catch up
   } catch (e) {
     console.warn('collab save failed', e);
@@ -1442,7 +1880,11 @@ function slideFileName(i) {
 // the file: a cross-origin href makes the browser ignore the attribute and
 // navigate to the image instead.
 async function downloadSlide(i) {
-  const res = await fetch(slideUrl(S.post, i), { cache: 'no-store' });
+  // v2.3: for an uploaded re-render the uploaded file IS the deliverable —
+  // the studio PNG behind it is the pre-upload artwork, or nothing at all.
+  const s = (S.slides || [])[i];
+  const src = isImageSlide(s) ? String(s.image) : slideUrl(S.post, i);
+  const res = await fetch(src, { cache: 'no-store' });
   if (!res.ok) throw new Error(`שקף ${i + 1}: ${res.status}`);
   const blob = await res.blob();
   const url = URL.createObjectURL(blob);
@@ -1458,7 +1900,8 @@ function openDownloadModal() {
   const cur = S.cur;
 
   // Builder posts that were never rendered by the factory have no PNGs at all.
-  if (!S.post.asset_prefix) {
+  // (An uploaded re-render has its own files, so it is downloadable regardless.)
+  if (!S.post.asset_prefix && !hasImageSlides()) {
     modal('הורדת שקפים', el('div', { class: 'sched-hint' },
       'לפוסט הזה אין עדיין רינדור מהסטודיו, ולכן אין קובצי PNG להורדה. ',
       'פוסטים שנבנו בכלי מקבלים רינדור אחרי שהמפעל מריץ אותם.'));
@@ -1665,6 +2108,14 @@ const TABS = [
   { key: 'edit', label: 'עריכת טקסט' },
   { key: 'photos', label: 'תמונות' },
   { key: 'info', label: 'פרטים' },
+  // v2.3, operator change 08-01: the English translation is a TAB, not a header
+  // button that swapped a third aside in. Label is Latin «English» on purpose —
+  // it is the one control in this RTL page whose whole point is the other
+  // language, and it is what the operator asked for verbatim. The tab lives in
+  // #reviewPanel beside the sticky viewer column, so the Hebrew slide stays on
+  // screen while the English is read — the side-by-side reading the panel is
+  // for. See renderTransTab().
+  { key: 'trans', label: 'English' },
 ];
 
 function buildTabs() {
@@ -1683,8 +2134,19 @@ function showTab(key) {
 
 // ---- design mode: armed from the viewer's control row, not from a tab ----
 function setDesign(on) {
+  // v2.3 — arming edit mode over image slides would hand editor.js a slide with
+  // no template to introspect. Refuse and say why, rather than mounting an
+  // editor that can only fail.
+  if (on && hasImageSlides()) {
+    toast(IMG_SLIDE_NOTE, 'err');
+    return;
+  }
   const want = !!on && hasSlidesData();
   if (S.design === want) return;
+  // v2.3, operator change 08-01 — the English view is a TAB now, so there is no
+  // mutual exclusion left to run here: arming design mode hides #reviewPanel and
+  // the whole tab strip with it, which takes the English tab off screen for
+  // free. No English can be beside an armed editor by construction.
   S.design = want;
   const b = $('designBtn');
   if (b) {
@@ -1730,8 +2192,272 @@ function moveEditChrome(on) {
 function wireDesignBtn() {
   const b = $('designBtn');
   if (!b) return;
-  b.hidden = !hasSlidesData();
   b.addEventListener('click', () => setDesign(!S.design));
+  renderDesignBtn();
+}
+
+// v2.3 — the in-app editor cannot edit pixels. An uploaded re-render is final
+// artwork with no template and no vars behind it, so «עיצוב» is disabled (not
+// hidden: the reason has to be readable, and a missing button explains nothing).
+// Re-evaluated on every render because an upload can flip this mid-session.
+const IMG_SLIDE_NOTE = 'גרסה שהועלתה כקבצים — עריכה בכלי זמינה רק על גרסת תבנית';
+
+function renderDesignBtn() {
+  const b = $('designBtn');
+  if (!b) return;
+  const img = hasImageSlides();
+  b.hidden = !hasSlidesData();
+  b.disabled = img;
+  b.title = img ? IMG_SLIDE_NOTE : '';
+}
+
+// ---------------------------------------------------------------------------
+// «English» — the READ-ONLY translation TAB (v2.3)
+//
+// Operator change 08-01: this used to be a «🌐 English» button in the viewer's
+// control row that swapped a THIRD aside (#transPanel) into the panel column,
+// mutually exclusive with design mode. It is now an ordinary tab, rendered by
+// the same tab machinery as כיתוב / הערות / …, which keeps the sticky viewer
+// column — the Hebrew slide — on screen beside it. Nothing about the read-only
+// law below changed; only where the content is mounted.
+//
+// THE LAW THIS CODE EXISTS TO KEEP: English never reaches the Hebrew source of
+// truth. Reviewer edits flow out through sync.mjs into
+// studio/content/captions/*.json, so an editable English field would eventually
+// land English in the factory's Hebrew files. Therefore this whole section is a
+// PURE RENDER: it creates no input, no textarea, no contenteditable, registers
+// no handler that calls a store write function, adds no key to S.pending, and
+// changes nothing about histSnapshot(). `translation` is likewise never put in
+// a client write payload — the guarantee is this audited client, not a grant
+// (anon holds table-wide UPDATE on sm_posts, ENGINEERING-NOTES §14).
+//
+// And because the column IS anon-writable, its content is untrusted input on
+// READ — treated exactly like reviewer text. Hence the whitelist renderer
+// below and no `innerHTML` anywhere in this file's translation path.
+// ---------------------------------------------------------------------------
+
+// Hebrew block U+0590–U+05FF. Written in ESCAPE form on purpose: a literal
+// Hebrew character class inside an LTR source file is a bidi hazard — it is
+// invisible in a diff, reads as two mystery glyphs to anyone auditing the rule,
+// and reorders on screen so the source shows something other than what is
+// stored. The escapes are the same block, legible and copy-safe. (The comment
+// said this while the code did the opposite until 08-01; studio/translate.mjs's
+// RE_HEBREW has always been the escaped form — these two must stay identical,
+// they are the same rule in two producers.)
+const HEB_RE = /[\u0590-\u05FF]/;
+
+// Never translated, whatever they contain: structural slide keys and the
+// illustration name. (`template`/`design` are slide keys, not vars — listed so
+// the rule reads completely in one place.)
+const TRANS_DENY = new Set(['template', 'design', 'ill']);
+
+const TR_EMPTY = 'אין עדיין תרגום לפוסט הזה — התרגום נוצר במפעל ויגיע בעדכון הבא';
+const TR_STALE_CHIP = '⚠️ העברית עודכנה אחרי התרגום';
+const TR_MISSING_CHIP = 'טרם תורגם';
+const TR_STALE_NOTE = 'חלק מהטקסט בעברית השתנה אחרי שהתרגום נוצר — הקטעים המסומנים אינם מעודכנים';
+// The two halves of the slide-moved note, split so the template name can be
+// isolated with <bdi> between them (SHOULD-FIX 5, 08-01). Says the ONE true
+// thing: the slide order moved, so nothing here can be matched — NOT the false
+// «טרם תורגם» that positional indexing used to produce for every field.
+const TR_MOVED_A = 'סדר השקפים השתנה מאז שהתרגום נוצר — התרגום ששמור במקום הזה שייך לתבנית ';
+const TR_MOVED_B = ', ולכן אין לו התאמה לשקף הזה. הטקסט יופיע שוב אחרי תרגום מעודכן מהמפעל.';
+// Operator resolution 2: hashtags are translated to natural English, so the
+// panel has to say plainly that nothing here publishes — the Hebrew is what
+// ships to Instagram.
+const TR_SUB = 'תרגום לקריאה בלבד — מה שמתפרסם הוא תמיד העברית';
+
+// Does this var get translated at all? Value must contain Hebrew, must not be
+// a denylisted key, and must not be an illustration name (defence in depth for
+// the `{{ill:$var}}` templates, which take a drawing name in an ordinary var).
+function transTranslatable(key, val) {
+  if (TRANS_DENY.has(key)) return false;
+  const s = String(val ?? '');
+  if (!HEB_RE.test(s)) return false;
+  const m = manifest();
+  if (m && Array.isArray(m.illustrations) && m.illustrations.includes(s)) return false;
+  return true;
+}
+
+// The post's stored translation object, defensively parsed. jsonb comes back
+// as an object from PostgREST and from serve.mjs alike; the string branch is
+// belt-and-braces for an older cached client, not an expected shape.
+function transDoc() {
+  let t = S.post && S.post.translation;
+  if (typeof t === 'string') { try { t = JSON.parse(t); } catch { return null; } }
+  return t && typeof t === 'object' ? t : null;
+}
+
+// THE WHITELIST RENDERER — the stored-XSS gate on an anon-writable column.
+// Exactly five tokens become elements: <b> </b> <bdi> </bdi> <br>. Everything
+// else in the string — including any other tag, attribute or entity — is
+// appended as a literal TEXT NODE and can never be parsed as markup. This is a
+// security boundary, not a styling convenience: never swap it for innerHTML,
+// insertAdjacentHTML, or a DOMParser.
+const TR_TAG_RE = /(<b>|<\/b>|<bdi>|<\/bdi>|<br>)/g;
+
+// Two passes, and the first one is the fix for a real defect (POLISH 2, 08-01):
+// the single-pass version pushed an opening tag onto the stack and never
+// unwound it at end-of-string, so ONE unclosed `<b>` in a corrupt or hostile
+// payload silently bolded the entire remainder of that field. Unwinding the
+// stack after the fact cannot undo that — the text was already appended INSIDE
+// the open element — so matching is decided over the whole token list FIRST.
+//
+// The rule is now symmetric and states itself in one line: a tag is markup only
+// if it has a partner. An unmatched OPEN tag is literal text for exactly the
+// same reason an unmatched CLOSE tag always was. Well-formed translations are
+// untouched — translate.mjs's --check asserts tag-sequence equality with the
+// Hebrew source, so only corrupt/hostile input ever takes this path — and the
+// stack is balanced by construction, i.e. fully unwound, before pass 2 ends.
+function transRich(s) {
+  const parts = String(s ?? '').split(TR_TAG_RE).filter((p) => p !== '' && p !== undefined);
+
+  // pass 1 — which tokens are real markup?
+  const isMarkup = new Array(parts.length).fill(false);
+  const open = [];                        // indices of opens still seeking a close
+  parts.forEach((p, i) => {
+    if (p === '<b>' || p === '<bdi>') { open.push(i); return; }
+    if (p !== '</b>' && p !== '</bdi>') return;
+    const want = p === '</b>' ? '<b>' : '<bdi>';
+    for (let j = open.length - 1; j >= 0; j--) {
+      if (parts[open[j]] !== want) continue;
+      isMarkup[open[j]] = true;
+      isMarkup[i] = true;
+      open.length = j;   // anything opened inside it and never closed stays literal
+      return;
+    }
+  });
+
+  // pass 2 — build. Every element created here is <b>, <bdi> or <br>, and it is
+  // created with document.createElement: no string ever becomes markup.
+  const frag = document.createDocumentFragment();
+  const stack = [frag];
+  const top = () => stack[stack.length - 1];
+  parts.forEach((p, i) => {
+    if (p === '<br>') { top().appendChild(document.createElement('br')); return; }
+    if (!isMarkup[i]) { top().appendChild(document.createTextNode(p)); return; }
+    if (p === '<b>' || p === '<bdi>') {
+      const n = document.createElement(p === '<b>' ? 'b' : 'bdi');
+      top().appendChild(n);
+      stack.push(n);
+      return;
+    }
+    stack.pop();   // isMarkup ⇒ this close has a partner ⇒ top() is its element
+  });
+  while (stack.length > 1) stack.pop();   // belt-and-braces: never leave one open
+  return frag;
+}
+
+// Three honest states for one field, computed HERE in the browser against the
+// CURRENT working copy — never shipped precomputed, because board slides are
+// live-edited long after ingest and only this tab knows what is on screen.
+function transFieldState(currentHebrew, entry) {
+  if (!entry || typeof entry.en !== 'string') return { state: 'missing' };
+  const fresh = fieldHash(currentHebrew) === String(entry.src_hash ?? '');
+  return { state: fresh ? 'fresh' : 'stale', en: entry.en };
+}
+
+function transFieldRow(key, st) {
+  const chip = st.state === 'stale'
+    ? el('span', { class: 'st-chip st-chip--stale' }, TR_STALE_CHIP)
+    : st.state === 'missing'
+      ? el('span', { class: 'st-chip st-chip--untranslated' }, TR_MISSING_CHIP)
+      : null;
+  return el('div', { class: 'tr-field' },
+    el('div', { class: 'tr-field__head' },
+      // <bdi> isolates the ASCII key without setting a direction on anything
+      el('bdi', { class: 'tr-key' }, key),
+      chip),
+    st.state === 'missing'
+      ? null
+      : el('div', { class: 'tr-en' + (st.state === 'stale' ? ' tr-en--stale' : '') },
+        transRich(st.en)));
+}
+
+// ---- tab: English (v2.3) — a tab renderer like every other one on this page.
+// Returns nodes; renderActiveTab() mounts them into #tabBody. It creates no
+// input, no textarea, no contenteditable and no handler at all — that is the
+// read-only law, enforced by there being nothing to type into.
+function renderTransTab() {
+  const head = el('div', { class: 'tr-head' },
+    el('div', { class: 'tr-title' }, '🌐 English'),
+    el('div', { class: 'tr-sub' }, TR_SUB));
+
+  const doc = transDoc();
+  if (!doc) return [head, el('div', { class: 'tr-empty' }, TR_EMPTY)];
+
+  let anyStale = false;
+  const cards = [];
+
+  (Array.isArray(S.slides) ? S.slides : []).forEach((slide, i) => {
+    const vars = (slide && slide.vars) || {};
+    const tSlide = (Array.isArray(doc.slides) ? doc.slides : [])[i] || null;
+    const tVars = (tSlide && tSlide.vars) || {};
+
+    const cardHead = el('div', { class: 'tr-card__head' },
+      el('span', { class: 'tr-card__n' }, `שקף ${i + 1}`),
+      slide && slide.template ? el('bdi', { class: 'tr-tpl' }, String(slide.template)) : null);
+
+    // the slide's OWN key order — the order the reviewer reads on the artwork
+    const translatable = Object.entries(vars).filter(([k, v]) => transTranslatable(k, v));
+    if (!translatable.length) return;   // image slides and text-free slides
+
+    // SHOULD-FIX 5 (08-01). `doc.slides` is index-parallel to the SOURCE slides,
+    // and the board reorders slides long after translation. A positional lookup
+    // into a reordered board hands EVERY var of this slide the wrong entry,
+    // every one of them misses, and a fully translated post reads «טרם תורגם»
+    // from top to bottom — a lie that looks exactly like "nobody translated
+    // this yet", which is the one thing this panel must never say falsely.
+    // `template` is carried in the payload precisely so the mismatch is
+    // detectable: when it disagrees, say THAT once, at card level, and show no
+    // per-field verdict at all — there is no honest one to give.
+    const movedTpl = (tSlide && slide && slide.template && tSlide.template &&
+      String(tSlide.template) !== String(slide.template)) ? String(tSlide.template) : '';
+    if (movedTpl) {
+      cards.push(el('div', { class: 'tr-card' }, cardHead,
+        el('div', { class: 'tr-note' },
+          TR_MOVED_A,
+          // «» per the project's Hebrew copy convention; the template name is an
+          // ASCII run inside RTL text, so it is isolated with <bdi> — which sets
+          // no direction on anything (RTL law, below)
+          '«', el('bdi', { class: 'tr-tpl' }, movedTpl), '»',
+          TR_MOVED_B)));
+      return;
+    }
+
+    const rows = translatable.map(([k, v]) => {
+      const st = transFieldState(v, tVars[k]);
+      if (st.state === 'stale') anyStale = true;
+      return transFieldRow(k, st);
+    });
+    cards.push(el('div', { class: 'tr-card' }, cardHead, ...rows));
+  });
+
+  const capCur = S.post.caption ?? '';
+  if (String(capCur).trim()) {
+    const st = transFieldState(capCur, doc.caption);
+    if (st.state === 'stale') anyStale = true;
+    cards.push(el('div', { class: 'tr-card' },
+      el('div', { class: 'tr-card__head' }, el('span', { class: 'tr-card__n' }, 'כיתוב')),
+      transFieldRow('caption', st)));
+  }
+
+  return [
+    head,
+    // per-field states are honest by construction, so the head note only ever
+    // says "some of this is out of date" — the post never lies wholesale
+    anyStale ? el('div', { class: 'tr-note' }, TR_STALE_NOTE) : null,
+    ...cards,
+  ];
+}
+
+// The re-render trigger the rest of this file calls (refreshAll, flushSave,
+// applyRemotePost, the caption save path). Staleness is derived from the
+// CURRENT working copy, so it must be recomputed whenever that copy or the
+// stored translation could have moved — and it is a no-op unless the tab is
+// the open one. Kept as its own name so every existing call site reads as what
+// it means rather than as a generic tab refresh.
+function renderTransPanel() {
+  if (S.tab === 'trans') renderActiveTab(true);
 }
 
 function renderTabBadges() {
@@ -1761,7 +2487,7 @@ function renderActiveTab(force = false) {
     return;
   }
   S.pendingTabRender = false;
-  const render = { caption: renderCaptionTab, pins: renderPinsTab, edit: renderEditTab, photos: renderPhotosTab, info: renderInfoTab }[S.tab]
+  const render = { caption: renderCaptionTab, pins: renderPinsTab, edit: renderEditTab, photos: renderPhotosTab, info: renderInfoTab, trans: renderTransTab }[S.tab]
     || renderCaptionTab;   // unknown/stale tab key must never throw mid-refresh
   body.replaceChildren(...[render() || []].flat(Infinity).filter(Boolean));
 }
@@ -1815,7 +2541,7 @@ function renderVoteBox() {
       if (!why) return;
       submit.disabled = true;
       try {
-        await castVote({ post_id: S.post.id, vote: S.voteSel, reason: why });
+        await castVote({ post_id: S.post.id, vote: S.voteSel, reason: why, vnum: thisVnum() });
         toast('ההצבעה נשמרה', 'ok');
         await refreshAll();
       } catch (e) {
@@ -1859,24 +2585,65 @@ function renderVoteBox() {
 
 // ---------------------------------------------------------------- tab: pins
 
+// v2.3 — the round a row belongs to. NULL is not zero and not «the current
+// round»: it is «written before this board tracked rounds», and it must stay
+// visibly different from a real number. The 119 live posts are all NULL.
+const LEGACY_ROUND = null;
+function roundOf(row) {
+  const n = Number(row && row.vnum);
+  return Number.isFinite(n) && n > 0 ? n : LEGACY_ROUND;
+}
+
+function roundLabel(round) {
+  return round === LEGACY_ROUND ? 'סבב מוקדם (לפני מעקב גרסאות)' : `סבב v${round}`;
+}
+
+// Rounds newest-first, legacy ALWAYS last (it predates every real number).
+function sortRoundsDesc(rounds) {
+  return [...rounds].sort((a, b) => {
+    if (a === LEGACY_ROUND) return 1;
+    if (b === LEGACY_ROUND) return -1;
+    return b - a;
+  });
+}
+
+// Round headers newest-first; inside each round the existing per-slide
+// grouping is untouched, so «מעבר לשקף» keeps working exactly as before.
 function renderPinsTab() {
   if (!S.pins.length) {
     return [el('div', { class: 'pv-note' },
       'אין עדיין הערות על השקפים. לוחצים על «📍 הוסף הערה על השקף», ואז על הנקודה המדויקת בשקף.')];
   }
-  const bySlide = new Map();
+  const byRound = new Map();
   for (const p of S.pins) {
-    const k = Number(p.slide);
-    if (!bySlide.has(k)) bySlide.set(k, []);
-    bySlide.get(k).push(p);
+    const r = roundOf(p);
+    if (!byRound.has(r)) byRound.set(r, []);
+    byRound.get(r).push(p);
   }
-  const groups = [];
-  for (const [slideIdx, pins] of [...bySlide.entries()].sort((a, b) => a[0] - b[0])) {
-    const h = el('h4', { title: 'מעבר לשקף' }, `שקף ${slideIdx + 1}`, el('span', { class: 'tag' }, String(pins.length)));
-    h.addEventListener('click', () => goTo(slideIdx));
-    groups.push(el('div', { class: 'pin-group' }, h, pins.map(renderPinCard)));
-  }
-  return groups;
+
+  return sortRoundsDesc([...byRound.keys()]).map((round) => {
+    const pins = byRound.get(round);
+    const bySlide = new Map();
+    for (const p of pins) {
+      const k = Number(p.slide);
+      if (!bySlide.has(k)) bySlide.set(k, []);
+      bySlide.get(k).push(p);
+    }
+    const groups = [...bySlide.entries()]
+      .sort((a, b) => a[0] - b[0])
+      .map(([slideIdx, sPins]) => {
+        const h = el('h4', { title: 'מעבר לשקף' },
+          `שקף ${slideIdx + 1}`, el('span', { class: 'tag' }, String(sPins.length)));
+        h.addEventListener('click', () => goTo(slideIdx));
+        return el('div', { class: 'pin-group' }, h, sPins.map(renderPinCard));
+      });
+    return el('div', {
+      class: 'pin-round' + (round === LEGACY_ROUND ? ' pin-round--legacy' : ''),
+    },
+      el('h3', null, roundLabel(round), el('span', { class: 'tag' }, String(pins.length))),
+      groups,
+    );
+  });
 }
 
 function renderPinCard(pin) {
@@ -1923,6 +2690,16 @@ function renderPinCard(pin) {
   rInput.addEventListener('keydown', (e) => { if (e.key === 'Enter') sendReply(); });
 
   const resolved = pin.status === 'resolved';
+
+  // v2.3 — an OPEN comment written against an older round may already have been
+  // answered by a later version. We SURFACE that; we never guess it resolved.
+  // A NULL round says nothing (no backfill), so it earns no badge.
+  const round = roundOf(pin);
+  const now = thisVnum();
+  const oldRound = (!resolved && round !== LEGACY_ROUND && round < now)
+    ? el('span', { class: 'ap-old' }, `נכתב על v${round} — ייתכן שטופל בגרסה v${now}`)
+    : null;
+
   const resolveBtn = el('button', { class: 'btn btn--ghost', type: 'button' }, resolved ? 'פתיחה מחדש' : 'סמן כטופל');
   resolveBtn.addEventListener('click', async () => {
     try {
@@ -1955,6 +2732,7 @@ function renderPinCard(pin) {
       el('time', null, fmtDate(pin.created_at)),
       resolved ? el('span', { class: 'tag' }, 'סומן כטופל') : null,
       jump,
+      oldRound,
     ),
     el('div', { class: 'body' }, pin.body),
     thumbs,
@@ -2047,6 +2825,16 @@ function renderEditTab() {
   if (!hasSlidesData()) {
     return [el('div', { class: 'pv-note' }, 'לפוסט הזה אין נתוני מקור לעריכה — אפשר להשאיר הערות בלשונית «הערות».')];
   }
+  // v2.3 — image slides carry no vars, so there is nothing to type into. Say
+  // that in the copy §9 fixes, rather than showing an empty accordion.
+  if (hasImageSlides()) {
+    return [
+      el('div', { class: 'pv-note' }, IMG_SLIDE_NOTE),
+      el('div', { class: 'pv-note' },
+        'אפשר להעיר על השקפים בלשונית «הערות», או להעלות גרסה מתוקנת מהלשונית «פרטים».'),
+      renderEditHistory(),
+    ];
+  }
   if (!S.editAccEl) S.editAccEl = buildEditAccordion();
 
   const out = [
@@ -2063,6 +2851,9 @@ function renderEditTab() {
 function fieldLabel(field) {
   if (field === 'caption') return 'כיתוב הפוסט';
   if (field === 'title') return 'כותרת';
+  // v2.3: sm_post_versions has no note column, so an uploaded version's note
+  // rides an sm_edits row under this field name (store.uploadRenderVersion).
+  if (field === 'version.upload') return 'הערה על גרסה שהועלתה';
   const m = /^slides\.(\d+)\.(.+)$/.exec(field || '');
   if (m) return `שקף ${Number(m[1]) + 1} · ${m[2]}`;
   return field || '';
@@ -2165,6 +2956,7 @@ function renderCaptionTab() {
       toast('הכיתוב נשמר לכולם', 'ok');
       closeCaptionEditor();
       renderVoteBox();
+      renderTransPanel();   // v2.3 — caption changed: its translation may now be stale
     } catch (e) {
       if (marked) { S.undoStack.pop(); closeUndoBatch(); renderHistButtons(); }
       toast('הכיתוב לא נשמר: ' + e.message, 'err');
@@ -2397,8 +3189,135 @@ function renderInfoTab() {
   return [
     el('div', { class: 'dt-stage' }, el('span', { class: 'pv-note' }, 'שלב:'), stageSel),
     el('div', { class: 'dt-rows' }, rows),
+    renderAuditTrail(),
+    renderVersionsBlock(),
     publishBlock,
   ];
+}
+
+// ------------------------------------------------ «מסלול הפוסט» (v2.3, §8)
+// ONE merged, newest-first timeline of three honest facts: who signed what and
+// when, which versions exist, and how much review each round drew. Sign-off and
+// revoke live at the TOP of this section for EVERYONE — the header button is
+// only the marketing hat's shortcut to the same two actions.
+//
+// Every timestamp here is past-tense, so every one of them is fmtDate. fmtWhen
+// is the SCHEDULING formatter; fmtDate clamps the future to «ממש עכשיו», which
+// is right for a trail and wrong for a plan.
+function renderAuditTrail() {
+  const st = approvalNow();
+
+  const signBtn = el('button', { class: 'btn btn--primary', type: 'button' }, 'חתימת שיווק ✓');
+  signBtn.addEventListener('click', () => openApproveModal());
+  const revokeBtn = el('button', { class: 'btn btn--ghost', type: 'button' }, 'ביטול החתימה');
+  revokeBtn.addEventListener('click', () => openRevokeModal());
+
+  const entries = [];
+
+  for (const a of (S.approvals || [])) {
+    const who = a.author || 'אלמוני';
+    const revoked = a.action === 'revoked';
+    entries.push({
+      ts: a.created_at,
+      node: el('div', { class: 'au-item au-item--' + (revoked ? 'revoked' : 'approved') },
+        el('span', { class: 'au-dot' }),
+        el('span', { class: 'au-what' }, revoked
+          ? `החתימה בוטלה ע״י ${who}`
+          : `נחתם ע״י ${who} · v${Number(a.vnum)}`),
+        el('time', null, fmtDate(a.created_at)),
+        a.note ? el('span', { class: 'au-note' }, a.note) : null,
+      ),
+    });
+  }
+
+  for (const v of (S.versionRows || [])) {
+    let slides = v.slides;
+    if (typeof slides === 'string') { try { slides = JSON.parse(slides); } catch { slides = []; } }
+    const uploaded = Array.isArray(slides) && slides.some(isImageSlide);
+    entries.push({
+      ts: v.created_at,
+      node: el('div', { class: 'au-item au-item--version' },
+        el('span', { class: 'au-dot' }),
+        el('span', { class: 'au-what' }, `נשמרה גרסה v${Number(v.vnum)} · ${v.author || 'אלמוני'}`),
+        uploaded ? el('span', { class: 'tag' }, 'גרסה שהועלתה כקבצים') : null,
+        el('time', null, fmtDate(v.created_at)),
+      ),
+    });
+  }
+
+  // per-round counts, placed in the trail at the round's LAST activity — an
+  // aggregate still belongs somewhere in time, and «when it stopped» is the
+  // only honest point to hang it on.
+  const rounds = new Map();
+  const bump = (row, key) => {
+    const r = roundOf(row);
+    if (!rounds.has(r)) rounds.set(r, { pins: 0, edits: 0, ts: '' });
+    const b = rounds.get(r);
+    b[key]++;
+    const t = String(row.created_at || '');
+    if (t > b.ts) b.ts = t;
+  };
+  for (const p of (S.pins || [])) bump(p, 'pins');
+  for (const e of (S.edits || [])) bump(e, 'edits');
+
+  for (const [round, b] of rounds) {
+    const parts = [];
+    if (b.pins) {
+      const link = el('button', { class: 'au-link', type: 'button' },
+        `${b.pins} ${b.pins === 1 ? 'הערה' : 'הערות'}`);
+      link.addEventListener('click', () => showTab('pins'));
+      parts.push(link);
+    }
+    if (b.edits) {
+      const link = el('button', { class: 'au-link', type: 'button' },
+        `${b.edits} ${b.edits === 1 ? 'עריכה' : 'עריכות'}`);
+      link.addEventListener('click', () => showTab('edit'));
+      parts.push(link);
+    }
+    if (!parts.length) continue;
+    const line = [];
+    parts.forEach((p, i) => { if (i) line.push(' · '); line.push(p); });
+    entries.push({
+      ts: b.ts,
+      node: el('div', { class: 'au-item au-item--round' },
+        el('span', { class: 'au-dot' }),
+        el('span', { class: 'au-what' }, roundLabel(round), ' · '),
+        ...line,
+        el('time', null, fmtDate(b.ts)),
+      ),
+    });
+  }
+
+  entries.sort((a, b) => String(b.ts || '').localeCompare(String(a.ts || '')));
+
+  return el('div', { class: 'dt-audit' },
+    el('b', null, 'מסלול הפוסט'),
+    el('div', { class: 'ap-actions' },
+      approvalChip(),
+      signBtn,
+      canRevoke(st) ? revokeBtn : null,
+    ),
+    entries.length
+      ? el('div', { class: 'au-list' }, entries.map((e) => e.node))
+      : el('div', { class: 'pv-note' }, 'עוד אין מסלול לפוסט הזה — אין חתימות ואין גרסאות שמורות.'),
+  );
+}
+
+// «גרסאות» — the upload entry point (§4b). The trail itself is rendered above;
+// this block is the one action that ADDS to it from the browser.
+function renderVersionsBlock() {
+  const upBtn = el('button', { class: 'btn btn--ghost', type: 'button' }, 'העלאת גרסה מעוצבת');
+  upBtn.addEventListener('click', () => openUploadVersionModal());
+  return el('div', { class: 'dt-versions' },
+    el('b', null, 'גרסאות'),
+    el('span', { class: 'pv-note' },
+      `הגרסה שמוצגת עכשיו: v${thisVnum()} · ${(S.versionRows || []).length} גרסאות שמורות בלוח.`),
+    hasImageSlides()
+      ? el('span', { class: 'pv-note' },
+          'גרסה שהועלתה כקבצים — עריכה בכלי זמינה רק על גרסת תבנית')
+      : null,
+    el('div', { class: 'ap-actions' }, upBtn),
+  );
 }
 
 // ---------------------------------------------------------------- keyboard

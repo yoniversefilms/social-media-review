@@ -76,11 +76,182 @@
     border-radius: 4px; padding: 1px 5px; font-size: .82em; }
   .empty { color: var(--ink-soft); font-size: .9rem; padding: 8px 2px; }
   .qform .field { margin-bottom: 10px; }
+
+  /* ---- v2.2 schedule grid (owner: pipeline) ----------------------------
+     The board view of the queue: every scheduled post as its cover slide, in
+     the exact order the publisher will send them. Dragging a card swaps it
+     into another card's TIME SLOT — the set of scheduled_for values on the
+     board never changes, only which post sits in which one. */
+  .page--wide { max-width: 1200px; }
+
+  .qbar { display: flex; align-items: center; gap: 8px; flex-wrap: wrap; margin-bottom: 12px; }
+  .qbar__spacer { margin-inline-start: auto; }
+
+  .viewtabs { display: inline-flex; border: 1px solid var(--line); border-radius: 8px; overflow: hidden; }
+  .viewtabs button {
+    appearance: none; border: 0; background: var(--paper); color: var(--ink-soft);
+    font: inherit; font-size: .85rem; padding: 6px 14px; cursor: pointer;
+  }
+  .viewtabs button + button { border-inline-start: 1px solid var(--line); }
+  .viewtabs button.is-on { background: var(--accent); color: #fff; }
+
+  .sgrid { display: grid; grid-template-columns: repeat(auto-fill, minmax(190px, 1fr)); gap: 14px; }
+  .scard {
+    position: relative; display: flex; flex-direction: column; gap: 7px;
+    background: var(--paper); border: 1px solid var(--line); border-radius: 12px; padding: 9px;
+  }
+  .scard__cover {
+    position: relative; aspect-ratio: 4/5; border-radius: 9px; overflow: hidden;
+    background: linear-gradient(160deg, #efe7db, #e4d8c8);
+  }
+  .scard__cover img { width: 100%; height: 100%; object-fit: cover; display: block; }
+  .scard__ph {
+    position: absolute; inset: 0; display: flex; align-items: center; justify-content: center;
+    color: var(--ink-soft); font-size: 1.5rem;
+  }
+  /* No `direction: ltr` here. Chromium resolves inset-inline-* against the
+     element's OWN direction, so an ltr override flips the badge to the left
+     edge — on top of the channel chips. Digits are strongly LTR in Unicode
+     bidi and render correctly inside the RTL box without any override. */
+  .scard__slot {
+    position: absolute; top: 7px; inset-inline-start: 7px; z-index: 2;
+    min-width: 22px; height: 22px; padding: 0 6px; border-radius: 999px;
+    background: rgba(36, 29, 32, .78); color: #fff; font-size: .76rem; font-weight: 700;
+    display: flex; align-items: center; justify-content: center;
+  }
+  .scard__chans { position: absolute; top: 7px; inset-inline-end: 7px; z-index: 2; }
+  .scard__when {
+    display: flex; align-items: center; gap: 6px;
+    font-size: .8rem; font-weight: 600; color: var(--ink);
+  }
+  .scard__when--next { color: var(--accent); }
+  .scard__title {
+    font-size: .85rem; line-height: 1.35; color: var(--ink); text-decoration: none;
+    display: -webkit-box; -webkit-line-clamp: 2; -webkit-box-orient: vertical; overflow: hidden;
+  }
+  a.scard__title:hover { color: var(--accent); text-decoration: underline; }
+  .scard__foot { display: flex; align-items: center; gap: 8px; font-size: .75rem; color: var(--ink-soft); }
+  .scard__acts { display: flex; gap: 6px; flex-wrap: wrap; }
+  .scard__acts .btn { font-size: .75rem; padding: 3px 8px; }
+
+  /* arrange mode — only the movable cards get the grab affordance; a row the
+     publisher has already claimed («מפרסם…») is dimmed and stays put. */
+  .sgrid.is-arranging .scard[data-movable="1"] {
+    cursor: grab; user-select: none; touch-action: none;
+    outline: 2px dashed var(--line); outline-offset: 2px;
+  }
+  .sgrid.is-arranging .scard[data-movable="0"] { opacity: .55; }
+  .sgrid.is-arranging .scard__acts { visibility: hidden; }
+  .scard.is-dragging {
+    opacity: .9; transform: rotate(2deg) scale(1.04); z-index: 5; cursor: grabbing;
+    box-shadow: 0 14px 34px rgba(36, 29, 32, .28);
+  }
+  .sgrid__empty { grid-column: 1 / -1; }
+
+  @media (max-width: 520px) {
+    .sgrid { grid-template-columns: repeat(auto-fill, minmax(140px, 1fr)); gap: 10px; }
+  }
+
+  /* ---- v2.3 marketing sign-off (owner: pipeline) -----------------------
+     Three colours, three meanings, and they must be told apart at a glance in
+     RTL on a phone: green = signed on THIS version, amber = signed on an older
+     one, red = no valid signature at all. Amber therefore does NOT reuse
+     --maybe as text (#b3995d is a muted gold that reads as grey-brown next to
+     --no's red at 12px); it gets a darker, unmistakably yellow ink over a
+     yellow wash, while red keeps a red wash. Colour is never the only signal —
+     the words differ too, and every non-fresh state carries ⚠️. */
+  .achip {
+    display: inline-flex; align-items: center; gap: 5px;
+    /* flex: none is LOAD-BEARING. .prow__meta / .qrow__meta are wrapping flex
+       containers, so a shrinkable chip does NOT wrap onto its own line — it
+       squeezes down to a bare glyph-sized pill and silently drops its entire
+       label. (Seen at 390px: every chip collapsed to a ⚠️ circle, and the
+       fresh chip to an EMPTY circle.) Refusing to shrink forces the wrap that
+       the narrow layout actually wants; max-width then caps the chip at the
+       row width so a very long label ellipsises instead of overflowing. */
+    flex: none;
+    max-width: 100%;
+    font-size: .76rem; font-weight: 600; line-height: 1.5;
+    border: 1px solid; border-radius: 999px; padding: 1px 9px;
+  }
+  /* The glyph must never wrap away from its label — at 390px a lone ⚠️ on its
+     own line reads as a separate badge. flex + nowrap on the text keeps the
+     chip one unbreakable unit and ellipsises the words instead. min-width: 0
+     is what lets the ellipsis happen INSIDE the chip once max-width bites. */
+  .achip__g { flex: none; font-size: .82em; }
+  .achip__t { min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+
+  .achip--fresh   { color: #256b43; border-color: rgba(46, 125, 79, .45);  background: rgba(46, 125, 79, .10); }
+  .achip--stale   { color: #8a6410; border-color: rgba(179, 137, 27, .55); background: rgba(214, 168, 42, .20); }
+  .achip--none,
+  .achip--revoked { color: #9d332e; border-color: rgba(179, 64, 58, .45);  background: rgba(179, 64, 58, .10); }
+
+  /* the ⚠️ tag on a row that is ALREADY queued/publishing */
+  .tag--warn {
+    display: inline-flex; align-items: center; gap: 4px;
+    flex: none; max-width: 100%;      /* same wrap-don't-shrink rule as .achip */
+    border-radius: 999px; padding: 1px 8px; font-weight: 600;
+    color: #9d332e; background: rgba(179, 64, 58, .10);
+    border: 1px solid rgba(179, 64, 58, .45);
+  }
+  .tag--warn-stale {
+    color: #8a6410; background: rgba(214, 168, 42, .20);
+    border-color: rgba(179, 137, 27, .55);
+  }
+  /* A SOLID disc, not a white one with a coloured hairline. The ⚠️ emoji is a
+     colour glyph and renders the same yellow triangle in every state, so on a
+     white disc the red and the amber badge are indistinguishable at card size
+     — the ring is 1.5px and the eye never reads it. Carrying the state colour
+     as the FILL is what makes «no signature» and «edited since signing» tell
+     apart at a glance on the board. */
+  .scard__warn {
+    position: absolute; bottom: 7px; inset-inline-start: 7px; z-index: 2;
+    width: 24px; height: 24px; border-radius: 999px;
+    display: flex; align-items: center; justify-content: center;
+    font-size: .72rem; background: #9d332e;
+    border: 2px solid rgba(255, 253, 249, .95);
+    box-shadow: 0 1px 5px rgba(36, 29, 32, .4);
+  }
+  .scard__warn--stale { background: #b3891b; }
+
+  /* the add-to-queue acknowledgement panel — loud, and never a dead end */
+  .qwarn {
+    border: 1px solid rgba(179, 64, 58, .45); background: rgba(179, 64, 58, .07);
+    border-radius: 10px; padding: 10px 12px; margin-bottom: 14px;
+  }
+  .qwarn--stale { border-color: rgba(179, 137, 27, .6); background: rgba(214, 168, 42, .13); }
+  .qwarn__t { margin: 0 0 8px; font-size: .92rem; font-weight: 700; line-height: 1.45; color: var(--ink); }
+  .qwarn__chip { margin-bottom: 10px; }
+  .qwarn__ck {
+    display: flex; align-items: flex-start; gap: 8px;
+    font-size: .88rem; line-height: 1.45; cursor: pointer;
+    padding-top: 8px; border-top: 1px solid rgba(36, 29, 32, .1);
+  }
+  .qwarn__ck input {
+    flex: none; width: 17px; height: 17px; margin: 2px 0 0;
+    accent-color: var(--accent); cursor: pointer;
+  }
+
+  /* Phone widths: let the row WRAP.
+     .prow / .qrow are a single non-wrapping flex line — thumb, main column,
+     then two nowrap buttons. At 390px the buttons (126px + 101px) plus the
+     thumb leave the main column TWENTY PIXELS, which is why the title already
+     ellipsised to «ז...» long before v2.3 and why the approval chip collapsed
+     to a bare ⚠️ circle with no words in it. Measured identically with the
+     chips hidden, so this is not a v2.3 regression — but the chip is
+     unreadable until it is fixed, so it is fixed here.
+     Content takes the first line beside the thumbnail; the actions wrap onto
+     their own line and share it. */
+  @media (max-width: 620px) {
+    .prow, .qrow { flex-wrap: wrap; }
+    .prow__main, .qrow__main { flex: 1 1 calc(100% - 60px); min-width: 0; }
+    .prow > .btn, .qrow > .btn { flex: 1 1 auto; }
+  }
 </style>
 </head>
 <body>
 <div id="nav"></div>
-<div class="page">
+<div class="page" id="page">
   <h1>תור הפרסום</h1>
   <main id="app"><p class="empty">טוען…</p></main>
 </div>

@@ -1153,6 +1153,71 @@ function asHandle(container, m) {
   return f;
 }
 
+// v2.4 — the image-slide shape {image: "<url>"}: an uploaded re-render, i.e.
+// FINAL pixels made outside the studio. There is nothing to compose, so this
+// document is a bare 1080×1350 <img> in the same iframe box the composition
+// path produces. Deliberately NOT ported to render.mjs (the factory never
+// re-renders an image version) and deliberately OUTSIDE the PARITY BLOCK —
+// this shape has no twin to stay identical to.
+// The URL is data, not markup: the scheme is allow-listed and the value is
+// attribute-escaped, so nothing a reviewer can write reaches the document raw.
+//
+// Scheme validation is NOT enough on its own. A perfectly well-formed URL that
+// 404s (a deleted sm-photos object, a typo'd agency link, an expired CDN path)
+// passed that check and then painted a pure white 1080×1350 rectangle — no
+// banner, nothing in the console from us — on the exact surface marketing puts
+// its name on. «Is a valid URL» and «loads» are different claims, and only the
+// browser can answer the second, at load time.
+//
+// The failure state therefore has to be SCRIPT-FREE. This iframe is
+// `sandbox="allow-same-origin"` with NO allow-scripts (line ~911) because it
+// renders reviewer-authored content; an `onerror` handler is silently blocked
+// there ("Blocked script execution in 'about:srcdoc'…"), so a JS-based guard
+// would have looked correct in review and done nothing in the product.
+//
+// CSS solves it with layers instead. The failure field is painted FIRST and
+// fills the slide; the <img> sits on top with no background of its own. An
+// image that loads is opaque 1080×1350 and covers the field completely — the
+// pixel output is byte-identical to before. An image that 404s paints nothing,
+// and the field underneath is what you see: hatched amber, a red banner, and
+// the dead URL itself. No script, no timer, no state.
+//
+// The console signal is the browser's own: a failed subresource logs
+// «Failed to load resource: 404» from this frame, which surfaces in the parent
+// page's console and in puppeteer's page.on('console').
+function imageSlideHTML(src) {
+  const raw = String(src || '');
+  const ok = /^(https?:\/\/|blob:|data:image\/)/i.test(raw);
+  if (!ok) {
+    return imageSlideDoc(problemBanner(['כתובת התמונה של השקף אינה תקינה']));
+  }
+  const fail =
+    '<div class="imgfail">' +
+    problemBanner(['התמונה של השקף לא נטענה — הקישור שבור או שהקובץ כבר לא קיים']) +
+    '<div class="imgfail__url">' + escapeHtml(raw) + '</div>' +
+    '</div>';
+  return imageSlideDoc(fail + '\n<img src="' + escapeHtml(raw) + '" alt="">');
+}
+
+function imageSlideDoc(body) {
+  return '<!doctype html>\n<html lang="he" dir="rtl"><head><meta charset="utf-8">\n' +
+    '<title>slide</title>\n<style>\n' +
+    'html,body{margin:0;padding:0;background:#fff;overflow:hidden;' +
+    'width:' + W + 'px;height:' + H + 'px}\n' +
+    // The image is the TOP layer and covers the failure field when it loads.
+    'img{position:absolute;inset:0;display:block;width:' + W + 'px;height:' + H +
+    'px;object-fit:cover;z-index:1}\n' +
+    // The failure field is the BOTTOM layer: only ever seen through an image
+    // that did not paint. Hatched so a dead slide is unmistakable at
+    // gallery-thumbnail size, where the banner text is too small to read.
+    '.imgfail{position:absolute;inset:0;z-index:0;' +
+    'background:repeating-linear-gradient(45deg,#f7e7c8 0 44px,#e8c98d 44px 88px)}\n' +
+    '.imgfail__url{position:absolute;bottom:0;left:0;right:0;padding:24px 30px;' +
+    'background:#b3403a;color:#fff;direction:ltr;text-align:left;word-break:break-all;' +
+    "font:400 22px/1.4 ui-monospace,SFMono-Regular,Menlo,monospace}\n" +
+    '</style>\n</head><body>\n' + body + '\n</body></html>';
+}
+
 // Renders {template, vars, design?} into `container` at true 1080×1350,
 // CSS-scaled to the container's width and kept in step with it via
 // ResizeObserver. Re-mounting into the same container reuses the iframe
@@ -1160,6 +1225,21 @@ function asHandle(container, m) {
 // the frame. Overlapping calls settle newest-wins: a slower, older compose
 // never overwrites a newer document.
 export async function mountSlide(container, slide) {
+  // v2.4 image slide — same {iframe, update, doc} handle, same box, so the
+  // post viewer, the pin overlay and the gallery covers work unchanged. It
+  // returns BEFORE composeSlideHTML, so an image version renders even when
+  // tokens.css/manifest.json never loaded: there is nothing to substitute.
+  if (slide && typeof slide === 'object' && slide.image) {
+    const im = ensureMount(container);
+    const iseq = ++im.seq;
+    if (iseq > im.written) {
+      im.written = iseq;
+      await setSrcdoc(im.iframe, imageSlideHTML(slide.image));
+    }
+    fit(container);
+    return asHandle(container, im);
+  }
+
   const m = ensureMount(container);
   const seq = ++m.seq;
   const html = await composeSlideHTML(slide);

@@ -24,6 +24,13 @@
   border-bottom:2px solid transparent;white-space:nowrap}
 .g-tab:hover{color:var(--ink)}
 .g-tab.is-on{color:var(--accent);border-bottom-color:var(--accent);font-weight:600}
+/* «ממתינים לאישור שיווק» toggle (v2.3, plan §7) — lives beside the stage
+   tabs but is a toggle, not a lane, so it earns its own warning color even
+   before it's picked. Declared after .g-tab.is-on so it wins the tie. */
+.g-tab--wait{color:var(--no)}
+.g-tab--wait:hover{color:var(--no)}
+.g-tab--wait.is-on{color:#fff;background:var(--no);border-bottom-color:var(--no);
+  border-radius:8px 8px 0 0}
 .g-tools{display:flex;gap:8px;align-items:center;flex-wrap:wrap;margin-inline-start:auto}
 .g-search{padding:7px 12px;border:1px solid var(--line);border-radius:999px;
   background:var(--paper);color:var(--ink);font:inherit;min-width:180px}
@@ -124,6 +131,17 @@
   color:#fff;font:inherit;font-size:.72rem;padding:2px 8px;border-radius:999px;
   cursor:pointer;white-space:nowrap}
 .g-verhint__reset:hover{background:rgba(255,255,255,.38)}
+
+/* waiting-view reason badge (v2.3, plan §7) — shown ONLY while the
+   «ממתינים לאישור שיווק» toggle is on; every card there is none/stale/revoked
+   by construction, so exactly one of these ever appears. */
+.tag--wait{font-weight:600}
+.tag--wait-none,.tag--wait-revoked{
+  background:color-mix(in srgb, var(--no) 16%, transparent);
+  color:color-mix(in srgb, var(--no) 72%, var(--ink))}
+.tag--wait-stale{
+  background:color-mix(in srgb, var(--maybe) 16%, transparent);
+  color:color-mix(in srgb, var(--maybe) 72%, var(--ink))}
 
 /* per-card overflow menu */
 .g-menu-btn{position:absolute;top:16px;inset-inline-end:16px;z-index:2;

@@ -48,6 +48,67 @@
 .sched-warn { margin-top: 6px; color: color-mix(in srgb, var(--maybe) 70%, var(--ink)); }
 .sched-err { margin-top: 8px; font-size: .85rem; color: var(--no); }
 
+/* ---------------- marketing sign-off (v2.3) ----------------
+   Four states, four readings, and they must be distinguishable in RTL at a
+   glance: green = signed on THIS version, amber = signed on an older one,
+   red = no signature / revoked. The ✓ and ⚠️ glyphs are inside the same
+   inline-flex line as their label so a wrap can never detach them. */
+.pv-approve { display: flex; align-items: center; gap: 8px; flex-wrap: wrap; }
+.ap-chip {
+  display: inline-flex; align-items: center; gap: 6px;
+  border: 1px solid var(--line); background: var(--paper); color: var(--ink);
+  border-radius: 999px; padding: 5px 11px; font-size: .8rem; font-weight: 600;
+  line-height: 1.35;
+}
+.ap-chip--fresh { background: color-mix(in srgb, var(--yes) 13%, var(--paper)); border-color: color-mix(in srgb, var(--yes) 45%, var(--line)); color: color-mix(in srgb, var(--yes) 62%, var(--ink)); }
+.ap-chip--stale { background: color-mix(in srgb, var(--maybe) 16%, var(--paper)); border-color: color-mix(in srgb, var(--maybe) 55%, var(--line)); color: color-mix(in srgb, var(--maybe) 72%, var(--ink)); }
+.ap-chip--none,
+.ap-chip--revoked { background: color-mix(in srgb, var(--no) 11%, var(--paper)); border-color: color-mix(in srgb, var(--no) 45%, var(--line)); color: color-mix(in srgb, var(--no) 62%, var(--ink)); }
+.ap-chip .g { flex: none; }
+.pv-approvebtn { min-height: 36px; padding: 5px 14px; font-size: .88rem; white-space: nowrap; }
+
+/* approve / revoke modal */
+.ap-form .field { display: block; margin-bottom: 12px; }
+.ap-form .ap-lead { font-size: .92rem; line-height: 1.6; margin-bottom: 12px; }
+.ap-form .ap-err { margin-top: 8px; font-size: .85rem; color: var(--no); }
+
+/* «מסלול הפוסט» — the audit trail in the פרטים tab */
+.dt-audit { border: 1px solid var(--line); border-radius: 12px; padding: 14px; background: var(--paper); display: grid; gap: 12px; }
+.dt-audit > b { font-size: .95rem; }
+.dt-audit .ap-actions { display: flex; gap: 8px; flex-wrap: wrap; align-items: center; }
+.au-list { display: grid; gap: 0; }
+.au-item { display: flex; gap: 8px; align-items: baseline; flex-wrap: wrap; padding: 9px 0; border-top: 1px solid var(--line); font-size: .88rem; }
+.au-item:first-child { border-top: 0; }
+.au-item .au-dot { flex: none; width: 8px; height: 8px; border-radius: 50%; background: var(--ink-soft); }
+.au-item--approved .au-dot { background: var(--yes); }
+.au-item--revoked .au-dot { background: var(--no); }
+.au-item--version .au-dot { background: var(--accent); }
+.au-item--round .au-dot { background: var(--maybe); }
+.au-item .au-what { color: var(--ink); }
+.au-item time { color: var(--ink-soft); font-size: .78rem; margin-inline-start: auto; }
+.au-item .au-note { flex-basis: 100%; color: var(--ink-soft); line-height: 1.55; white-space: pre-wrap; }
+.au-item .tag { cursor: default; }
+.au-link { border: 0; background: none; padding: 0; font: inherit; color: var(--accent); cursor: pointer; text-decoration: underline; text-underline-offset: 2px; }
+
+/* «גרסאות» — the uploaded-re-render entry point */
+.dt-versions { border: 1px solid var(--line); border-radius: 12px; padding: 14px; background: var(--paper); display: grid; gap: 10px; }
+.dt-versions > b { font-size: .95rem; }
+.up-form .field { display: block; margin-bottom: 12px; }
+.up-form .up-hint { font-size: .82rem; color: var(--ink-soft); line-height: 1.55; }
+.up-form .up-files { font-size: .84rem; color: var(--ink); line-height: 1.6; margin-top: 6px; direction: ltr; text-align: left; }
+.up-form .up-err { margin-top: 8px; font-size: .85rem; color: var(--no); }
+
+/* round grouping in the pins tab (v2.3) */
+.pin-round { margin-top: 16px; }
+.pin-round > h3 {
+  margin: 0 0 4px; font-size: .88rem; font-weight: 700; color: var(--ink-soft);
+  display: flex; align-items: center; gap: 8px;
+  border-top: 1px solid var(--line); padding-top: 12px;
+}
+.pin-round:first-child > h3 { border-top: 0; padding-top: 0; }
+.pin-round--legacy > h3 { color: color-mix(in srgb, var(--ink-soft) 80%, var(--ink)); }
+.pin-card .ap-old { flex-basis: 100%; font-size: .78rem; color: color-mix(in srgb, var(--maybe) 72%, var(--ink)); line-height: 1.5; }
+
 /* post-to-post navigation (v1.7) — the ONE place it lives; the פרטים tab used
    to carry a duplicate row of the same links and no longer does. */
 .pv-nav { display: flex; align-items: center; gap: 6px; flex-wrap: wrap; margin-inline-start: auto; }
@@ -306,6 +367,56 @@
   .pv-edit__host { min-height: 0; }
 }
 
+/* ------------- English translation TAB (v2.3) -------------
+   Operator change 08-01: this was a third <aside> (#transPanel) swapped into
+   the panel column by a header button. It is a TAB now — its content is
+   rendered into #tabBody by renderTransTab(), so it inherits .pv-body's
+   spacing and the sticky viewer column stays beside it (Hebrew slide and
+   English text on screen together, which is the point). The .pv-trans rules
+   are gone with the aside; only the .tr-* content classes below survive.
+
+   RTL LAW, and it is not a style note: `direction` lives on ONE class here,
+   `.tr-en`, which is a STATIC text block. Chromium resolves
+   `inset-inline-start/end` against an element's OWN direction, so putting
+   `dir`/`direction` on anything positioned inside this panel silently throws
+   it to the opposite corner. That trap has already cost this project a
+   debugging cycle. Everything else — chrome, chips, labels — stays RTL
+   Hebrew; ASCII runs (template names, var keys) are isolated with <bdi>,
+   which needs no direction at all. Nothing in .tr-* is positioned; keep it
+   that way. */
+
+/* `[hidden] { display: none }` is a USER-AGENT rule, and ANY author `display`
+   beats it — author styles win over UA styles whatever the specificity.
+   .pv-edit declares `display: flex`, so a hidden aside kept its grid cell:
+   measured on this page, `#editPanel[hidden]` was a 600×504 invisible box in
+   the panel column. #reviewPanel never showed the bug only because .pv-panel
+   declares no display of its own. This one line is what actually enforces the
+   "exactly one aside is in the DOM flow" invariant the v2.1 comment above
+   claims — it was documented but never true. (The .pv-trans half of this rule
+   retired with the aside; the .pv-edit half is a live bug fix — do not drop
+   it.) */
+.pv-edit[hidden] { display: none; }
+.tr-head { display: grid; gap: 4px; }
+.tr-title { font-weight: 800; font-size: 1rem; }
+.tr-sub { font-size: .8rem; color: var(--ink-soft); }
+.tr-note { font-size: .82rem; padding: 8px 10px; border-radius: 10px; line-height: 1.5;
+  background: color-mix(in srgb, var(--maybe) 16%, var(--paper)); color: var(--ink); }
+.tr-empty { font-size: .9rem; color: var(--ink-soft); line-height: 1.6; padding: 16px 0; }
+.tr-card { border: 1px solid var(--line); border-radius: 12px; background: var(--paper); padding: 12px; display: grid; gap: 10px; }
+.tr-card__head { display: flex; align-items: baseline; gap: 8px; flex-wrap: wrap; }
+.tr-card__n { font-weight: 700; font-size: .9rem; }
+.tr-tpl { font-family: ui-monospace, monospace; font-size: .74rem; color: var(--ink-soft); }
+.tr-field { display: grid; gap: 4px; }
+.tr-field__head { display: flex; align-items: center; gap: 8px; flex-wrap: wrap; }
+.tr-key { font-family: ui-monospace, monospace; font-size: .72rem; color: var(--ink-soft); }
+/* the ONE element in this panel that carries a direction — a static block */
+.tr-en { direction: ltr; text-align: left; unicode-bidi: isolate; font-size: .92rem; line-height: 1.55; white-space: pre-wrap; }
+.tr-en--stale { opacity: .55; }
+.st-chip--stale { background: color-mix(in srgb, var(--maybe) 22%, var(--paper)); color: var(--ink); border-color: transparent; }
+.st-chip--untranslated { background: color-mix(in srgb, var(--ink-soft) 10%, var(--paper)); }
+/* (the narrow-screen .pv-trans overrides retired with the aside — the tab body
+   is .pv-body, which is already responsive) */
+
 .pv-error { max-width: 480px; margin: 80px auto; text-align: center; color: var(--ink-soft); display: grid; gap: 14px; justify-items: center; }
 </style>
 </head>
@@ -318,6 +429,10 @@
     <!-- scheduling (v2.1): the ONE «תזמון» button + the post's live schedule
          chips. Deliberately in the header, never inside a tab. -->
     <div class="pv-sched" id="pvSched"></div>
+    <!-- marketing sign-off (v2.3): the state chip is for EVERYONE, the button
+         beside it is the marketing hat's shortcut to the same action that
+         always lives in the פרטים tab. Declared, never enforced. -->
+    <div class="pv-approve" id="pvApprove"></div>
     <!-- post-to-post navigation (prev/next within this post's category) -->
     <nav class="pv-nav" id="pvNav" aria-label="ניווט בין פוסטים"></nav>
   </div>
@@ -329,6 +444,9 @@
         <div class="pv-tools__group">
           <button type="button" class="btn btn--ghost pv-pinbtn" id="pinBtn">📍 הוסף הערה על השקף</button>
           <button type="button" class="btn btn--ghost pv-designbtn" id="designBtn" aria-pressed="false">🎨 עיצוב</button>
+          <!-- v2.3 «English» used to be a third button here. Operator change
+               08-01: it is a TAB in the panel column instead (see the TABS array
+               in post.js), which keeps the Hebrew slide on screen beside it. -->
         </div>
         <!-- action bar: undo/redo + save chip + duplicate + (when the design
              editor is armed) the editor's own buttons, hosted here so nothing
@@ -371,6 +489,17 @@
       <div class="pv-edit__head" id="editPanelHead"></div>
       <div class="pv-edit__host" id="editPanelHost"></div>
     </aside>
+
+    <!-- English translation (v2.3): NO aside of its own since 08-01 — it is the
+         «English» tab, rendered into #tabBody above by renderTransTab(), and
+         exactly as READ-ONLY as it looks: post.js builds it with zero input
+         elements, zero contenteditable and zero handlers that call a store
+         write function. English must never reach the Hebrew source of truth
+         (studio/content/captions/*.json) through sync.mjs, and the only
+         airtight way to guarantee that is for there to be nothing to type into.
+         Body content is rendered by a whitelist renderer, never innerHTML:
+         `translation` is an anon-writable column, so it is untrusted input
+         exactly like reviewer text. -->
   </div>
 
   <div class="pv-error" id="pvError" hidden></div>
