@@ -145,6 +145,12 @@ import { el, modal, toast } from './ui.js';
 // thumbnails → slide). Carrying the public URL means no re-upload on drop.
 export const PHOTO_DRAG_MIME = 'application/x-smr-photo';
 
+// Rides alongside PHOTO_DRAG_MIME when the dragged asset is a DRAWING rather
+// than a photograph (v2.4). dataTransfer is the only channel the drop handler
+// has — it can read the URL but not the library row it came from — so the kind
+// has to be put on the wire at dragstart or it is gone by the time it matters.
+export const ART_DRAG_MIME = 'application/x-smr-art';
+
 const W = 1080, H = 1350;
 const ROT_SNAP = 3;      // deg
 // Canva-style magnetic snapping — DRAG gestures only (never crop-pan, resize
@@ -543,6 +549,11 @@ function pruneExtra(e) {
   // v2.2 lock: editor-only (nothing in the render engines reads it), but it
   // rides in the design so it survives a reload and reaches everyone
   if (e.lock === true) o.lock = true;
+  // v2.4 art: same deal — an <img> extra that is a DRAWING, not a photograph.
+  // The engines ignore it; the editor uses it to decide which toolbar a
+  // selection deserves, and it has to survive a reload or an uploaded logo
+  // would come back wearing crop handles.
+  if (e.art === true) o.art = true;
   return o;
 }
 
@@ -1567,7 +1578,9 @@ export function initEditor(handle, slide, opts = {}) {
     if (t.kind === 'slot') return 'משבצת תמונה ' + (t.n + 1);
     if (t.kind === 'el') return elLabelOf(t.key);
     const ex = design.extras[t.index];
-    return ex ? (ex.type === 'photo' ? 'תמונה שנוספה' : 'נכס שנוסף') : 'שכבה';
+    if (!ex) return 'שכבה';
+    if (ex.type !== 'photo') return 'נכס שנוסף';
+    return ex.art ? 'איור שנוסף' : 'תמונה שנוספה';
   }
 
   function sameSel(a, b) {
@@ -1619,7 +1632,10 @@ export function initEditor(handle, slide, opts = {}) {
     if (sel.kind === 'slot' && slotSpec(sel.n)) return sel;
     if (sel.kind === 'extra' && extraCropOn) {
       const ex = design.extras[sel.index];
-      if (ex && ex.type === 'photo') return sel;
+      // `art` never enters crop mode — there is no ✂️ to turn it on, but
+      // extraCropOn is sticky across selections, so without this a leftover
+      // «on» from the last photo would hand a drawing live crop gestures
+      if (ex && ex.type === 'photo' && !ex.art) return sel;
     }
     return null;
   }
@@ -2299,7 +2315,7 @@ export function initEditor(handle, slide, opts = {}) {
       const ex = design.extras[sel.index];
       if (!ex) { quickBar.hidden = true; return; }
       kids.push(qbBtn('⧉', 'שכפול (⌘D)', () => duplicateSel()));
-      if (ex.type === 'photo') {
+      if (ex.type === 'photo' && !ex.art) {
         kids.push(qbBtn('✂️', extraCropOn ? 'סיום החיתוך' : 'חיתוך ומיקום בתוך המסגרת', () => {
           extraCropOn = !extraCropOn;
           renderToolbar();
@@ -3022,7 +3038,7 @@ export function initEditor(handle, slide, opts = {}) {
     // pans `pos` inside the frame and wheel/slider zooms; OFF, drag moves the
     // frame itself — the two gestures stay unambiguous.
     let cropB = null;
-    if (ex.type === 'photo') {
+    if (ex.type === 'photo' && !ex.art) {
       cropB = el('button', {
         class: 'smr-edtg smr-edtg--w' + (extraCropOn ? ' on' : ''), type: 'button',
         title: extraCropOn ? 'יציאה ממצב חיתוך — גרירה תזיז את המסגרת'
@@ -3038,7 +3054,8 @@ export function initEditor(handle, slide, opts = {}) {
 
     toolbar.replaceChildren(...[
       el('div', { class: 'smr-edtb__row' },
-        el('span', { class: 'smr-edtb__name' }, ex.type === 'photo' ? 'photo' : ex.name),
+        el('span', { class: 'smr-edtb__name' },
+          ex.type === 'photo' ? (ex.art ? 'art' : 'photo') : ex.name),
         ex.type === 'brand' ? el('span', null, brandLabel(ex.name)) : null,
         cropB, fwd, back, delB,
       ),
@@ -3059,14 +3076,18 @@ export function initEditor(handle, slide, opts = {}) {
       // photo. Only the zoom slider is crop-mode work, because only IT competes
       // with the drag gesture; the rest never did, and hiding them behind ✂️ is
       // what made the panel look like it had nothing in it.
-      ex.type === 'photo'
+      // A drawing that travels as <img> (`art`) gets the plain furniture rows —
+      // size, rotation, layer, fade — and none of the photo apparatus. Shape,
+      // ratio, crop, ring and wash all assume a photograph; on a logo they are
+      // noise at best and a way to mangle it at worst.
+      ex.type === 'photo' && !ex.art
         ? photoRows(() => design.extras[i], {
             zoom: extraCropOn
               ? zoomRow(() => design.extras[i], { kind: 'extra', index: i })
               : null,
           })
         : opacityRow(() => design.extras[i]),
-      ex.type === 'photo' && extraCropOn
+      ex.type === 'photo' && !ex.art && extraCropOn
         ? el('div', { class: 'smr-edtb__row', style: { fontSize: '.78rem', color: 'var(--ink-soft,#6b5f63)' } },
             'גוררים את התמונה בתוך המסגרת · גלגלת = זום')
         // out of crop mode the drag moves the FRAME — so the edge rule applies
@@ -3170,8 +3191,22 @@ export function initEditor(handle, slide, opts = {}) {
       select({ kind: 'extra', index: design.extras.length - 1 });
       return;
     }
-    addPhotoExtra(a.url, 50, 52);
+    // Everything else places as an <img> extra — but an UPLOADED drawing is
+    // still a drawing. Only studio assets resolve to the recolourable inline
+    // types above (the engines look those up by name in studio/illustrations),
+    // so a reviewer's own illustration or logo has to travel as <img>; marking
+    // it `art` is what stops the editor from then treating it as a photograph.
+    addPhotoExtra(a.url, 50, 52, { art: isArtAsset(a) });
   }
+
+  // What counts as a drawing. KIND is the authority when the library knows it;
+  // the URL sniff is the fallback for a file dragged straight off the desktop,
+  // where all we have is the name. A PNG logo uploaded as kind:"logo" is caught
+  // by the first test, an .svg with no metadata by the second.
+  const ART_KINDS = new Set(['illustration', 'brand', 'logo']);
+  const isArtUrl = (u) => /^data:image\/svg\+xml/i.test(String(u || '')) ||
+    /\.svg(?:[?#]|$)/i.test(String(u || ''));
+  const isArtAsset = (a) => !!(a && (ART_KINDS.has(a.kind) || isArtUrl(a.url)));
 
   // buildLibrary — the one library UI, in two dresses (v2.1).
   //
@@ -3236,6 +3271,11 @@ export function initEditor(handle, slide, opts = {}) {
       if (!onPick && a.source !== 'studio') {
         btn.addEventListener('dragstart', (e) => {
           e.dataTransfer.setData(PHOTO_DRAG_MIME, a.url);
+          // the library knows this asset's kind; the drop handler will not, so
+          // the answer travels WITH the drag. Without it, dragging an uploaded
+          // illustration onto the slide made a photo out of it while CLICKING
+          // the same tile placed it correctly — the same asset, two behaviours.
+          if (isArtAsset(a)) e.dataTransfer.setData(ART_DRAG_MIME, '1');
           e.dataTransfer.effectAllowed = 'copy';
           setTimeout(hideHost, 0);
         });
@@ -3518,13 +3558,29 @@ export function initEditor(handle, slide, opts = {}) {
   // Add a photo extra centered on a slide point (%, defaults to mid-slide),
   // select it so handles + toolbar appear immediately. Also used by host
   // pages for drops that land outside the armed overlay.
-  function addPhotoExtra(url, xPct, yPct) {
+  // o.art (v2.4): this is a DRAWING that happens to travel as <img> — an
+  // uploaded illustration, brand mark or logo, or any dropped SVG. It renders
+  // exactly like a photo (the engines have one <img> extra type and adding
+  // another would mean a new shape in the twin PARITY BLOCK), but the EDITOR
+  // must not dress it as one: cropping, masking and matting a drawing is
+  // meaningless, and offering it reads as the tool not knowing what it is
+  // holding. `art` is editor-only — nothing in either engine reads it — and
+  // rides in the design so it survives a reload, exactly as `lock` does.
+  function addPhotoExtra(url, xPct, yPct, o) {
     const w = 40;
+    const art = !!(o && o.art);
     const ex = {
       type: 'photo', url,
       x: round1(clamp((typeof xPct === 'number' ? xPct : 50) - w / 2, -15, 95)),
       y: round1(clamp((typeof yPct === 'number' ? yPct : 52) - w / 2, -15, 95)),
-      w, shape: 'organic',
+      w,
+      // A photo now arrives as the PICTURE THAT WAS UPLOADED — its own edges,
+      // its own proportions, no ring. v1.2 dropped every photo straight into
+      // the organic blob, which is a strong design decision to make on someone's
+      // behalf before they have even looked at it; the blob is one click away in
+      // the shape picker for anyone who wants it. A drawing takes no shape key
+      // at all, so it renders as a bare <img> with nothing around it.
+      ...(art ? { art: true } : { shape: 'original' }),
     };
     design.extras.push(ex);
     if (!photos.some((p) => p.url === url)) photos.push({ url, note: '' });
@@ -3561,8 +3617,11 @@ export function initEditor(handle, slide, opts = {}) {
         try {
           const res = await opts.uploadFile(f);
           if (res && res.url) {
-            // cascade: each additional file lands +4% toward bottom-left
-            addPhotoExtra(res.url, xPct + 4 * placed, yPct + 4 * placed);
+            // cascade: each additional file lands +4% toward bottom-left.
+            // An SVG off the desktop is a drawing — the file's own type says so
+            // before any upload URL exists to sniff.
+            addPhotoExtra(res.url, xPct + 4 * placed, yPct + 4 * placed,
+              { art: /svg/i.test(f.type || '') || isArtUrl(res.url) });
             placed++;
           }
         } catch (err) {
@@ -3624,7 +3683,11 @@ export function initEditor(handle, slide, opts = {}) {
         return;
       }
     }
-    if (url) { addPhotoExtra(url, xPct, yPct); return; }
+    if (url) {
+      const art = e.dataTransfer.getData(ART_DRAG_MIME) === '1' || isArtUrl(url);
+      addPhotoExtra(url, xPct, yPct, { art });
+      return;
+    }
     dropFiles(files, xPct, yPct);
   }
 
