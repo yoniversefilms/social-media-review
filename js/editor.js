@@ -666,6 +666,33 @@ function injectStyles() {
 .smr-edbadge{position:absolute;inset-block-start:4px;inset-inline-start:4px;
   background:var(--accent,#830051);color:#fff;border-radius:999px;
   font-size:.62rem;line-height:1;padding:3px 6px}
+/* quick actions (v2.3) — glyph-sized verbs beside the selection. z 95 keeps
+   it above the floating sidebar (90) and UNDER .modal-overlay (100), so a
+   picker is never covered by it. */
+.smr-edqb[hidden]{display:none}
+.smr-edqb{position:fixed;z-index:95;display:flex;align-items:center;gap:2px;
+  background:var(--paper,#fffdf9);border:1px solid var(--line,rgba(36,29,32,.12));
+  border-radius:11px;padding:4px;box-shadow:0 8px 26px rgba(36,29,32,.26);
+  animation:smr-edqb-in .12s ease-out}
+@keyframes smr-edqb-in{from{opacity:0;transform:translateY(3px)}to{opacity:1;transform:none}}
+.smr-edqb__b{appearance:none;border:0;background:none;cursor:pointer;
+  width:30px;height:30px;border-radius:8px;padding:0;line-height:1;
+  font:inherit;font-size:.92rem;color:var(--ink,#241d20);
+  display:flex;align-items:center;justify-content:center;
+  transition:background .12s ease,color .12s ease}
+.smr-edqb__b:hover{background:rgba(131,0,81,.09)}
+.smr-edqb__b.on{background:var(--accent,#830051);color:#fff}
+.smr-edqb__b.is-danger:hover{background:rgba(179,64,58,.13);color:#b3403a}
+.smr-edqb__sep{width:1px;align-self:stretch;margin:2px 3px;
+  background:var(--line,rgba(36,29,32,.14))}
+.smr-edqb__n{font-size:.74rem;font-weight:700;color:var(--ink-soft,#6b5f63);
+  padding:0 6px}
+/* «⋯» pulse: the first press should SHOW you where the rest of the options
+   went, not just silently swap a tab */
+.smr-sb__panel.is-pulse{animation:smr-sb-pulse .6s ease-out}
+@keyframes smr-sb-pulse{
+  0%{box-shadow:inset 0 0 0 2px color-mix(in srgb,var(--accent,#830051) 65%,transparent)}
+  100%{box-shadow:inset 0 0 0 2px transparent}}
 .smr-edcta[hidden]{display:none}
 .smr-edcta{position:fixed;z-index:1300;display:flex;gap:6px;background:var(--paper,#fffdf9);
   border:1px solid var(--line,rgba(36,29,32,.12));border-radius:10px;padding:6px;
@@ -927,6 +954,23 @@ export function initEditor(handle, slide, opts = {}) {
   ctaNo.addEventListener('pointerdown', (e) => { e.preventDefault(); e.stopPropagation(); cancelTextEdit(); });
   const editBar = el('div', { class: 'smr-edcta', dir: 'rtl', hidden: true }, ctaOk, ctaNo);
   document.body.appendChild(editBar);
+
+  // ---------------- quick actions (v2.3) ----------------
+  //
+  // The few verbs you reach for WHILE looking at the thing you selected —
+  // beside it, not across the room. Everything else stays in the sidebar, and
+  // «⋯» is the door between the two.
+  //
+  // This is NOT the old floating toolbar coming back. That one carried the
+  // whole property set — font pickers, sliders, a thirty-swatch palette —
+  // which is exactly why it covered the artwork and had to go. This is at
+  // most six single-glyph buttons: the high-frequency verbs plus the two
+  // destructive ones that should never be a hunt. The rule the sidebar
+  // established still holds: anything that needs a label, a slider or a grid
+  // lives in the panel. Only glyph-sized verbs may sit on the canvas.
+  const quickBar = el('div', { class: 'smr-edqb', dir: 'rtl', hidden: true });
+  quickBar.addEventListener('pointerdown', (e) => e.stopPropagation());
+  document.body.appendChild(quickBar);
 
   // ---------------- the sidebar (v2.1) ----------------
   //
@@ -1521,6 +1565,7 @@ export function initEditor(handle, slide, opts = {}) {
     if (!sel) {
       selMore = [];
       selBox.hidden = true; toolbar.hidden = true; gridBox.hidden = true;
+      quickBar.hidden = true;
       paintMoreBoxes();
       return;
     }
@@ -1533,6 +1578,12 @@ export function initEditor(handle, slide, opts = {}) {
     paintMoreBoxes();
     toolbar.hidden = false;
     syncPropsPane();
+    // follows the selection through scroll, resize and every re-compose; the
+    // bar itself is only REBUILT when the selection or its state changes
+    if (!editing && !ges) {
+      if (quickBar.hidden) renderQuickBar();
+      placeQuickBar();
+    }
   }
 
   // ---------------- mutations ----------------
@@ -1657,6 +1708,7 @@ export function initEditor(handle, slide, opts = {}) {
     peekBox.hidden = true;
     toolbar.hidden = true;
     gridBox.hidden = true;
+    quickBar.hidden = true;
     paintMoreBoxes();
     syncPropsPane();
     renderLayersPanel();
@@ -2024,9 +2076,15 @@ export function initEditor(handle, slide, opts = {}) {
 
   function renderToolbar() {
     zoomUI = null;
-    if (!sel) { toolbar.hidden = true; return; }
+    if (!sel) { toolbar.hidden = true; quickBar.hidden = true; return; }
     toolbar.hidden = false;
-    if (selMore.length) { renderGroupToolbar(); syncPropsPane(); return; }
+    if (selMore.length) {
+      renderGroupToolbar();
+      syncPropsPane();
+      renderQuickBar();
+      requestAnimationFrame(placeQuickBar);
+      return;
+    }
     if (sel.kind === 'block') renderBlockToolbar(sel.name);
     else if (sel.kind === 'slot') renderSlotToolbar(sel.n);
     else if (sel.kind === 'el') renderElToolbar(sel.key);
@@ -2052,6 +2110,137 @@ export function initEditor(handle, slide, opts = {}) {
         el('span', { class: 'smr-edtb__depthlbl' }, 'מתחת'), st));
     }
     syncPropsPane();
+    // the canvas bar mirrors the same state, so it is rebuilt from the same
+    // call — a bold toggle lights up in both places or in neither
+    renderQuickBar();
+    requestAnimationFrame(placeQuickBar);
+  }
+
+  // ---------------- quick actions: contents & placement (v2.3) ----------------
+
+  function qbBtn(glyph, title, onClick, o = {}) {
+    const b = el('button', {
+      class: 'smr-edqb__b' + (o.danger ? ' is-danger' : '') + (o.on ? ' on' : '') +
+        (o.wide ? ' is-wide' : ''),
+      type: 'button', title,
+    }, glyph);
+    // pointerdown + preventDefault: a quick-bar press must never take focus
+    // away from an in-place text edit before its own handler runs (the same
+    // trap the ✓/✗ bar documents), and must never reach the slide's deselect.
+    b.addEventListener('pointerdown', (e) => { e.preventDefault(); e.stopPropagation(); });
+    b.addEventListener('click', (e) => { e.stopPropagation(); onClick(); });
+    return b;
+  }
+
+  const qbSep = () => el('span', { class: 'smr-edqb__sep' });
+
+  // «⋯» — the door to the full set. It opens the sidebar's מאפיינים tab and
+  // pulses it, so the first time someone presses it they SEE where the rest of
+  // the options live, instead of wondering what just happened.
+  function qbMore() {
+    return qbBtn('⋯', 'כל האפשרויות — בסרגל הצד', () => {
+      openTab('props');
+      sbPanel.classList.remove('is-pulse');
+      void sbPanel.offsetWidth;              // restart the animation
+      sbPanel.classList.add('is-pulse');
+    });
+  }
+
+  function qbLockDel(t, delFn, delTitle) {
+    const locked = isLocked(t);
+    return [
+      qbBtn(locked ? '🔒' : '🔓', locked ? 'שחרור הנעילה' : 'נעילה — נשאר על השקף, מפסיק לזוז',
+        () => toggleLock(t), { on: locked }),
+      qbBtn('🗑', delTitle, delFn, { danger: true }),
+    ];
+  }
+
+  function renderQuickBar() {
+    if (!sel) { quickBar.hidden = true; return; }
+    const kids = [];
+
+    if (selMore.length) {
+      kids.push(el('span', { class: 'smr-edqb__n' }, String(targets().length)));
+      kids.push(qbBtn('🗑', 'מחיקת כל המסומנים', () => deleteSel(), { danger: true }));
+    } else if (sel.kind === 'block') {
+      const b = design.blocks[sel.name] || {};
+      kids.push(qbBtn('✏️', 'עריכת הטקסט על השקף (או לחיצה כפולה)',
+        () => startTextEdit(sel.name, null)));
+      kids.push(qbBtn('B', 'מודגש', () => {
+        const blk = blockOf(sel.name);
+        blk.bold = !blk.bold;
+        commit();
+        renderToolbar();
+      }, { on: !!b.bold }));
+      kids.push(qbBtn('I', 'נטוי', () => {
+        const blk = blockOf(sel.name);
+        blk.italic = !blk.italic;
+        commit();
+        renderToolbar();
+      }, { on: !!b.italic }));
+      kids.push(qbSep());
+      kids.push(...qbLockDel(sel, () => hideKey(sel.name),
+        'הסתרת הטקסט — משחזרים מלוח השכבות'));
+    } else if (sel.kind === 'extra') {
+      const ex = design.extras[sel.index];
+      if (!ex) { quickBar.hidden = true; return; }
+      kids.push(qbBtn('⧉', 'שכפול (⌘D)', () => duplicateSel()));
+      if (ex.type === 'photo') {
+        kids.push(qbBtn('✂️', extraCropOn ? 'סיום החיתוך' : 'חיתוך ומיקום בתוך המסגרת', () => {
+          extraCropOn = !extraCropOn;
+          renderToolbar();
+          refreshUI();
+        }, { on: extraCropOn }));
+      }
+      kids.push(qbBtn(ex.back ? '⬆' : '⬇', ex.back ? 'החזרה לקדמת השקף' : 'העברה מאחורי הטקסט', () => {
+        if (ex.back) delete ex.back; else ex.back = true;
+        const { backs, fronts } = bandLists();
+        rebuildExtras(backs, fronts, ex);
+      }));
+      kids.push(qbSep());
+      kids.push(...qbLockDel(sel, () => {
+        design.extras.splice(sel.index, 1);
+        deselect();
+        commit();
+        renderLayersPanel();
+      }, 'מחיקת הפריט'));
+    } else if (sel.kind === 'el') {
+      kids.push(...qbLockDel(sel, () => hideKey(elHiddenKey(sel.key)),
+        'הסתרת האלמנט — משחזרים מלוח השכבות'));
+    } else if (sel.kind === 'slot') {
+      kids.push(qbBtn('📷', slotSpec(sel.n) ? 'החלפת התמונה' : 'הוספת תמונה למשבצת', () => {
+        pickPhoto({
+          title: slotSpec(sel.n) ? 'החלפת התמונה במשבצת' : 'איזו תמונה נכנסת למשבצת?',
+          onPick: (url) => fillSlot(sel.n, url),
+        });
+      }));
+      kids.push(qbSep());
+      kids.push(qbBtn('🗑', 'הסתרת המשבצת — משחזרים מלוח השכבות',
+        () => hideKey(slotKeyOf(sel.n)), { danger: true }));
+    }
+
+    kids.push(qbSep(), qbMore());
+    quickBar.replaceChildren(...kids);
+    quickBar.hidden = false;
+  }
+
+  // Above the selection, flipped below when the top would clip, clamped to the
+  // viewport on both axes. Extras carry a rotate handle 30px above their box,
+  // so they get a wider berth — otherwise the bar sits ON the handle and the
+  // first thing a drag grabs is a button.
+  function placeQuickBar() {
+    if (quickBar.hidden || !sel) return;
+    const g = geomOf(sel);
+    if (!g) { quickBar.hidden = true; return; }
+    const s = scale(), ir = irect();
+    const bw = quickBar.offsetWidth || 180, bh = quickBar.offsetHeight || 36;
+    const gap = sel.kind === 'extra' ? 46 : 12;
+    let top = ir.top + (g.cy - g.h / 2) * s - bh - gap;
+    if (top < 8) top = ir.top + (g.cy + g.h / 2) * s + gap;
+    top = clamp(top, 8, Math.max(8, window.innerHeight - bh - 8));
+    const left = clamp(ir.left + g.cx * s - bw / 2, 8, Math.max(8, window.innerWidth - bw - 8));
+    quickBar.style.top = top + 'px';
+    quickBar.style.left = left + 'px';
   }
 
   // ---------------- shared property rows (v2.2) ----------------
@@ -3177,6 +3366,7 @@ export function initEditor(handle, slide, opts = {}) {
     if (!node || !idoc) { toast('אי אפשר לערוך את הטקסט הזה כאן', 'err'); return; }
     deselect();
     toolbar.hidden = true;
+    quickBar.hidden = true;   // the ✓/✗ bar owns this spot while typing
     const origVal = String(slide.vars[name] ?? '');
     // multiline heuristic (matches the builder's field-kind inference):
     // Enter = <br> in long/broken text, Enter = commit in one-liners
@@ -4091,6 +4281,11 @@ export function initEditor(handle, slide, opts = {}) {
       e.stopPropagation();
       const dxc = e.clientX - ges.startX, dyc = e.clientY - ges.startY;
       if (!ges.moved && Math.hypot(dxc, dyc) < 3) return;
+      // the quick bar gets out of the way the moment a click becomes a DRAG —
+      // a bar chasing the box it belongs to is noise, and it would sit under
+      // the pointer at exactly the wrong moment. refreshUI brings it back on
+      // release. A click that never moves keeps it, which is the common case.
+      if (!ges.moved) quickBar.hidden = true;
       ges.moved = true;
       overlay.classList.add('is-drag');
       const s = scale();
@@ -4472,6 +4667,7 @@ export function initEditor(handle, slide, opts = {}) {
       overlay.remove();
       sidebar.remove(); // takes the rail, the toolbar and both panes with it
       editBar.remove();
+      quickBar.remove();
       document.removeEventListener('keydown', onKey);
       window.removeEventListener('scroll', reposition, true);
       window.removeEventListener('resize', reposition);
