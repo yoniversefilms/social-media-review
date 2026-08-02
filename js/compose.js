@@ -230,6 +230,144 @@ const DESIGN_BORDERS = { paper: '', line: ' photo--line', none: ' photo--none' }
 const designBorderClass = (b) =>
   Object.prototype.hasOwnProperty.call(DESIGN_BORDERS, b) ? DESIGN_BORDERS[b] : '';
 
+// ---- photo styling (v2.4) --------------------------------------------------
+// Shape library for photo slots and photo extras. Two mechanisms in one table:
+// `r` is a border-radius string, `c` a clip-path. `original` is the escape
+// hatch — no mask at all, so a photo keeps the edges it was uploaded with,
+// which is the one thing the v1.2 engine could not express (any crop or border
+// key forced the blob). `organic`'s radius is byte-identical to tokens.css
+// .photo, so a design that names it renders to the same pixels either way.
+const DESIGN_SHAPES = {
+  original:    null,
+  organic:     { r: '47% 53% 44% 56% / 55% 42% 58% 45%' },
+  'organic-2': { r: '62% 38% 55% 45% / 48% 60% 40% 52%' },
+  'organic-3': { r: '38% 62% 41% 59% / 63% 39% 61% 37%' },
+  'blob-soft': { r: '42% 58% 46% 54% / 52% 48% 52% 48%' },
+  leaf:        { r: '68% 6% 68% 6% / 68% 6% 68% 6%' },
+  arch:        { r: '50% 50% 4% 4% / 38% 38% 3% 3%' },
+  rect:        { r: '0' },
+  rounded:     { r: '6%' },
+  circle:      { r: '50%', square: true },
+  ellipse:     { r: '50%' },
+  hexagon:     { c: 'polygon(25% 0%,75% 0%,100% 50%,75% 100%,25% 100%,0% 50%)' },
+  diamond:     { c: 'polygon(50% 0%,100% 50%,50% 100%,0% 50%)' },
+  triangle:    { c: 'polygon(50% 0%,100% 100%,0% 100%)' },
+  chevron:     { c: 'polygon(0% 0%,100% 0%,100% 82%,50% 100%,0% 82%)' },
+  notch:       { c: 'polygon(0% 0%,88% 0%,100% 12%,100% 100%,0% 100%)' },
+};
+const designShape = (n) =>
+  Object.prototype.hasOwnProperty.call(DESIGN_SHAPES, n) ? DESIGN_SHAPES[n] : undefined;
+
+// Frame aspect ratios. `native` (and the absence of the key) means the frame
+// follows the picture — its own proportions for an extra, the template's box
+// for a slot. Any other value PINS the frame and the image covers it, which is
+// what makes cropping a crop rather than only a zoom.
+const DESIGN_RATIOS = {
+  native: null, '1:1': '1/1', '4:5': '4/5', '5:4': '5/4',
+  '3:2': '3/2', '2:3': '2/3', '16:9': '16/9', '9:16': '9/16',
+};
+const designRatio = (r) =>
+  Object.prototype.hasOwnProperty.call(DESIGN_RATIOS, r) ? DESIGN_RATIOS[r] : null;
+
+// The legacy presets, restated in the painted mechanism below so ONE code path
+// draws every ring. Widths and tokens are lifted from tokens.css (.photo::after
+// = 3px gold-50 · .photo--line = 2px gold-70), so a design that names a preset
+// AND a shape gets the ring it always had — on a shape that could never carry
+// one before.
+const DESIGN_BORDER_PRESETS = {
+  paper: { color: 'gold-50', width: 3 },
+  line:  { color: 'gold-70', width: 2 },
+  none:  null,
+};
+
+// What ring a photo carries. Legacy spelling is a preset string; v2.4 adds
+// {color:<palette token>, width:<px>} for any thickness in any palette colour.
+// `bare` is the default for shape:"original" — "exactly what I uploaded" should
+// not arrive wearing a gold ring nobody asked for.
+function designBorderSpec(b, bare) {
+  if (b == null) return bare ? null : DESIGN_BORDER_PRESETS.paper;
+  if (typeof b === 'string') {
+    return Object.prototype.hasOwnProperty.call(DESIGN_BORDER_PRESETS, b)
+      ? DESIGN_BORDER_PRESETS[b] : DESIGN_BORDER_PRESETS.paper;
+  }
+  if (typeof b !== 'object') return DESIGN_BORDER_PRESETS.paper;
+  const w = dclamp(dnum(b.width) ?? 0, 0, 48);
+  if (!(w > 0)) return null;
+  return {
+    color: (b.color && RE_TOKEN.test(String(b.color))) ? String(b.color) : 'gold-50',
+    width: dround(w),
+  };
+}
+
+// True when a photo carries something v2.4 introduced, i.e. when it needs the
+// framed path below. `organic` is deliberately NOT counted: it is the one shape
+// name that predates this version (it selected the paper mat), so a design
+// whose only new-looking key is shape:"organic" stays on the legacy path —
+// otherwise every slide saved before v2.4 would silently lose its mat and its
+// ring the moment this shipped.
+function designPhotoStyled(s) {
+  if (s == null || typeof s !== 'object') return false;
+  if (s.overlay != null || s.ratio != null) return true;
+  if (s.border != null && typeof s.border === 'object') return true;
+  return s.shape != null && s.shape !== 'organic';
+}
+
+// The v2.4 frame. ONE mechanism serves both shape families, because the old one
+// could not: an inset box-shadow follows border-radius but IGNORES clip-path,
+// so a hexagon or a triangle would answer the border control and draw nothing —
+// the shape correct, the ring silently absent. Instead the OUTER box is painted
+// in the border colour and padded by the border width, and the INNER box
+// repeats the same shape, so the ring is a true inset that percentage radii and
+// percentage polygons both recompute against the smaller box. Deterministic CSS
+// only — no filters, no masks, nothing headless Chrome renders differently
+// between the two engines. Returns the two style strings plus whether the image
+// must cover (a pinned frame) or keep its own proportions.
+function designPhotoFrame(s, cover) {
+  const shape = designShape(s.shape);
+  const bd = designBorderSpec(s.border, s.shape === 'original');
+  const ratio = designRatio(s.ratio);
+  // Naming a shape pins BOTH mask properties — the radius and the clip — even
+  // when the chosen shape only uses one of them. A slot's element is the
+  // TEMPLATE's `.photo`, which already carries a blob radius (tokens.css) and,
+  // on the cut-out templates, a `clip-path: url(#…-cut)`. Emitting only the
+  // property the new shape happens to use leaves the other one standing, so a
+  // circle on a cut-out template would silently keep the template's cut and the
+  // picker would look inert. Reset both, always.
+  let mask = '';
+  if (s.shape != null) {
+    mask += 'border-radius:' + ((shape && shape.r) ? shape.r : '0') + ';' +
+      'clip-path:' + ((shape && shape.c) ? shape.c : 'none') + ';';
+  }
+  // a circle stays a circle: it pins 1/1 unless the design names a ratio itself
+  const ar = ratio || ((shape && shape.square) ? '1/1' : null);
+  let outer = mask;
+  if (ar) outer += 'aspect-ratio:' + ar + ';height:auto;';
+  outer += bd
+    ? 'background:var(--' + bd.color + ');padding:' + bd.width + 'px;box-sizing:border-box;'
+    : 'background:transparent;padding:0;';
+  const fill = !!(ar || cover);
+  // The inner box must wear the SAME mask as the outer or the ring breaks. When
+  // no shape is named the outer's mask comes from CSS we cannot read here (the
+  // template's class), so the inner INHERITS it — the same trick tokens.css
+  // uses on `.photo::after`. Without this, a border on an unshaped slot paints
+  // a rectangle inside a blob and survives only as two crescents.
+  const innerMask = s.shape != null ? mask : 'border-radius:inherit;clip-path:inherit;';
+  const inner = innerMask + 'position:relative;overflow:hidden;' +
+    (fill ? 'width:100%;height:100%;' : 'display:block;width:100%;');
+  return { outer, inner, cover: fill };
+}
+
+// The colour wash over a photo — same {color, opacity} shape as design.bg's
+// scrim, so it is one concept in two places. It lives INSIDE the mask, which is
+// why it takes the photo's shape instead of squaring it off.
+function designPhotoOverlay(ov) {
+  if (!ov || typeof ov !== 'object' ||
+      !(ov.color && RE_TOKEN.test(String(ov.color)))) return '';
+  const op = dclamp(dnum(ov.opacity) ?? 0.35, 0, 0.9);
+  return '<div data-photo="overlay" style="position:absolute;inset:0;background:var(--' +
+    ov.color + ');opacity:' + dround(op) + ';pointer-events:none"></div>';
+}
+
 // One rule, injected once per slide when any slot is filled: the pending
 // label of a filled slot disappears without touching the template's markup.
 const SLOT_FILLED_CSS = '<style>[data-slot-filled] .photo__label{display:none}</style>';
@@ -272,9 +410,19 @@ function applySlots(html, slots, hiddenSlots) {
     (m0, tag, pre, cls, post) => {
       if (!cls.split(/\s+/).includes('photo')) return m0;
       const i = count++;
-      const hide = hiddenSlots && hiddenSlots.has(String(i))
-        ? ' style="display:none"' : '';
       const s = slots ? slots[String(i)] : null;
+      // v2.4: opacity rides on the FRAME for a slot exactly as it does for an
+      // extra (designExtraHtml), so a photo fades together with its mat and its
+      // ring instead of through them. With no opacity key this collapses to the
+      // v1.2 markup, which is what keeps the parity baseline honest.
+      const sop = (s && typeof s === 'object') ? dnum(s.opacity) : null;
+      const frame = (hiddenSlots && hiddenSlots.has(String(i)) ? 'display:none;' : '') +
+        (sop !== null ? 'opacity:' + dround(dclamp(sop, 0, 1)) + ';' : '');
+      // the styled path below wants the trailing ';' (it concatenates f.outer
+      // after it); the legacy attribute drops it, so a slide with no opacity
+      // key emits the byte-identical v1.2 markup and the parity baseline can be
+      // compared by hash, not only by eye
+      const hide = frame ? ' style="' + frame.replace(/;$/, '') + '"' : '';
       if (!s || typeof s !== 'object' ||
           !(typeof s.url === 'string' && RE_PHOTO_URL.test(s.url))) {
         if (s != null) bad.push(String(i));
@@ -282,6 +430,18 @@ function applySlots(html, slots, hiddenSlots) {
           hide + post + '>';
       }
       filled.push(String(i));
+      // v2.4: a styled slot keeps the template's .photo element (it is the
+      // template's, not ours) but wears photo--none so the class ring stops
+      // fighting the painted one, and takes the frame inline. Everything else
+      // still renders exactly the v1.2 markup.
+      if (designPhotoStyled(s)) {
+        const f = designPhotoFrame(s, true);
+        const simg = '<img data-slot-img="' + i + '" src="' + dattr(s.url) + '" alt="" ' +
+          'style="' + designCropStyle(s, f.cover) + '">';
+        return '<' + tag + ' ' + pre + 'class="' + cls + ' photo--none" data-slot="' + i +
+          '" data-slot-filled="" style="' + frame + f.outer + '"' + post + '>' +
+          '<div style="' + f.inner + '">' + simg + designPhotoOverlay(s.overlay) + '</div>';
+      }
       const img = '<img data-slot-img="' + i + '" src="' + dattr(s.url) + '" alt="" ' +
         'style="' + designCropStyle(s, true) + '">';
       return '<' + tag + ' ' + pre + 'class="' + cls + designBorderClass(s.border) +
@@ -559,6 +719,19 @@ function designExtraHtml(ex, i, svg) {
     return '<div class="ill" data-extra="' + i + '" style="' + pos + color + '">' + svg + '</div>';
   }
   if (ex.type === 'photo') {
+    // v2.4 keys (a named shape · a painted border · an overlay · a pinned
+    // ratio) take the framed path: nested boxes, everything inline, no .photo
+    // class at all. A photo without them falls through to the v1.2 markup
+    // below byte for byte — which is what holds the pixel-parity baseline for
+    // every design saved before this version.
+    if (designPhotoStyled(ex)) {
+      const f = designPhotoFrame(ex, false);
+      const fimg = '<img src="' + dattr(ex.url) + '" alt="" style="' +
+        designCropStyle(ex, f.cover) + '">';
+      return '<div data-extra="' + i + '" style="' + pos + f.outer + '">' +
+        '<div style="' + f.inner + '">' + fimg + designPhotoOverlay(ex.overlay) +
+        '</div></div>';
+    }
     // pos/zoom/border engage the crop-frame path: the img keeps its natural
     // aspect (the frame's height follows it — transforms don't affect
     // layout), the .photo wrapper masks and clips, the border class picks
@@ -584,6 +757,38 @@ function injectBeforeSlideEnd(html, extraStr) {
   return i < 0 ? html + extraStr : html.slice(0, i) + extraStr + html.slice(i);
 }
 /* ==== END PARITY BLOCK ==================================================== */
+
+// One validator for everything a photo can carry (v2.4), so a slot and an extra
+// report the same wrong value the same way. Deliberately OUTSIDE the parity
+// block: render.mjs dies on a bad design, this one collects and draws anyway.
+// Every check here describes a FALLBACK, never a refusal — but a fallback the
+// reviewer did not ask for is exactly what the problem banner exists to name.
+// `where` is already inflected for the «ב» prefix its callers supply.
+function designPhotoProblems(s, where, problems) {
+  if (!s || typeof s !== 'object') return;
+  if (s.shape != null && designShape(s.shape) === undefined) {
+    problems.push('צורת תמונה לא מוכרת ב' + where + ': ”' + String(s.shape) + '“');
+  }
+  if (s.ratio != null &&
+      !Object.prototype.hasOwnProperty.call(DESIGN_RATIOS, String(s.ratio))) {
+    problems.push('יחס צדדים לא מוכר ב' + where + ': ”' + String(s.ratio) + '“');
+  }
+  if (s.border != null) {
+    if (typeof s.border === 'object') {
+      if (s.border.color != null && !RE_TOKEN.test(String(s.border.color))) {
+        problems.push('צבע מסגרת לא חוקי ב' + where + ' (נבחרה ברירת המחדל)');
+      }
+    } else if (!Object.prototype.hasOwnProperty.call(DESIGN_BORDERS, String(s.border))) {
+      problems.push('סוג מסגרת לא מוכר ב' + where + ': ”' + String(s.border) +
+        '“ (נבחרה ברירת המחדל)');
+    }
+  }
+  if (s.overlay != null &&
+      !(typeof s.overlay === 'object' && s.overlay.color &&
+        RE_TOKEN.test(String(s.overlay.color)))) {
+    problems.push('שכבת צבע לא חוקית ב' + where + ' (לא צוירה)');
+  }
+}
 
 // ---------------------------------------------------------------- composing
 
@@ -738,12 +943,7 @@ async function composeInner(slide, problems) {
         problems.push('אין משבצת תמונה מספר ' + k + ' בתבנית ”' + tplName + '“');
         continue;
       }
-      const s = slots[k];
-      if (s && typeof s === 'object' && s.border != null &&
-          !Object.prototype.hasOwnProperty.call(DESIGN_BORDERS, String(s.border))) {
-        problems.push('סוג מסגרת לא מוכר במשבצת ' + k + ': ”' + String(s.border) +
-          '“ (נבחרה ברירת המחדל)');
-      }
+      designPhotoProblems(slots[k], 'משבצת ' + k, problems);
     }
     for (const k of slotRes.bad) {
       problems.push('כתובת תמונה לא חוקית במשבצת ' + k);
@@ -833,10 +1033,7 @@ async function composeInner(slide, problems) {
         problems.push('כתובת תמונה לא חוקית בשכבת עיצוב ' + (i + 1));
         return;
       }
-      if (ex.border != null &&
-          !Object.prototype.hasOwnProperty.call(DESIGN_BORDERS, String(ex.border))) {
-        problems.push('סוג מסגרת לא מוכר בשכבת עיצוב ' + (i + 1) + ' (נבחרה ברירת המחדל)');
-      }
+      designPhotoProblems(ex, 'שכבת עיצוב ' + (i + 1), problems);
       extraStr += designExtraHtml(ex, i, null);
     } else {
       problems.push('סוג שכבת עיצוב לא מוכר: ”' + String(ex.type) + '“');

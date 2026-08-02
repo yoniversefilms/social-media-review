@@ -343,9 +343,69 @@ const RE_HIDDEN_KEY =
 // the token lands on `color` or `background`; the editor only stores it.
 const EL_NO_COLOR = new Set(['lockup']);
 
-// Shared crop canonicalization for slot fills and photo extras: pos [%,%]
-// (omitted at the 50/50 default), zoom clamped 1..3 (omitted at 1), border
-// paper (default, omitted) / line / none.
+// The shape library (v2.4), keyed exactly as the engines' DESIGN_SHAPES (the
+// PARITY BLOCK in compose.js/render.mjs). The editor only ever stores a KEY —
+// the engines own every radius and polygon, so a shape is described once and
+// the preview cannot drift from the PNG. `original` leads the list because it
+// is the answer to «give me back the picture I uploaded», which the v1.2 engine
+// had no way to say: any crop or border key forced the organic blob.
+const PHOTO_SHAPES = [
+  { key: 'original', label: 'מקורי', fam: 'plain' },
+  { key: 'organic', label: 'אורגני', fam: 'organic' },
+  { key: 'organic-2', label: 'אורגני 2', fam: 'organic' },
+  { key: 'organic-3', label: 'אורגני 3', fam: 'organic' },
+  { key: 'blob-soft', label: 'טיפה רכה', fam: 'organic' },
+  { key: 'leaf', label: 'עלה', fam: 'organic' },
+  { key: 'arch', label: 'קשת', fam: 'organic' },
+  { key: 'ellipse', label: 'אליפסה', fam: 'organic' },
+  { key: 'rect', label: 'מלבן', fam: 'geo' },
+  { key: 'rounded', label: 'פינות מעוגלות', fam: 'geo' },
+  { key: 'circle', label: 'עיגול', fam: 'geo' },
+  { key: 'hexagon', label: 'משושה', fam: 'geo' },
+  { key: 'diamond', label: 'מעוין', fam: 'geo' },
+  { key: 'triangle', label: 'משולש', fam: 'geo' },
+  { key: 'chevron', label: 'חץ', fam: 'geo' },
+  { key: 'notch', label: 'פינה קטומה', fam: 'geo' },
+];
+const PHOTO_SHAPE_KEYS = new Set(PHOTO_SHAPES.map((s) => s.key));
+
+// Frame ratios, keyed as the engines' DESIGN_RATIOS. «native» means no pinned
+// frame — the picture keeps its own proportions — so it is stored as nothing.
+const PHOTO_RATIOS = [
+  ['native', 'מקורי'], ['1:1', '1:1'], ['4:5', '4:5'], ['5:4', '5:4'],
+  ['3:2', '3:2'], ['2:3', '2:3'], ['16:9', '16:9'], ['9:16', '9:16'],
+];
+const PHOTO_RATIO_KEYS = new Set(PHOTO_RATIOS.map(([k]) => k));
+
+// Palette tokens only — the same law as blocks.color, and the same grammar the
+// engines enforce at render (RE_TOKEN, in the PARITY BLOCK). Enforcing it HERE
+// as well matters because the engines fall back SILENTLY: a stray "#ff0000"
+// becomes gold-50 in a ring and vanishes entirely in a wash, handing a reviewer
+// a colour they never picked with nothing on screen to say so. The UI can only
+// produce real tokens; imported or hand-edited JSON cannot be trusted to.
+const RE_PALETTE_TOKEN = /^[a-z0-9-]+$/;
+const paletteToken = (v) => (typeof v === 'string' && RE_PALETTE_TOKEN.test(v) ? v : null);
+
+// Mirrors `fill` in the engines' designPhotoFrame: a photo COVERS its frame
+// once that frame is pinned — by a named ratio, or by `circle`, which pins 1/1
+// on its own (the `square` flag in DESIGN_SHAPES; keep this in step with it).
+// A slot always covers. This is what tells the crop gestures whether panning
+// has anywhere to go at zoom 1.
+const PHOTO_SQUARE_SHAPES = new Set(['circle']);
+const photoPinned = (o) => !!(o && (
+  (typeof o.ratio === 'string' && o.ratio !== 'native' && PHOTO_RATIO_KEYS.has(o.ratio)) ||
+  PHOTO_SQUARE_SHAPES.has(o.shape)));
+
+// Shared canonicalization for slot fills and photo extras: pos [%,%] (omitted
+// at the 50/50 default), zoom clamped 1..3 (omitted at 1), plus everything v2.4
+// added — shape, frame ratio, border, colour overlay, opacity.
+//
+// `border` keeps TWO spellings on purpose. The legacy preset string
+// (paper|line|none, paper being the omitted default) is what every design saved
+// before v2.4 carries; the v2.4 object is {color: <palette token>, width: px}.
+// Width 0 is a real value, not an absent one — it is how «no border» is said —
+// so {width: 0} survives pruning, where dropping the key would silently mean
+// «the paper default» and put a gold ring back on a photo someone just stripped.
 function pruneCropInto(o, src) {
   if (Array.isArray(src.pos) && src.pos.length === 2) {
     const px = round1(clamp(Number(src.pos[0]) || 0, 0, 100));
@@ -354,7 +414,33 @@ function pruneCropInto(o, src) {
   }
   const z = Math.round(clamp(Number(src.zoom) || 1, 1, 3) * 100) / 100;
   if (z > 1) o.zoom = z;
-  if (src.border === 'line' || src.border === 'none') o.border = src.border;
+  if (typeof src.shape === 'string' && PHOTO_SHAPE_KEYS.has(src.shape)) o.shape = src.shape;
+  if (typeof src.ratio === 'string' && PHOTO_RATIO_KEYS.has(src.ratio) &&
+      src.ratio !== 'native') o.ratio = src.ratio;      // native is the default = silence
+  // Arrays are objects, and an array border would jump a photo onto the framed
+  // path while resolving to no ring — a legacy-looking photo silently losing
+  // its mat. Only a plain object counts.
+  if (src.border && typeof src.border === 'object' && !Array.isArray(src.border)) {
+    const w = Math.round(clamp(Number(src.border.width) || 0, 0, 48));
+    const c = paletteToken(src.border.color);
+    o.border = (w > 0 && c) ? { color: c, width: w } : { width: 0 };
+  } else if (src.border === 'line' || src.border === 'none') {
+    o.border = src.border;
+  } else if (src.border === 'paper' && src.shape === 'original') {
+    // «paper» is normally the omitted default, but shape:"original" defaults to
+    // NO ring — so on an original photo the word has to be kept to mean it
+    o.border = 'paper';
+  }
+  if (src.overlay && typeof src.overlay === 'object' && !Array.isArray(src.overlay)) {
+    const c = paletteToken(src.overlay.color);
+    if (c) {
+      o.overlay = {
+        color: c,
+        opacity: clamp(Math.round((Number(src.overlay.opacity) || 0) * 100) / 100, 0, 0.9),
+      };
+    }
+  }
+  pruneOpacityInto(o, src);   // slots fade on the frame, exactly as extras do
   return o;
 }
 
@@ -443,7 +529,10 @@ function pruneExtra(e) {
   if (e.type === 'ill' || e.type === 'brand') o.name = e.name;
   else {
     o.url = e.url;
-    if (e.shape) o.shape = e.shape;
+    // shape is pruned by pruneCropInto (v2.4) against the shape table. The old
+    // unguarded `if (e.shape) o.shape = e.shape` that used to sit here let an
+    // extra keep a shape name a SLOT would have stripped — the one sanitizer
+    // drifting into two, which is exactly what sharing it was meant to prevent.
     pruneCropInto(o, e);               // slots v1.2: photo extras crop the same way
   }
   if (e.color) o.color = e.color;
@@ -616,6 +705,31 @@ function injectStyles() {
 .smr-edsw{appearance:none;width:22px;height:22px;border-radius:50%;cursor:pointer;
   border:1px solid rgba(36,29,32,.25);padding:0}
 .smr-edsw.on{outline:2px solid var(--accent,#830051);outline-offset:2px}
+/* shape picker (v2.4) — a grid of tiles that each DRAW their shape, because a
+   list of words makes you translate «משושה» into a hexagon in your head before
+   you can choose. Four to a row fits the 300px panel with the label under each
+   tile; the tile itself is a filled square wearing the same radius/clip-path the
+   engine will apply, so what you point at is what you get. */
+.smr-edshapes{display:grid;grid-template-columns:repeat(4,1fr);gap:6px;padding:2px 0}
+/* min-width:0 + the wrap rule below are a GUARD, not a fix for an observed
+   break: measured in Chrome, the current labels fit at every sidebar width down
+   to 230px with or without them. They are here because a grid item defaults to
+   min-width:auto, so a longer label — a rename, a new shape, another language —
+   would widen its track past 1fr and push the picker sideways out of the panel
+   instead of wrapping. Cheap insurance against a change nobody would think to
+   re-measure. */
+.smr-edshape{appearance:none;background:none;border:1px solid transparent;cursor:pointer;
+  border-radius:8px;padding:5px 2px 4px;display:flex;flex-direction:column;align-items:center;
+  gap:4px;font:inherit;color:var(--ink-soft,#6b5f63);min-width:0}
+.smr-edshape:hover{border-color:var(--line,rgba(36,29,32,.12))}
+.smr-edshape.on{border-color:var(--accent,#830051);color:var(--accent,#830051)}
+.smr-edshape i{display:block;width:30px;height:30px;background:var(--gold-50,#b3995d)}
+.smr-edshape.on i{background:var(--accent,#830051)}
+.smr-edshape span{font-size:.63rem;line-height:1.2;text-align:center;
+  overflow-wrap:anywhere;hyphens:none}
+/* «מקורי» is the ABSENCE of a mask — drawing it as a shape would misdescribe
+   what it does, so it reads as an empty dashed frame instead */
+.smr-edshape__orig{background:none !important;border:1.5px dashed currentColor}
 .smr-edtb .btn{padding:5px 10px;font-size:.8rem}
 .smr-edtb__del{color:#b3403a}
 .smr-edtb__hint{font-size:.75rem;color:var(--ink-soft,#6b5f63);line-height:1.5}
@@ -2192,10 +2306,18 @@ export function initEditor(handle, slide, opts = {}) {
           refreshUI();
         }, { on: extraCropOn }));
       }
+      // Re-resolved INSIDE the handler, not captured: the quick bar is only
+      // rebuilt while it is hidden (refreshUI), so any row that commits without
+      // one — every v2.4 photo row does — leaves the `ex` above pointing at an
+      // object prune() has already replaced. Writing `back` onto that orphan
+      // moved nothing and silently deselected the extra, because indexOf() of a
+      // stale object in the fresh array is -1.
       kids.push(qbBtn(ex.back ? '⬆' : '⬇', ex.back ? 'החזרה לקדמת השקף' : 'העברה מאחורי הטקסט', () => {
-        if (ex.back) delete ex.back; else ex.back = true;
+        const cur = design.extras[sel.index];
+        if (!cur) return;
+        if (cur.back) delete cur.back; else cur.back = true;
         const { backs, fronts } = bandLists();
-        rebuildExtras(backs, fronts, ex);
+        rebuildExtras(backs, fronts, cur);
       }));
       kids.push(qbSep());
       kids.push(...qbLockDel(sel, () => {
@@ -2331,18 +2453,205 @@ export function initEditor(handle, slide, opts = {}) {
     ];
   }
 
-  // «נייר» = the .photo paper mat (default) · «קו» = gold hairline · «בלי» = bare mask
-  function borderRow(current, onPick) {
-    const cur = current === 'line' || current === 'none' ? current : 'paper';
-    return el('div', { class: 'smr-edtb__row' },
-      el('span', null, 'מסגרת'),
+  // ---------------- photo styling rows (v2.4) ----------------
+
+  // The border a photo wears, as three rows that read top to bottom: how thick ·
+  // what colour · the two presets that predate this control. Thickness is the
+  // switch — 0 px IS «no border», so there is no separate on/off toggle to
+  // disagree with the slider. The presets stay because designs on disk name
+  // them, and because «נייר»/«קו» are how the template library talks.
+  //
+  // getObj is re-resolved on every event: commit()'s prune REPLACES the stored
+  // objects, so a captured reference goes stale after the first change. That
+  // trap has bitten zoomRow and sliderRow already; this row inherits the fix.
+  function borderRows(getObj) {
+    const spec = () => {
+      const o = getObj() || {};
+      const b = o.border;
+      if (b && typeof b === 'object') {
+        return { width: Math.round(clamp(Number(b.width) || 0, 0, 48)), color: b.color || 'gold-50' };
+      }
+      // the legacy presets, in the same numbers the engines resolve them to
+      if (b === 'none') return { width: 0, color: 'gold-50' };
+      if (b === 'line') return { width: 2, color: 'gold-70' };
+      if (b === 'paper') return { width: 3, color: 'gold-50' };
+      // NO border key: the default is the paper ring everywhere EXCEPT on
+      // shape:"original", where designBorderSpec's `bare` argument means no ring
+      // at all. This row has to agree with the engine or the slider reads 3px
+      // over a photo that is visibly wearing nothing.
+      return o.shape === 'original'
+        ? { width: 0, color: 'gold-50' }
+        : { width: 3, color: 'gold-50' };
+    };
+    const write = (patch) => {
+      const o = getObj();
+      if (!o) return;
+      const next = Object.assign(spec(), patch);
+      o.border = next.width > 0 ? { color: next.color, width: next.width } : { width: 0 };
+    };
+    const thickness = sliderRow('עובי מסגרת', {
+      min: 0, max: 48, step: 1,
+      get: () => spec().width,
+      set: (v) => write({ width: Math.round(v) }),
+      fmt: (v) => (v > 0 ? Math.round(v) + 'px' : 'בלי'),
+    });
+    const colors = el('div', { class: 'smr-edtb__row' },
+      el('span', null, 'צבע מסגרת'),
+      palette.map((p) => el('button', {
+        class: 'smr-edsw' + (spec().color === p.name && spec().width > 0 ? ' on' : ''),
+        type: 'button', title: p.name,
+        style: { background: p.css },
+        onclick: () => {
+          // picking a colour on a border nobody has thickened yet means "show
+          // me one" — otherwise the swatch would answer with nothing visible
+          const cur = spec();
+          write({ color: p.name, width: cur.width > 0 ? cur.width : 3 });
+          commit();
+          renderToolbar();
+        },
+      })));
+    const presets = el('div', { class: 'smr-edtb__row' },
+      el('span', null, 'מוכנות'),
       [['paper', 'נייר'], ['line', 'קו'], ['none', 'בלי']].map(([v, lab]) =>
         el('button', {
-          class: 'smr-edtg smr-edtg--w' + (cur === v ? ' on' : ''),
-          type: 'button',
-          onclick: () => onPick(v),
-        }, lab)),
-    );
+          class: 'smr-edtg smr-edtg--w', type: 'button',
+          onclick: () => {
+            const o = getObj();
+            if (!o) return;
+            // «נייר» is normally said by saying nothing — but on shape:"original"
+            // absence means NO ring, so there the word has to be written down or
+            // the button that names the paper mat would remove it instead.
+            if (v !== 'paper') o.border = v;
+            else if (o.shape === 'original') o.border = 'paper';
+            else delete o.border;
+            commit();
+            renderToolbar();
+          },
+        }, lab)));
+    return [thickness, colors, presets];
+  }
+
+  // The shape library. Every tile draws ITS OWN shape from the same geometry the
+  // engines use, so the picker is a preview rather than a word list — «משושה» is
+  // not a thing anyone recognises faster than a hexagon. Radius shapes and
+  // clip-path shapes are both here; the engine, not this list, owns the values.
+  const SHAPE_TILE_CSS = {
+    original: '', organic: 'border-radius:47% 53% 44% 56% / 55% 42% 58% 45%',
+    'organic-2': 'border-radius:62% 38% 55% 45% / 48% 60% 40% 52%',
+    'organic-3': 'border-radius:38% 62% 41% 59% / 63% 39% 61% 37%',
+    'blob-soft': 'border-radius:42% 58% 46% 54% / 52% 48% 52% 48%',
+    leaf: 'border-radius:68% 6% 68% 6% / 68% 6% 68% 6%',
+    arch: 'border-radius:50% 50% 4% 4% / 38% 38% 3% 3%',
+    ellipse: 'border-radius:50%', rect: '', rounded: 'border-radius:6%',
+    circle: 'border-radius:50%',
+    hexagon: 'clip-path:polygon(25% 0%,75% 0%,100% 50%,75% 100%,25% 100%,0% 50%)',
+    diamond: 'clip-path:polygon(50% 0%,100% 50%,50% 100%,0% 50%)',
+    triangle: 'clip-path:polygon(50% 0%,100% 100%,0% 100%)',
+    chevron: 'clip-path:polygon(0% 0%,100% 0%,100% 82%,50% 100%,0% 82%)',
+    notch: 'clip-path:polygon(0% 0%,88% 0%,100% 12%,100% 100%,0% 100%)',
+  };
+
+  function shapeRow(getObj) {
+    const cur = () => (getObj() || {}).shape || null;
+    const tile = (s) => {
+      const swatch = el('i', { style: { cssText: SHAPE_TILE_CSS[s.key] || '' } });
+      // «מקורי» is the absence of a mask, so it is drawn as a plain frame with a
+      // dashed edge — a shape tile would be a lie about what it does
+      if (s.key === 'original') swatch.classList.add('smr-edshape__orig');
+      return el('button', {
+        class: 'smr-edshape' + (cur() === s.key ? ' on' : ''),
+        type: 'button', title: s.label,
+        onclick: () => {
+          const o = getObj();
+          if (!o) return;
+          if (o.shape === s.key) delete o.shape; else o.shape = s.key;
+          commit();
+          renderToolbar();
+        },
+      }, swatch, el('span', null, s.label));
+    };
+    return [
+      el('div', { class: 'smr-edtb__row' }, el('span', null, 'צורה')),
+      el('div', { class: 'smr-edshapes' },
+        PHOTO_SHAPES.filter((s) => s.fam !== 'geo').map(tile)),
+      el('div', { class: 'smr-edtb__row smr-edtb__hint' }, 'גיאומטריות'),
+      el('div', { class: 'smr-edshapes' },
+        PHOTO_SHAPES.filter((s) => s.fam === 'geo').map(tile)),
+    ];
+  }
+
+  // Frame ratio — what makes cropping a CROP. «מקורי» leaves the frame following
+  // the picture (an extra keeps its upload's proportions, a slot keeps the
+  // template's box); anything else pins the frame and the picture covers it, so
+  // pan and zoom finally have somewhere to move inside.
+  function ratioRow(getObj) {
+    const cur = () => (getObj() || {}).ratio || 'native';
+    return el('div', { class: 'smr-edtb__row' },
+      el('span', null, 'יחס'),
+      PHOTO_RATIOS.map(([v, lab]) => el('button', {
+        class: 'smr-edtg smr-edtg--w' + (cur() === v ? ' on' : ''),
+        type: 'button',
+        onclick: () => {
+          const o = getObj();
+          if (!o) return;
+          if (v === 'native') delete o.ratio; else o.ratio = v;
+          commit();
+          renderToolbar();
+        },
+      }, lab)));
+  }
+
+  // The colour wash. Same {color, opacity} shape as the background scrim, and
+  // deliberately the same two controls in the same order, so it is one thing to
+  // learn. Clicking the active swatch clears it — every colour control here
+  // toggles that way (swatchRow does it too), and a wash you cannot remove is
+  // worse than one you cannot add.
+  function overlayRows(getObj) {
+    const ov = () => (getObj() || {}).overlay || null;
+    const colors = el('div', { class: 'smr-edtb__row' },
+      el('span', null, 'שכבת צבע'),
+      palette.map((p) => el('button', {
+        class: 'smr-edsw' + ((ov() || {}).color === p.name ? ' on' : ''),
+        type: 'button', title: p.name,
+        style: { background: p.css },
+        onclick: () => {
+          const o = getObj();
+          if (!o) return;
+          if (o.overlay && o.overlay.color === p.name) delete o.overlay;
+          else o.overlay = { color: p.name, opacity: (o.overlay || {}).opacity ?? 0.35 };
+          commit();
+          renderToolbar();
+        },
+      })));
+    const rows = [colors];
+    if (ov()) {
+      rows.push(sliderRow('עוצמת השכבה', {
+        min: 0.05, max: 0.9, step: 0.05,
+        get: () => (ov() || {}).opacity ?? 0.35,
+        set: (v) => {
+          const o = getObj();
+          if (o && o.overlay) o.overlay.opacity = Math.round(v * 100) / 100;
+        },
+        fmt: (v) => Math.round(v * 100) + '%',
+      }));
+    }
+    return rows;
+  }
+
+  // Every photo control, in one place, for both surfaces that own a photo — a
+  // template slot and a free extra. v1.2 hid crop, border and the rest behind
+  // the ✂️ toggle, which is most of why the panel read as «not many options»:
+  // the shape and the border have nothing to do with cropping and are always on
+  // show now. Only the pan/zoom pair still belongs to crop mode.
+  function photoRows(getObj, opts) {
+    return [
+      shapeRow(getObj),
+      ratioRow(getObj),
+      borderRows(getObj),
+      overlayRows(getObj),
+      opacityRow(getObj),
+      (opts && opts.zoom) || null,
+    ].flat().filter(Boolean);
   }
 
   // Edge offsets (operator directive): a drag hard-stops at the slide frame,
@@ -2410,19 +2719,16 @@ export function initEditor(handle, slide, opts = {}) {
     });
     const hideB = el('button', { class: 'btn btn--ghost smr-edtb__del', type: 'button', title: 'הסתרת המשבצת כולה — משחזרים מלוח השכבות' }, 'מחיקת המשבצת');
     hideB.addEventListener('click', () => hideKey(slotKeyOf(n)));
-    toolbar.replaceChildren(
+    // a selected filled slot IS crop mode, so its zoom row is always on show —
+    // unlike an extra, where ✂️ has to disambiguate drag-the-frame from
+    // drag-the-picture-inside-it
+    toolbar.replaceChildren(...[
       el('div', { class: 'smr-edtb__row' }, name, swapB, rmB, hideB),
-      zoomRow(() => slotSpec(n), { kind: 'slot', n }),
-      borderRow(s.border, (v) => {
-        const cur = slotSpec(n);
-        if (!cur) return;
-        if (v === 'paper') delete cur.border; else cur.border = v;
-        commit();
-        renderToolbar();
-      }),
+      photoRows(() => slotSpec(n),
+        { zoom: zoomRow(() => slotSpec(n), { kind: 'slot', n }) }),
       el('div', { class: 'smr-edtb__row', style: { fontSize: '.78rem', color: 'var(--ink-soft,#6b5f63)' } },
         'גוררים את התמונה בתוך המסגרת כדי למקם אותה · גלגלת = זום'),
-    );
+    ].flat().filter(Boolean));
   }
 
   function renderBlockToolbar(name) {
@@ -2737,32 +3043,35 @@ export function initEditor(handle, slide, opts = {}) {
         cropB, fwd, back, delB,
       ),
       // brand marks color like ills (currentColor); they never crop/border
+      // re-resolved in the handler for the same reason every v2.4 row is: the
+      // sibling opacityRow commits without re-rendering this toolbar, so `ex`
+      // captured above is an orphan by the time a swatch is clicked
       ex.type === 'ill' || ex.type === 'brand'
         ? swatchRow(ex.color || null, (color) => {
-            if (color) ex.color = color; else delete ex.color;
-            commit();
-            renderToolbar();
-          })
-        : null,
-      ex.type === 'photo' && extraCropOn
-        ? zoomRow(() => design.extras[i], { kind: 'extra', index: i })
-        : null,
-      ex.type === 'photo' && extraCropOn
-        ? borderRow(ex.border, (v) => {
             const cur = design.extras[i];
             if (!cur) return;
-            if (v === 'paper') delete cur.border; else cur.border = v;
+            if (color) cur.color = color; else delete cur.color;
             commit();
             renderToolbar();
           })
         : null,
-      opacityRow(() => design.extras[i]),
+      // v2.4: shape · ratio · border · wash · fade are always on show for a
+      // photo. Only the zoom slider is crop-mode work, because only IT competes
+      // with the drag gesture; the rest never did, and hiding them behind ✂️ is
+      // what made the panel look like it had nothing in it.
+      ex.type === 'photo'
+        ? photoRows(() => design.extras[i], {
+            zoom: extraCropOn
+              ? zoomRow(() => design.extras[i], { kind: 'extra', index: i })
+              : null,
+          })
+        : opacityRow(() => design.extras[i]),
       ex.type === 'photo' && extraCropOn
         ? el('div', { class: 'smr-edtb__row', style: { fontSize: '.78rem', color: 'var(--ink-soft,#6b5f63)' } },
             'גוררים את התמונה בתוך המסגרת · גלגלת = זום')
         // out of crop mode the drag moves the FRAME — so the edge rule applies
         : dragHint(),
-    ].filter(Boolean));
+    ].flat().filter(Boolean));
   }
 
   // ---------------- add flows ----------------
@@ -3074,8 +3383,15 @@ export function initEditor(handle, slide, opts = {}) {
   function fillSlot(n, url) {
     if (!design.slots || typeof design.slots !== 'object') design.slots = {};
     const prev = design.slots[String(n)];
-    const spec = { url };
-    if (prev && (prev.border === 'line' || prev.border === 'none')) spec.border = prev.border;
+    // «החלפה» swaps the PICTURE, not the styling someone spent time on: the
+    // shape, ratio, ring, wash and fade all survive a replacement. Only the crop
+    // is dropped, because pos/zoom are coordinates into the OLD picture and
+    // carrying them across would land the new one somewhere arbitrary.
+    // (v1.2 preserved the two legacy border strings and nothing else, so every
+    // v2.4 key was silently lost on swap.)
+    const spec = prev && typeof prev === 'object'
+      ? pruneCropInto({ url }, { ...prev, pos: undefined, zoom: undefined })
+      : { url };
     design.slots[String(n)] = spec;
     natSize(url); // preload natural size for the pan math
     commit();
@@ -3115,6 +3431,10 @@ export function initEditor(handle, slide, opts = {}) {
     } else {
       const n = extraEl(t.index);
       img = n && n.querySelector('img');
+      // a pinned extra renders object-fit:cover exactly as a slot does, so its
+      // pan lives in object-position too; keyed on kind alone, the live drag
+      // showed nothing and the move only appeared on the next re-compose
+      if (img && photoPinned(obj)) img.style.objectPosition = px + '% ' + py + '%';
     }
     if (!img) return;
     if (z > 1) {
@@ -3138,7 +3458,12 @@ export function initEditor(handle, slide, opts = {}) {
     const obj = t.kind === 'slot' ? slotSpec(t.n) : design.extras[t.index];
     if (!obj) return null;
     const z = clamp(Number(obj.zoom) || 1, 1, 3);
-    if (t.kind === 'slot') {
+    // A slot always covers its frame; an EXTRA covers only once its frame is
+    // pinned (v2.4 ratio, or circle). Without that second case an extra at
+    // ratio 4:5 and zoom 1 reported zero overflow, so the drag guard refused to
+    // move `pos` at all — the crop was dead in exactly the gesture the ratio
+    // control exists to enable.
+    if (t.kind === 'slot' || photoPinned(obj)) {
       const nat = natSize(obj.url);
       let bx = 0, by = 0;
       if (nat) {
