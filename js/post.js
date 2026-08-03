@@ -211,6 +211,8 @@ async function init() {
   // stays reachable from the פרטים tab for every role and for none.
   window.addEventListener('smr:role', () => renderApprovalBar());
 
+  wireZoom();
+
   // Builder posts — and v2.5 generated posts — may have no PNG renders at all.
   // There is nothing to do here any more: since v1.7 live compose is not a mode
   // anyone turns on. renderViewer() DERIVES S.live from hasSlidesData() +
@@ -753,6 +755,39 @@ function signingVnum() {
 // that is invisible on screen and would refuse a perfectly honest signature.
 // Round-tripping first puts the local object in the shape the server will
 // return, so the compare is content-vs-content and never encoding-vs-encoding.
+/* ── canvas zoom (operator quick-edit 2026-08-03) ─────────────────────
+   Scales .pv-frame's max-width cap via --pv-zoom (see post.html); compose
+   refits itself, design mode rides the same frame. Remembered per browser
+   (smr:pvzoom). Range 40%–200%; >100% is bounded by the column width
+   (width:100%), which is stated in the CSS comment rather than pretended
+   away with panning we did not build. */
+const ZOOM_MIN = 0.4, ZOOM_MAX = 2, ZOOM_STEP = 0.15;
+let pvZoom = 1;
+function applyZoom(z, pct) {
+  pvZoom = Math.min(ZOOM_MAX, Math.max(ZOOM_MIN, z));
+  const frame = $('frame');
+  if (frame) frame.style.setProperty('--pv-zoom', String(pvZoom));
+  if (pct) pct.textContent = Math.round(pvZoom * 100) + '%';
+  try { localStorage.setItem('smr:pvzoom', String(pvZoom)); } catch { /* private mode */ }
+}
+function wireZoom() {
+  const group = document.querySelector('.pv-tools__group');
+  if (!group || group.querySelector('.pv-zoom')) return;
+  const pct = el('span', {
+    class: 'pv-zoom__pct', title: 'איפוס ל-100%', role: 'button', tabindex: '0',
+    onclick: () => applyZoom(1, pct),
+  });
+  const btn = (glyph, title, dir) => el('button', {
+    type: 'button', title,
+    onclick: () => applyZoom(pvZoom + dir * ZOOM_STEP, pct),
+  }, glyph);
+  group.appendChild(el('div', { class: 'pv-zoom', role: 'group', 'aria-label': 'זום על השקף' },
+    btn('−', 'להקטין את השקף', -1), pct, btn('+', 'להגדיל את השקף', +1)));
+  let saved = 1;
+  try { saved = parseFloat(localStorage.getItem('smr:pvzoom')) || 1; } catch { /* ok */ }
+  applyZoom(saved, pct);
+}
+
 function onScreenHash() {
   return contentHash(JSON.parse(JSON.stringify({
     slides: Array.isArray(S.slides) ? S.slides : [],

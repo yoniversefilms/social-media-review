@@ -945,3 +945,15 @@ hr, .rule {
   font-size: 1.02rem;
 }
 .a-group__n { color: var(--ink-soft); font-size: .85rem; font-weight: 400; }
+
+/* ===== v2.5.2 canvas zoom (operator quick-edit 2026-08-03) ===== */
+.pv-zoom { display: inline-flex; align-items: center; gap: 2px;
+  border: 1px solid var(--line); border-radius: 999px; background: var(--paper);
+  padding: 2px; }
+.pv-zoom button { border: 0; background: transparent; cursor: pointer;
+  font: inherit; color: var(--ink-soft); min-height: 34px; min-width: 34px;
+  border-radius: 999px; font-weight: 700; }
+.pv-zoom button:hover { color: var(--ink); background: rgba(28,21,24,.06); }
+.pv-zoom__pct { min-width: 52px; text-align: center; font-size: .88rem;
+  font-weight: 600; color: var(--ink-soft); cursor: pointer; }
+.pv-zoom__pct:hover { color: var(--ink); }

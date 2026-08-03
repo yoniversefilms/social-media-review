@@ -188,7 +188,12 @@
    to work on all three slide fields (deep / paper / warm). The border is
    INSIDE the 4:5 box (global box-sizing: border-box), so it costs the artwork
    1px a side and never shifts the layout. */
-.pv-frame { grid-area: frame; position: relative; width: 100%; max-width: 560px; aspect-ratio: 4 / 5; margin: 0 auto; background: var(--paper); border: 1px solid var(--line); border-radius: 14px; overflow: hidden; box-shadow: 0 0 0 1px rgba(36,29,32,.07), var(--shadow-lift); touch-action: pan-y; }
+/* --pv-zoom (operator, 2026-08-03): the slide was too big to see whole. The
+   zoom control (post.js wireZoom) scales this ONE cap; compose.js's
+   ResizeObserver refits the iframe, and design mode mounts into this same
+   frame, so one variable zooms both. width:100% keeps zoom-in bounded by the
+   column — beyond-column zoom would need panning, deliberately not built. */
+.pv-frame { grid-area: frame; position: relative; width: 100%; max-width: calc(560px * var(--pv-zoom, 1)); aspect-ratio: 4 / 5; margin: 0 auto; background: var(--paper); border: 1px solid var(--line); border-radius: 14px; overflow: hidden; box-shadow: 0 0 0 1px rgba(36,29,32,.07), var(--shadow-lift); touch-action: pan-y; }
 /* Layering inside the frame (all three fill the same padding box, so the two
    render sources are pixel-identical boxes and swapping them cannot jump):
      1  studio PNG   2  live compose   3  studio PNG when «pngtop»   5  pins
