@@ -300,6 +300,10 @@ export function navBar(active) {
     // the other way round. The builder is "I'll assemble it"; this one is
     // "describe it and the factory writes it".
     { key: 'create-ai', href: 'create-ai.html' + q, label: 'יצירה עם AI' },
+    // The same image-generation module that lives inside a post (generate.js),
+    // hosted standalone: create drawings/photos for the library without
+    // opening a post. generateTab({postId: null}) is a supported mount.
+    { key: 'generate', href: 'generate.html' + q, label: 'יצירת תמונות' },
     { key: 'discuss', href: 'discuss.html' + q, label: 'שיחות' },
     { key: 'assets', href: 'assets.html' + q, label: 'נכסים' },
     { key: 'queue', href: 'queue.html' + q, label: 'תור פרסום' },
