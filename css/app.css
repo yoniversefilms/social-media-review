@@ -1016,11 +1016,6 @@ hr, .rule {
   font-weight: 600; color: var(--ink-soft); cursor: pointer; }
 .pv-zoom__pct:hover { color: var(--ink); }
 
-/* ===== v2.5.2 fal prompt boxes (operator 2026-08-03) ===== */
-/* Input to fal is ENGLISH ONLY (no translation key set) — the placeholder
-   says so in bold, and the boxes type LTR because their content is English. */
-.gen-lines--en { text-align: left; }
-.gen-lines--en::placeholder { font-weight: 700; opacity: 1; color: var(--ink-soft, #55484d); }
 /* ===== v2.5.2 stacked versions =====
 
    fal makes several tries at the same input line and every sliced tile files
@@ -1142,3 +1137,8 @@ hr, .rule {
   color: var(--accent); transform: rotate(140deg);
 }
 
+/* ===== v2.5.2 fal prompt boxes (operator 2026-08-03) ===== */
+/* Input to fal is ENGLISH ONLY (no translation key set) — the placeholder
+   says so in bold, and the boxes type LTR because their content is English. */
+.gen-lines--en { text-align: left; }
+.gen-lines--en::placeholder { font-weight: 700; opacity: 1; color: var(--ink-soft, #55484d); }
