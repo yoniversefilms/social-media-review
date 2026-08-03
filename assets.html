@@ -120,6 +120,12 @@ document.documentElement.dataset.theme=(t==='dark'||t==='light')?t:
 
   .empty { color: var(--ink-soft); font-size: .95rem; padding: 24px 8px; text-align: center; }
   .empty b { color: var(--ink); }
+
+  /* ?embed=1 — hosted inside the post page's «ספרייה» tab: hide the page
+     chrome, keep everything else identical (assets.js adds the class). */
+  .a-embed #nav { display: none; }
+  .a-embed .page > h1, .a-embed .page > .sub { display: none; }
+  .a-embed .page { padding-top: 6px; }
 </style>
 </head>
 <body>

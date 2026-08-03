@@ -2419,6 +2419,10 @@ const TABS = [
   // תמונות» is what you made — and everything created here lands in that tab
   // as well as in the board-wide library.
   { key: 'gen', label: 'יצירת תמונות' },
+  // operator 2026-08-03: the board-wide media library without leaving the
+  // post. assets.html hosts itself inside an embedded frame (?embed=1 hides
+  // its page chrome) — one library, one implementation, two doors.
+  { key: 'library', label: 'ספרייה' },
 ];
 
 function buildTabs() {
@@ -2790,9 +2794,30 @@ function renderActiveTab(force = false) {
     return;
   }
   S.pendingTabRender = false;
-  const render = { caption: renderCaptionTab, pins: renderPinsTab, edit: renderEditTab, photos: renderPhotosTab, info: renderInfoTab, trans: renderTransTab, gen: renderGenTab }[S.tab]
+  const render = { caption: renderCaptionTab, pins: renderPinsTab, edit: renderEditTab, photos: renderPhotosTab, info: renderInfoTab, trans: renderTransTab, gen: renderGenTab, library: renderLibraryTab }[S.tab]
     || renderCaptionTab;   // unknown/stale tab key must never throw mid-refresh
   body.replaceChildren(...[render() || []].flat(Infinity).filter(Boolean));
+}
+
+// «ספרייה» (operator 2026-08-03) — the whole assets page in an embedded frame,
+// kept as ONE element across tab switches (same trick as the gen tab) so
+// scroll position, filters and an in-flight upload survive a trip to another
+// tab. ?embed=1 tells assets.js to hide its own nav and title.
+let libFrame = null;
+function renderLibraryTab() {
+  if (!libFrame) {
+    const params = new URLSearchParams(location.search);
+    const keep = new URLSearchParams();
+    if (params.get('board')) keep.set('board', params.get('board'));
+    if (params.get('local')) keep.set('local', params.get('local'));
+    keep.set('embed', '1');
+    libFrame = el('iframe', {
+      src: 'assets.html?' + keep.toString(),
+      title: 'ספריית המדיה',
+      style: 'width:100%;height:72vh;border:0;border-radius:12px;background:var(--paper)',
+    });
+  }
+  return libFrame;
 }
 
 // v2.5 «יצירת תמונות» — a mount, not a renderer. generateTab() returns the

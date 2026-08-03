@@ -90,7 +90,13 @@ const S = {
 
 /* ── boot ── */
 
+// ?embed=1 — the page is hosted inside another page's tab (the post page's
+// «ספרייה»). Same library, same behaviour; only the page chrome (nav, title)
+// is hidden, via the .a-embed class assets.html styles.
+const EMBED = new URLSearchParams(location.search).get('embed') === '1';
+
 (async function boot() {
+  if (EMBED) document.body.classList.add('a-embed');
   try {
     S.board = await initStore();
   } catch (err) {
@@ -99,7 +105,7 @@ const S = {
       'בדקו שהקישור שקיבלתם שלם, ונסו לרענן.'));
     return;
   }
-  $('nav').replaceChildren(navBar('assets'));
+  if (!EMBED) $('nav').replaceChildren(navBar('assets'));
   renderToolbar();
   await refresh({ reconcile: true });
   // A poll landing mid-upload would re-render the toolbar and take the folder

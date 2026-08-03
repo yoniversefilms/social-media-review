@@ -20,9 +20,9 @@
 import {
   initStore, whoAmI, ensureName, subscribe,
   createGenRequest, listGenRequests, campaignsFrom, genRequestForPost,
-  GEN_STATUS_LABELS,
+  GEN_STATUS_LABELS, listPosts, listAssets, assetRowUrl,
 } from './store.js';
-import { el as h, navBar, toast, fmtDate, CATEGORIES } from './ui.js';
+import { el as h, navBar, toast, fmtDate, CATEGORIES, stageLabel } from './ui.js';
 
 const $ = (id) => document.getElementById(id);
 
@@ -73,9 +73,66 @@ async function boot() {
   $('nav').replaceChildren(navBar('create-ai'));
   $('mode-post').addEventListener('click', () => setMode('post'));
   $('mode-campaign').addEventListener('click', () => setMode('campaign'));
+  // The shelf load also harvests the board's CUSTOM tab names (categories that
+  // exist on posts but not in the built-in list), so the «מדף בספרייה» picker
+  // offers a tab someone created yesterday. Loaded BEFORE the first form
+  // render on purpose — operator bug report 2026-08-03.
+  await loadShelf().catch(() => {});
   renderForm();
   await refreshRequests();
-  subscribe(() => { refreshRequests(); });
+  subscribe(() => { refreshRequests(); loadShelf().catch(() => {}); });
+}
+
+/* ── the AI-posts shelf + custom tabs (operator 2026-08-03) ─────────────────
+   One horizontal, scrollable row of every post the factory wrote (origin
+   'ai'), newest first, right at the top of this page — so a finished post is
+   FOUND here, not hunted for in the gallery. The same load feeds the category
+   pickers their custom tab names. */
+let aiPosts = [];
+let aiThumbs = new Map();     // post id -> url of its first generated drawing
+let customCats = [];          // tab names that exist on posts, beyond CATEGORIES
+const freshPosts = new Set(); // post ids that finished during THIS visit
+
+async function loadShelf() {
+  let posts = [];
+  let assets = [];
+  try {
+    [posts, assets] = await Promise.all([listPosts(), listAssets()]);
+  } catch { return; }
+  const known = new Set(CATEGORIES.map((c) => c.key));
+  customCats = [...new Set(posts.map((p) => String(p.category || '')))]
+    .filter((c) => c && c !== 'general' && !known.has(c))
+    .sort((a, b) => a.localeCompare(b, 'he'));
+  aiPosts = posts.filter((p) => p.origin === 'ai')
+    .sort((a, b) => String(b.created_at).localeCompare(String(a.created_at)));
+  aiThumbs = new Map();
+  const ill = assets.filter((a) => a.kind === 'illustration' && a.post_id);
+  for (const a of ill) {          // prefer the storyboard primary…
+    if ((a.derived || {}).storyboard === 'primary' && !aiThumbs.has(a.post_id)) {
+      aiThumbs.set(a.post_id, assetRowUrl(a));
+    }
+  }
+  for (const a of ill) {          // …fall back to any drawing of the post
+    if (!aiThumbs.has(a.post_id)) aiThumbs.set(a.post_id, assetRowUrl(a));
+  }
+  renderShelf();
+}
+
+function renderShelf() {
+  const wrap = $('shelf-wrap');
+  if (!wrap) return;
+  if (!aiPosts.length) { wrap.hidden = true; return; }
+  wrap.hidden = false;
+  $('ai-shelf').replaceChildren(...aiPosts.map((p) => h('a', {
+    class: 'ai-shelfcard', href: pageLink('post.html', { id: p.id }),
+    title: p.title || p.id,
+  },
+    freshPosts.has(p.id) ? h('span', { class: 'ai-new' }, 'חדש') : null,
+    aiThumbs.get(p.id)
+      ? h('span', { class: 'ai-shelfthumb', style: `--vec:url("${aiThumbs.get(p.id)}")` })
+      : h('span', { class: 'ai-shelfthumb ai-shelfthumb--empty' }, '🎨'),
+    h('span', { class: 'ai-shelftitle' }, p.title || p.id),
+    h('span', { class: 'ai-shelfstage' }, stageLabel(p.stage)))));
 }
 
 function setMode(m) {
@@ -171,7 +228,13 @@ const CATEGORY_OPTIONS = [
 function categorySelect(value, onchange) {
   const NEW = '__new__';
   let current = value;
-  const opts = [...CATEGORY_OPTIONS, { key: NEW, label: '+ tab חדשה…' }];
+  // customCats (loadShelf) makes tabs created on OTHER posts reappear here —
+  // a custom tab is only a category string, so the posts are its registry.
+  const opts = [
+    ...CATEGORY_OPTIONS,
+    ...customCats.map((c) => ({ key: c, label: c })),
+    { key: NEW, label: '+ tab חדשה…' },
+  ];
   const s = h('select', { class: 'ai-select' },
     opts.map((o) => h('option', { value: o.key, selected: o.key === value }, o.label)));
   if (value && !opts.some((o) => o.key === value)) {
@@ -419,7 +482,28 @@ async function refreshRequests() {
   renderRequests();
 }
 
+// request id -> the last status this browser rendered. A queued/working →
+// done transition observed HERE is the moment the therapist's post is born —
+// that is when the ready banner pops and the shelf gains a «חדש» card.
+const seenStatus = new Map();
+
 function renderRequests() {
+  const newlyDone = [];
+  for (const r of requests) {
+    const prev = seenStatus.get(r.id);
+    if (prev && prev !== 'done' && r.status === 'done') newlyDone.push(r);
+    seenStatus.set(r.id, r.status);
+  }
+  if (newlyDone.length) {
+    for (const r of newlyDone) {
+      for (const p of ((r.result || {}).posts || [])) {
+        if (p.post_id) freshPosts.add(p.post_id);
+      }
+    }
+    toast('🎉 הפוסט מוכן! הקישור למעלה ובמדף', 'ok');
+    loadShelf().catch(() => {});
+  }
+
   const me = whoAmI();
   const mine = requests.filter((r) => r.author_id && me.author_id && r.author_id === me.author_id);
   const list = mine.length ? mine : requests;
@@ -428,9 +512,42 @@ function renderRequests() {
     box.replaceChildren(h('p', { class: 'muted' }, 'עוד לא שלחתם בקשה.'));
     return;
   }
+  const ready = list.find((r) => r.status === 'done' &&
+    ((r.result || {}).posts || []).some((p) => freshPosts.has(p.post_id)));
   box.replaceChildren(
+    ready ? readyBanner(ready) : null,
     ...(mine.length ? [] : [h('p', { class: 'ai-hint' }, 'הבקשות של כל הצוות בלוח:')]),
     ...list.slice(0, 30).map(requestCard));
+}
+
+// The «it's ready» card — pinned above the request list from the moment the
+// factory finishes until the page is left. The post stops being something to
+// hunt for in the gallery.
+function readyBanner(r) {
+  const posts = ((r.result || {}).posts || []).filter((p) => p.post_id);
+  return h('article', { class: 'card ai-ready' },
+    h('p', { class: 'ai-ready__head' }, '🎉 הפוסט מוכן!'),
+    ...posts.map((p) => h('a', {
+      class: 'btn btn--primary ai-ready__link',
+      href: pageLink('post.html', { id: p.post_id }),
+    }, (p.seq ? `${p.seq}. ` : '') + (p.title || p.post_id) + ' ←')));
+}
+
+/* The honest progress row: three real stages of the queue, no fake percent.
+   queued = the row exists; working = the factory session claimed it (writing,
+   voice gate, drawing); done = the card above takes over. */
+function progressRow(status) {
+  if (status !== 'queued' && status !== 'working') return null;
+  const steps = ['בתור', 'המפעל כותב ומצייר', 'מוכן'];
+  const on = status === 'queued' ? 0 : 1;
+  return h('div', { class: 'ai-prog' },
+    h('div', { class: 'ai-prog__bar' },
+      h('div', {
+        class: 'ai-prog__fill' + (status === 'working' ? ' ai-prog__fill--anim' : ''),
+        style: `width:${status === 'queued' ? 14 : 58}%`,
+      })),
+    h('div', { class: 'ai-prog__steps' },
+      ...steps.map((s, i) => h('span', { class: 'ai-prog__step' + (i <= on ? ' is-on' : '') }, s))));
 }
 
 function requestCard(r) {
@@ -472,6 +589,7 @@ function requestCard(r) {
   return h('article', { class: 'card ai-req' },
     head,
     h('p', { class: 'ai-req__what' }, what),
+    progressRow(status),
     waiting,
     links.length ? h('div', { class: 'ai-links' }, links) : null,
     fail,

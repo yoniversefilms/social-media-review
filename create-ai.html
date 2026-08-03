@@ -16,6 +16,47 @@ try{var t=localStorage.getItem('smr:theme');
 document.documentElement.dataset.theme=(t==='dark'||t==='light')?t:
 (matchMedia('(prefers-color-scheme: dark)').matches?'dark':'light');}catch(e){}</script>
 <link rel="stylesheet" href="./css/app.css">
+<style>
+  /* page-specific (operator 2026-08-03): the AI-posts shelf, the honest
+     progress row, and the ready banner. Kept here, not in app.css. */
+  .ai-shelf-wrap { margin: 14px 0 4px; }
+  .ai-shelf__h { font-size: .95rem; color: var(--ink-soft); margin: 0 0 6px; }
+  .ai-shelf { display: flex; gap: 10px; overflow-x: auto; padding: 4px 2px 10px;
+    scroll-snap-type: x proximity; }
+  .ai-shelfcard { flex: 0 0 auto; width: 132px; scroll-snap-align: start;
+    text-decoration: none; border: 1px solid var(--line); border-radius: 12px;
+    background: var(--paper); padding: 10px; display: flex; flex-direction: column;
+    gap: 6px; position: relative; }
+  .ai-shelfcard:hover { border-color: var(--accent); }
+  .ai-shelfthumb { display: block; height: 84px; background: var(--accent);
+    -webkit-mask: var(--vec) center / contain no-repeat;
+    mask: var(--vec) center / contain no-repeat; }
+  .ai-shelfthumb--empty { -webkit-mask: none; mask: none; background: none;
+    display: flex; align-items: center; justify-content: center;
+    font-size: 2rem; color: var(--ink-soft); }
+  .ai-shelftitle { color: var(--ink); font-size: .85rem; line-height: 1.25;
+    max-height: 2.6em; overflow: hidden; }
+  .ai-shelfstage { color: var(--ink-soft); font-size: .75rem; }
+  .ai-new { position: absolute; top: 6px; inset-inline-start: 6px;
+    background: var(--accent); color: #fff; font-size: .7rem;
+    padding: 1px 7px; border-radius: 999px; z-index: 1; }
+
+  .ai-prog { margin: 8px 0 2px; }
+  .ai-prog__bar { height: 6px; border-radius: 999px; background: var(--line); overflow: hidden; }
+  .ai-prog__fill { height: 100%; border-radius: 999px; background: var(--accent);
+    transition: width .4s; }
+  .ai-prog__fill--anim { background: repeating-linear-gradient(45deg,
+      var(--accent) 0 10px, color-mix(in srgb, var(--accent) 55%, transparent) 10px 20px);
+    background-size: 28px 28px; animation: aiProg 1s linear infinite; }
+  @keyframes aiProg { to { background-position: 28px 0; } }
+  .ai-prog__steps { display: flex; justify-content: space-between; margin-top: 4px;
+    font-size: .72rem; color: var(--ink-soft); }
+  .ai-prog__step.is-on { color: var(--accent); font-weight: 600; }
+
+  .ai-ready { border: 2px solid var(--accent); }
+  .ai-ready__head { font-weight: 700; margin: 0 0 8px; }
+  .ai-ready__link { display: inline-block; margin: 2px 4px 2px 0; }
+</style>
 </head>
 <body>
 <div id="nav"></div>
@@ -36,6 +77,13 @@ document.documentElement.dataset.theme=(t==='dark'||t==='light')?t:
       בינתיים. הסטטוס כאן תמיד אמיתי; אין כאן ספינר מדומה.
     </p>
   </header>
+
+  <!-- operator 2026-08-03: every AI-written post, newest first, scrollable
+       sideways — found here, not hunted for in the gallery. -->
+  <section class="ai-shelf-wrap" id="shelf-wrap" hidden aria-label="פוסטים שנוצרו עם AI">
+    <h2 class="ai-shelf__h">פוסטים שנוצרו עם AI</h2>
+    <div id="ai-shelf" class="ai-shelf"></div>
+  </section>
 
   <div class="ai-modes" role="tablist" aria-label="סוג הבקשה">
     <button class="ai-mode is-on" id="mode-post" type="button" role="tab" aria-selected="true">פוסט אחד</button>
