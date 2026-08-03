@@ -11,10 +11,14 @@
 /* ── page-specific: builder ─────────────────────────────────────────── */
 .b-wrap{max-width:1440px;margin:0 auto;padding:0 20px 56px}
 
-/* top bar: title + caption + save */
-.b-topbar{position:sticky;top:0;z-index:20;background:var(--bg);
+/* top bar: title + caption + save. NOT sticky (operator, 2026-08-03): two
+   pinned layers (this + the shared nav) ate too much height over the canvas;
+   on this page both scroll away. */
+.b-topbar{background:var(--bg);
   padding:14px 0 12px;border-bottom:1px solid var(--line);
   display:flex;gap:14px;align-items:flex-start;flex-wrap:wrap}
+/* the shared nav (app.css) is sticky app-wide; on the builder it scrolls too */
+.nav{position:static}
 .b-topbar .field{margin:0}
 .b-title{flex:0 1 320px;min-width:220px}
 .b-caption{flex:1 1 380px;min-width:260px}
