@@ -22,7 +22,10 @@ import {
   createGenRequest, listGenRequests, campaignsFrom, genRequestForPost,
   GEN_STATUS_LABELS, listPosts, listAssets, assetRowUrl,
 } from './store.js';
-import { el as h, navBar, toast, fmtDate, CATEGORIES, stageLabel } from './ui.js';
+import {
+  el as h, navBar, toast, fmtDate, CATEGORIES, stageLabel,
+  toLocalInput, fromLocalInput,
+} from './ui.js';
 
 const $ = (id) => document.getElementById(id);
 
@@ -44,10 +47,30 @@ const LAYOUTS = [
 
 /* ── state ── */
 let board = null;
-let mode = 'post';                 // 'post' | 'campaign'
+const MODES = ['post', 'campaign', 'workshop'];
+let mode = 'post';                 // 'post' | 'campaign' | 'workshop'
 let requests = [];
 let campaigns = [];
 let submitting = false;
+
+/* ── §W: the workshop event's own fields (spec 13) ─────────────────────────
+   These eleven keys ARE the payload's `workshop` object, in the contract's
+   order, and they are the therapist's typed facts about a real event. Two are
+   required (title, about); the other nine say «לא חובה» in their label,
+   because a blank one is not a gap to fill in later, it is an instruction to
+   the factory: a fact nobody gave is a fact no post may claim.
+
+   `when` holds LOCAL wall-clock exactly as <input type="datetime-local">
+   produces it ('2026-09-14T19:00', no Z). It is NOT run through
+   .toISOString(): the fulfiller and the generating session read this string as
+   the hour on the invitation, and a Z would move that hour by the UTC offset
+   in silence. toLocalInput/fromLocalInput (ui.js) are still what normalise it,
+   round-tripping local → instant → local so a garbage value drops out. */
+const WORKSHOP_FIELDS = () => ({
+  title: '', about: '', facilitator: '', when: '', when_note: '', where: '',
+  audience: '', cost: '', register_url: '', takeaways: '', emphasis: '',
+});
+
 // The form's own model. Kept outside the DOM so switching modes (and the
 // status poll re-rendering the side column) never eats a half-written request.
 const F = {
@@ -56,6 +79,8 @@ const F = {
   campaign: { brief: '', count: 5, lines: [], caption: '', cta: '',
               category: 'general', illustrations: '', generateImages: true,
               revise: false, campaign_id: '', instruction: '' },
+  workshop: { w: WORKSHOP_FIELDS(), count: 3,
+              category: 'general', illustrations: '', generateImages: true },
 };
 
 /* ── boot (page only — post.js imports this module for howMadeBlock) ── */
@@ -71,8 +96,10 @@ async function boot() {
     return;
   }
   $('nav').replaceChildren(navBar('create-ai'));
-  $('mode-post').addEventListener('click', () => setMode('post'));
-  $('mode-campaign').addEventListener('click', () => setMode('campaign'));
+  for (const m of MODES) {
+    const b = $('mode-' + m);
+    if (b) b.addEventListener('click', () => setMode(m));
+  }
   // The shelf load also harvests the board's CUSTOM tab names (categories that
   // exist on posts but not in the built-in list), so the «מדף בספרייה» picker
   // offers a tab someone created yesterday. Loaded BEFORE the first form
@@ -138,10 +165,12 @@ function renderShelf() {
 function setMode(m) {
   if (mode === m) return;
   mode = m;
-  $('mode-post').classList.toggle('is-on', m === 'post');
-  $('mode-campaign').classList.toggle('is-on', m === 'campaign');
-  $('mode-post').setAttribute('aria-selected', String(m === 'post'));
-  $('mode-campaign').setAttribute('aria-selected', String(m === 'campaign'));
+  for (const k of MODES) {
+    const b = $('mode-' + k);
+    if (!b) continue;
+    b.classList.toggle('is-on', k === m);
+    b.setAttribute('aria-selected', String(k === m));
+  }
   renderForm();
 }
 
@@ -183,6 +212,46 @@ function select(options, value, onchange) {
     options.map((o) => h('option', { value: o.key, selected: o.key === value }, o.label)));
   s.addEventListener('change', () => onchange(s.value));
   return s;
+}
+
+// The datetime-local bridge, the same one post.js and queue.js use. The value
+// that reaches the model is LOCAL wall-clock, never an ISO Z string: see §W.
+function whenInput(value, oninput) {
+  const i = h('input', { class: 'field__input', type: 'datetime-local',
+    value: value || '' });
+  i.addEventListener('input', () => oninput(i.value));
+  return i;
+}
+
+// A clamped stepper. `lo`/`hi` are enforced here AND again in submit(), because
+// a number field accepts a pasted 99, a 0 and an empty box just as happily.
+// On commit the BOX snaps to the value the request will actually carry: a
+// field reading 0 while the payload says 3 is a lie the therapist only finds
+// out about when three posts arrive.
+function numberInput(value, lo, hi, oninput) {
+  let cur = value;
+  const i = h('input', { class: 'field__input ai-num', type: 'number',
+    min: String(lo), max: String(hi), value: String(value) });
+  i.addEventListener('input', () => { cur = clampCount(i.value, lo, hi, cur); oninput(cur); });
+  i.addEventListener('change', () => { i.value = String(cur); });
+  return i;
+}
+
+function clampCount(v, lo, hi, fallback) {
+  const n = Math.round(Number(v));
+  if (!Number.isFinite(n) || n <= 0) return fallback;
+  return Math.max(lo, Math.min(hi, n));
+}
+
+// The datetime-local bridge, plus one guard the bridge lacks: ECMA-262 ROLLS a
+// calendar-overflow date ('2026-02-29' parses as March 1) instead of failing,
+// and a rolled date would ride the payload as a real evening the therapist
+// never wrote. The written day must survive the round trip, or the value
+// drops to '' exactly like an unparsable one.
+function canonWhen(v) {
+  const s = String(v || '').trim();
+  const out = s ? toLocalInput(fromLocalInput(s)) : '';
+  return out && out.slice(0, 10) === s.slice(0, 10) ? out : '';
 }
 
 /* ── §D: the image-generation switch (spec 09) ─────────────────────────────
@@ -258,7 +327,10 @@ function categorySelect(value, onchange) {
 /* ── the form ── */
 
 function renderForm() {
-  $('form').replaceChildren(mode === 'post' ? postForm() : campaignForm());
+  $('form').replaceChildren(
+    mode === 'workshop' ? workshopForm()
+      : mode === 'campaign' ? campaignForm()
+        : postForm());
 }
 
 function postForm() {
@@ -393,6 +465,83 @@ function campaignForm() {
     submitBar(c.revise ? 'שליחת הרביזיה' : 'שליחה ליצירה'));
 }
 
+/* ── §W: the workshop intake (spec 13) ─────────────────────────────────────
+   A structured form, not a brief. The therapist types the event's real facts
+   once, and the factory writes the series from them. The row this produces is
+   an ordinary kind:'campaign' carrying payload.mode 'workshop', so campaign
+   revision, versions, the author shelf and «איך זה נוצר» all work the day it
+   lands, with no schema change and no new queue kind.
+
+   Every hint here describes a rule the fulfiller actually enforces (spec 13's
+   content rules, written into briefFor). If a rule changes there, change the
+   sentence here: a form that promises a rule the factory no longer keeps is
+   worse than a form that promises nothing. */
+
+const OPT = ' (לא חובה)';
+
+function workshopForm() {
+  const s = F.workshop;
+  const w = s.w;
+
+  return h('div', { class: 'ai-formbody' },
+    h('p', { class: 'ai-hint' },
+      'ממלאים כאן את הפרטים האמיתיים של הסדנה, והמפעל בונה מהם סדרת פוסטים ' +
+      'לגלריה. שדה שתשאירו ריק פשוט לא יופיע בפוסטים: אנחנו לא ממציאים ' +
+      'תאריך, מחיר או פרטים על המנחה.'),
+
+    field('שם הסדנה', input(w.title, (v) => { w.title = v; },
+      'איך קוראים לסדנה')),
+    field('על מה הסדנה', textarea(w.about, (v) => { w.about = v; },
+      'כמה משפטים בשפה שלכם. למשל: ארבעה מפגשים להורים לילדים קטנים, על הרגעים ' +
+      'שבהם נגמרת הסבלנות ומה עושים איתם.', 5),
+      'שני השדות האלה חייבים להיות מלאים. כל השאר לא חובה.'),
+
+    field('מי מנחה' + OPT, input(w.facilitator, (v) => { w.facilitator = v; },
+      'שם, ושורה אחת עליו או עליה'),
+      'ייכתב בדיוק כפי שתכתבו כאן. המפעל לא מוסיף תארים והסמכות מעצמו.'),
+
+    field('מתי' + OPT, whenInput(w.when, (v) => { w.when = v; }),
+      'תאריך ושעה לפי השעון המקומי שלכם. יום בשבוע והתאריך ייכתבו בפוסטים ' +
+      'מהערך הזה בלבד.'),
+    field('הערה על המועד' + OPT, input(w.when_note, (v) => { w.when_note = v; },
+      'למשל: סדרה של ארבעה מפגשים, או: המועד יתואם בהמשך'),
+      'אם עוד אין תאריך מדויק, כתבו כאן מה כן ידוע, וזה יופיע במקומו.'),
+
+    field('איפה' + OPT, input(w.where, (v) => { w.where = v; },
+      'זום, או כתובת')),
+    field('למי זה מיועד' + OPT, input(w.audience, (v) => { w.audience = v; },
+      'למשל: הורים לילדים עד גיל שש')),
+    field('עלות' + OPT, input(w.cost, (v) => { w.cost = v; },
+      'טקסט חופשי. למשל: 120 ש"ח למפגש')),
+    h('p', { class: 'ai-hint' },
+      'שדה העלות ריק פירושו שהפוסטים לא יזכירו מחיר בכלל. הם לא יכתבו «חינם» ' +
+      'ולא ינחשו סכום.'),
+
+    field('קישור להרשמה' + OPT, input(w.register_url, (v) => { w.register_url = v; },
+      'https://')),
+    field('מה משתתפים מקבלים' + OPT, textarea(w.takeaways, (v) => { w.takeaways = v; },
+      'למשל: כלים מעשיים לרגע הסערה, וקבוצה קטנה שאפשר לדבר בה', 3)),
+    field('דגשים לשיווק' + OPT, textarea(w.emphasis, (v) => { w.emphasis = v; },
+      'מה חשוב שיודגש, או מה עדיף לא לכתוב', 3)),
+
+    field('כמה פוסטים', numberInput(s.count, 1, 5, (v) => { s.count = v; }),
+      'ברירת המחדל היא שלושה: הכרזה, פוסט ערך, ותזכורת אחרונה לפני המועד. ' +
+      'פוסט אחד יהיה ההכרזה בלבד, ומעל שלושה נוספים פוסטי ערך, לא הכרזות נוספות.'),
+
+    field('מדף בספרייה', categorySelect(s.category, (v) => { s.category = v; }),
+      'לאיזו לשונית בגלריה הסדרה תיכנס. אפשר גם לפתוח tab חדשה.'),
+    field('איורים' + OPT, textarea(s.illustrations, (v) => { s.illustrations = v; },
+      'תיאור חופשי לכל הסדרה', 2)),
+    generateToggle(s),
+
+    h('p', { class: 'ai-hint' },
+      'קישור ההרשמה ייכתב בכיתוב של הפוסט. באינסטגרם קישור בכיתוב אינו לחיץ, ' +
+      'ולכן ההפניה שם היא לקישור שבביו; בפייסבוק הוא כן לחיץ. המפעל כותב את ' +
+      'זה בהערות של הבקשה.'),
+
+    submitBar('שליחה ליצירה'));
+}
+
 function submitBar(label) {
   const btn = h('button', { class: 'btn btn--primary', type: 'button', onclick: submit }, label);
   return h('div', { class: 'ai-submit' },
@@ -406,10 +555,47 @@ function submitBar(label) {
 
 async function submit() {
   if (submitting) return;
-  const kind = mode === 'campaign' ? 'campaign' : 'post';
+  // §W: a workshop RIDES kind 'campaign'. sm_gen_requests.kind has a CHECK
+  // constraint (post|campaign|style|export) and a workshop genuinely is a
+  // campaign — one whose brief happens to be structured. payload.mode is what
+  // tells the two apart, everywhere, in both directions.
+  const kind = (mode === 'campaign' || mode === 'workshop') ? 'campaign' : 'post';
   let payload;
 
-  if (kind === 'post') {
+  if (mode === 'workshop') {
+    const s = F.workshop;
+    const w = s.w;
+    if (!w.title.trim()) { toast('כתבו קודם את שם הסדנה', 'err'); return; }
+    if (!w.about.trim()) { toast('כתבו על מה הסדנה', 'err'); return; }
+    // All eleven keys ride every time, empty ones included: the brief shows
+    // the session exactly which facts it was and was NOT given, and an absent
+    // key would look like a field this build forgot rather than a field the
+    // therapist left blank on purpose.
+    payload = {
+      mode: 'workshop',
+      workshop: {
+        title: w.title.trim(),
+        about: w.about.trim(),
+        facilitator: w.facilitator.trim(),
+        // Normalised through the bridge in both directions, so what lands is
+        // canonical local wall-clock; unparsable AND rolled-over values drop
+        // to '' (canonWhen).
+        when: canonWhen(w.when),
+        when_note: w.when_note.trim(),
+        where: w.where.trim(),
+        audience: w.audience.trim(),
+        cost: w.cost.trim(),
+        register_url: w.register_url.trim(),
+        takeaways: w.takeaways.trim(),
+        emphasis: w.emphasis.trim(),
+      },
+      count: clampCount(s.count, 1, 5, 3),
+      category: s.category,
+      illustrations: s.illustrations.trim(),
+      // §D — the switch applies to every post in the series.
+      generate_images: !!s.generateImages,
+    };
+  } else if (kind === 'post') {
     const p = F.post;
     if (!p.intent.trim()) { toast('כתבו קודם מה הפוסט — זה השדה היחיד שחייב', 'err'); return; }
     payload = {
@@ -452,7 +638,12 @@ async function submit() {
     await ensureName();                 // the request carries who asked for it
     await createGenRequest({ kind, payload });
     toast('הבקשה נכנסה לתור ✓', 'ok');
-    if (kind === 'post') F.post.intent = '';
+    // The workshop's EVENT fields reset, its settings do not: the next request
+    // is a different event, and leaving a facilitator or an address behind is
+    // how a second workshop gets announced with the first one's details. Count,
+    // shelf, illustrations and the image switch survive, like everywhere else.
+    if (mode === 'workshop') F.workshop.w = WORKSHOP_FIELDS();
+    else if (kind === 'post') F.post.intent = '';
     else if (!F.campaign.revise) F.campaign.brief = '';
     else F.campaign.instruction = '';
     renderForm();
@@ -557,7 +748,7 @@ function requestCard(r) {
 
   const head = h('div', { class: 'ai-req__head' },
     h('span', { class: `ai-chip ai-chip--${status}` }, GEN_STATUS_LABELS[status] || status),
-    h('span', { class: 'ai-req__kind' }, KIND_WORD[r.kind] || 'פוסט'),
+    h('span', { class: 'ai-req__kind' }, kindWord(r)),
     h('span', { class: 'ai-req__when' }, fmtDate(r.created_at)));
 
   const what = summarise(r);
@@ -600,6 +791,15 @@ function summarise(r) {
   const p = r.payload || {};
   if (r.kind === 'campaign') {
     if (p.revise) return `רביזיה ל־${p.revise.campaign_id}: ${p.revise.instruction || ''}`;
+    // §W. `workshop` is an OBJECT, so the campaign fallback below would print
+    // «[object Object]» the moment a workshop row reaches this list. It reads
+    // the title, and says how many posts were asked for.
+    if (p.mode === 'workshop') {
+      const w = p.workshop || {};
+      const title = String(w.title || '').trim() || 'ללא שם';
+      const n = Number(p.count) || 3;
+      return `סדנה «${title}» · ${n} פוסטים`;
+    }
     return p.brief || 'קמפיין';
   }
   // spec 09 §B — a style request has no intent and no brief; what it has is a
@@ -612,6 +812,14 @@ function summarise(r) {
 }
 
 const KIND_WORD = { campaign: 'קמפיין', style: 'סגנון', post: 'פוסט' };
+
+// The chip beside the status. A workshop row's `kind` really is 'campaign', so
+// the word comes from the payload, not from the column: the therapist who sent
+// «סדנה» should read «סדנה» back.
+function kindWord(r) {
+  if (r.kind === 'campaign' && ((r.payload || {}).mode === 'workshop')) return 'סדנה';
+  return KIND_WORD[r.kind] || 'פוסט';
+}
 
 /* =====================================================================
  * «איך זה נוצר» — the transparency block. Rendered here, mounted by BOTH
@@ -679,7 +887,9 @@ export function howMadeBlock(request, { only = null, open = false } = {}) {
     h('div', { class: 'hm-body' },
       h('p', { class: 'ai-hint' },
         'נוצר בבקשה של ' + (request.author || 'לא ידוע') + ' · ' + fmtDate(request.created_at) +
-        (request.kind === 'campaign' ? ' · קמפיין' : '')),
+        // kindWord, not the raw column: a workshop's row is a campaign, and
+        // post.html mounts this same block.
+        (request.kind === 'campaign' ? ' · ' + kindWord(request) : '')),
       notes,
       ...perPost,
       timeline

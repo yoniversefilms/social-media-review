@@ -85,9 +85,13 @@ document.documentElement.dataset.theme=(t==='dark'||t==='light')?t:
     <div id="ai-shelf" class="ai-shelf"></div>
   </section>
 
+  <!-- spec 13: «סדנה» is a THIRD tab, not a checkbox inside «קמפיין», because
+       the intake it opens is a different form (an event's real facts) even
+       though the row it writes is an ordinary kind:'campaign'. -->
   <div class="ai-modes" role="tablist" aria-label="סוג הבקשה">
     <button class="ai-mode is-on" id="mode-post" type="button" role="tab" aria-selected="true">פוסט אחד</button>
     <button class="ai-mode" id="mode-campaign" type="button" role="tab" aria-selected="false">קמפיין</button>
+    <button class="ai-mode" id="mode-workshop" type="button" role="tab" aria-selected="false">סדנה</button>
   </div>
 
   <main class="ai-main">
