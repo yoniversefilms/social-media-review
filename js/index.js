@@ -56,10 +56,13 @@ const $ = (id) => document.getElementById(id);
   // click it). Never re-checked after boot — a role change mid-session does
   // not silently flip a toggle the reviewer may have set deliberately.
   waitingOnly = getRole() === 'marketing';
-  // v2.8: the gallery is the one long-scroll page here, so its nav folds away
-  // as you scroll down and returns on the way back up (or via the ⌄).
-  $('nav').replaceChildren(navBar('index', { collapsible: true }));
+  // v2.8 (operator-corrected same day): the nav stays — it is thin enough.
+  // What eats a phone screen is the FILTER TOOLBAR below it (3 rows of chips
+  // + search/sort + stage tabs ≈ 360px of sticky chrome). THAT folds on
+  // scroll — see wireToolbarFold().
+  $('nav').replaceChildren(navBar('index'));
   wireToolbar();
+  wireToolbarFold();
   await refresh(true);
   subscribe(() => { refresh(false); });
 })();
@@ -196,6 +199,68 @@ function wireToolbar() {
   });
   $('arrange').addEventListener('click', () => setArranging(!arranging));
   wireArrange();
+}
+
+/* ── toolbar fold (v2.8) ──────────────────────────────────────────────
+   The filter toolbar is ~360px of sticky chrome on a phone — half the
+   screen. Scrolling DOWN folds it to a one-line strip («⌄ סינון ומיון» +
+   the visible-post count); scrolling UP or tapping the strip restores it.
+   The nav above it stays put — it is thin enough (operator directive).
+
+   The 250ms cooldown is load-bearing: folding shortens the document, the
+   browser clamps scrollY and fires an opposite-delta scroll event, and
+   without the cooldown that echo unfolds the bar in the same frame (the
+   oscillation that sank the nav-fold v1 — «element is not stable» ×60).
+   During the cooldown, scroll events only resync lastY. */
+function wireToolbarFold() {
+  const bar = $('toolbar');
+  const strip = h('button', {
+    class: 'g-tbfold', type: 'button', 'aria-expanded': 'true',
+    title: 'פתיחת הסינון והמיון',
+  },
+    h('span', { class: 'g-tbfold__ico' }, '⌄'),
+    h('span', {}, 'סינון ומיון'),
+    h('span', { class: 'g-tbfold__n', id: 'tbfold-count' }, ''),
+  );
+  bar.insertBefore(strip, bar.firstChild);
+
+  let folded = false;
+  let coolUntil = 0;
+  const COOL_MS = 250, DELTA = 8, TOP = 48;
+
+  function setFolded(next) {
+    if (folded === next) return;
+    folded = next;
+    bar.classList.toggle('is-folded', folded);
+    strip.setAttribute('aria-expanded', folded ? 'false' : 'true');
+    // the strip shows how many posts the current filters let through, so a
+    // folded bar never hides the fact that a filter is active
+    if (folded) {
+      const n = document.querySelectorAll('#grid .g-card').length;
+      const el = document.getElementById('tbfold-count');
+      if (el) el.textContent = n ? `· ${n} פוסטים` : '';
+    }
+    coolUntil = performance.now() + COOL_MS;
+  }
+
+  strip.addEventListener('click', () => setFolded(false));
+
+  let lastY = window.scrollY;
+  let ticking = false;
+  window.addEventListener('scroll', () => {
+    if (ticking) return;
+    ticking = true;
+    requestAnimationFrame(() => {
+      ticking = false;
+      const y = Math.max(0, window.scrollY);
+      if (performance.now() < coolUntil) { lastY = y; return; }
+      const dy = y - lastY;
+      if (Math.abs(dy) < DELTA) return;
+      lastY = y;
+      if (y <= TOP) setFolded(false);
+      else setFolded(dy > 0);
+    });
+  }, { passive: true });
 }
 
 function matches(p, { skipCat = false, skipStage = false, skipAuthor = false } = {}) {

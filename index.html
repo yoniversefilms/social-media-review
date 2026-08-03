@@ -21,6 +21,20 @@ document.documentElement.dataset.theme=(t==='dark'||t==='light')?t:
 .g-toolbar{position:sticky;top:0;z-index:20;background:var(--bg);
   padding:14px 0 10px;display:flex;flex-direction:column;gap:10px;
   border-bottom:1px solid var(--line)}
+/* fold (v2.8): scrolling down collapses the whole filter block to the one
+   strip below; scroll up or a tap restores it. index.js wireToolbarFold()
+   drives the class. The nav above scrolls away with the page as it always
+   has (its sticky is inert — it sits in a #nav wrapper its own height, and
+   sticky cannot travel past its parent), so top:0 is the true top. */
+.g-tbfold{display:none;align-items:center;gap:8px;width:100%;
+  appearance:none;border:none;background:none;cursor:pointer;font:inherit;
+  color:var(--ink-soft);padding:2px 0 4px;min-height:32px}
+.g-tbfold:hover{color:var(--ink)}
+.g-tbfold__ico{font-size:1rem;line-height:1}
+.g-tbfold__n{opacity:.7;font-size:.85em}
+.g-toolbar.is-folded{padding:2px 0}
+.g-toolbar.is-folded > :not(.g-tbfold){display:none}
+.g-toolbar.is-folded .g-tbfold{display:flex}
 .g-row{display:flex;align-items:center;gap:8px;flex-wrap:wrap}
 .g-chips{display:flex;gap:6px;flex-wrap:wrap;flex:1;min-width:0}
 .g-chip-n{opacity:.65;font-size:.82em;margin-inline-start:4px}
