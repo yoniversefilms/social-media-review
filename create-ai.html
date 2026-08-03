@@ -9,6 +9,12 @@
 <!-- All page styling lives in the ONE «v2.5 create-ai» section at the end of
      css/app.css, not in a <style> block here: the «איך זה נוצר» card is shared
      with post.html and a second copy would drift. -->
+<script>/* theme boot (dark mode 2026-08-02): stamp <html data-theme> BEFORE the
+stylesheet loads so first paint is already themed. 'smr:theme' is written by
+the nav toggle (ui.js); with nothing stored we follow the OS. */
+try{var t=localStorage.getItem('smr:theme');
+document.documentElement.dataset.theme=(t==='dark'||t==='light')?t:
+(matchMedia('(prefers-color-scheme: dark)').matches?'dark':'light');}catch(e){}</script>
 <link rel="stylesheet" href="./css/app.css">
 </head>
 <body>

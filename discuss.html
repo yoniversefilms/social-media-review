@@ -6,6 +6,12 @@
 <meta name="viewport" content="width=device-width, initial-scale=1">
 <meta name="robots" content="noindex, nofollow">
 <title>שיחות — סקירת תוכן</title>
+<script>/* theme boot (dark mode 2026-08-02): stamp <html data-theme> BEFORE the
+stylesheet loads so first paint is already themed. 'smr:theme' is written by
+the nav toggle (ui.js); with nothing stored we follow the OS. */
+try{var t=localStorage.getItem('smr:theme');
+document.documentElement.dataset.theme=(t==='dark'||t==='light')?t:
+(matchMedia('(prefers-color-scheme: dark)').matches?'dark':'light');}catch(e){}</script>
 <link rel="stylesheet" href="css/app.css">
 <style>
   /* page-specific styles for discuss.html (owner: discussions hub) */
@@ -80,7 +86,7 @@
   }
   .th-postline .title { font-weight: 700; color: var(--ink); }
   .th-postline .title:hover { color: var(--accent); text-decoration: none; }
-  .tag--new { background: var(--accent); color: #fff; }
+  .tag--new { background: var(--accent); color: var(--solid-ink); }
   .tag--resolved { background: rgba(46,125,79,.12); color: var(--yes); }
 
   .th-head { display: flex; align-items: baseline; gap: 8px; flex-wrap: wrap; }

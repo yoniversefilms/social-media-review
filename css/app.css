@@ -7,20 +7,69 @@
   /* Contrast pass 2026-08-03 (operator: «it all looks washed out»): deeper
      cream bg so the white cards separate, darker inks, borders .10 → .18,
      stronger shadows. Token-only — every surface inherits. */
+  color-scheme: light;
   --bg: #f1eadd;
   --paper: #fffdf9;
   --ink: #1c1518;
   --ink-soft: #55484d;
   --accent: #830051;
+  --accent-hover: #6d0043;
   --line: rgba(28, 21, 24, .18);
   --yes: #256b42;
   --no: #a83730;
   --maybe: #97803f;
 
+  /* Dark-mode pass 2026-08-02: every neutral that was a literal is now a
+     token, so the [data-theme="dark"] block below can flip the whole app.
+     --wash/--wash-2 are the subtle neutral fills (lane bg, hovers, tag bg);
+     --line-strong is the hover border; --solid-ink is text ON a solid
+     accent/vote surface (was a hardcoded #fff everywhere); --overlay is the
+     modal scrim; --art-bg stays white in BOTH themes because the line-art
+     PNGs are black strokes on transparent. */
+  --wash: rgba(28, 21, 24, .045);
+  --wash-2: rgba(28, 21, 24, .07);
+  --line-strong: rgba(28, 21, 24, .30);
+  --solid-ink: #fff;
+  --overlay: rgba(28, 21, 24, .38);
+  --art-bg: #fff;
+  --ph-a: #efe7db;   /* placeholder-gradient pair (gallery/queue thumbs) */
+  --ph-b: #e4d8c8;
+
   --radius: 12px;
   --shadow: 0 1px 2px rgba(28, 21, 24, .08), 0 6px 24px rgba(28, 21, 24, .10);
   --shadow-lift: 0 2px 6px rgba(28, 21, 24, .12), 0 14px 40px rgba(28, 21, 24, .18);
   --font: 'Assistant', -apple-system, 'Segoe UI', 'Arial Hebrew', 'Noto Sans Hebrew', sans-serif;
+}
+
+/* Dark theme. data-theme is stamped on <html> by the head boot snippet
+   (localStorage 'smr:theme', else the OS preference) before first paint, and
+   toggled from the nav (ui.js themeToggle). Warm near-black, not grey — same
+   plum family as the light cream. The accent lightens (#830051 is illegible
+   on dark paper) and --solid-ink flips to a dark plum so solid accent/vote
+   chips keep their contrast with the now-lighter fills. */
+:root[data-theme="dark"] {
+  color-scheme: dark;
+  --bg: #171114;
+  --paper: #221a1e;
+  --ink: #f0e7e3;
+  --ink-soft: #b7a8ae;
+  --accent: #e77fb5;
+  --accent-hover: #f095c4;
+  --line: rgba(240, 231, 227, .16);
+  --yes: #55b380;
+  --no: #e2726a;
+  --maybe: #cfa64e;
+
+  --wash: rgba(240, 231, 227, .05);
+  --wash-2: rgba(240, 231, 227, .09);
+  --line-strong: rgba(240, 231, 227, .34);
+  --solid-ink: #24151d;
+  --overlay: rgba(0, 0, 0, .55);
+  --ph-a: #2a2127;
+  --ph-b: #362a31;
+
+  --shadow: 0 1px 2px rgba(0, 0, 0, .30), 0 6px 24px rgba(0, 0, 0, .35);
+  --shadow-lift: 0 2px 6px rgba(0, 0, 0, .38), 0 14px 40px rgba(0, 0, 0, .50);
 }
 
 * { box-sizing: border-box; }
@@ -50,7 +99,7 @@ a:hover { text-decoration: underline; }
 
 img { max-width: 100%; display: block; }
 
-::selection { background: rgba(131, 0, 81, .14); }
+::selection { background: color-mix(in srgb, var(--accent) 18%, transparent); }
 
 :focus-visible {
   outline: 2px solid var(--accent);
@@ -108,10 +157,19 @@ img { max-width: 100%; display: block; }
   color: var(--ink-soft);
   font-weight: 600;
 }
-.nav__link:hover { color: var(--ink); text-decoration: none; background: rgba(36, 29, 32, .05); }
-.nav__link--on { color: var(--accent); background: rgba(131, 0, 81, .08); }
+.nav__link:hover { color: var(--ink); text-decoration: none; background: var(--wash); }
+.nav__link--on { color: var(--accent); background: color-mix(in srgb, var(--accent) 9%, transparent); }
 
 .nav__me { max-width: 20ch; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+
+/* Theme toggle (dark mode 2026-08-02) — sits at the nav's inline end. */
+.nav__theme {
+  border: 0; background: none; cursor: pointer; padding: 0;
+  min-width: 40px; min-height: 40px; border-radius: 999px;
+  font-size: 1.05rem; line-height: 1;
+  display: inline-flex; align-items: center; justify-content: center;
+}
+.nav__theme:hover { background: var(--wash-2); }
 
 /* Role chip (v2.3) — a DECLARED hat, never a permission. It reads as a quiet
    dashed nudge while unset and as a solid chip once chosen, so "no role" looks
@@ -124,10 +182,10 @@ img { max-width: 100%; display: block; }
 }
 .nav__role--unset {
   border-style: dashed;
-  border-color: rgba(36, 29, 32, .28);
+  border-color: var(--line-strong);
   background: transparent;
 }
-.nav__role--unset:hover { border-style: dashed; background: rgba(36, 29, 32, .04); }
+.nav__role--unset:hover { border-style: dashed; background: var(--wash); }
 
 /* Role picker — a stack of full-width choices; the current one is marked, and
    every option stays reachable to everyone (declared, not enforced). */
@@ -149,10 +207,10 @@ img { max-width: 100%; display: block; }
   cursor: pointer;
   transition: background .15s ease, border-color .15s ease, color .15s ease;
 }
-.rolepick__opt:hover { border-color: rgba(36, 29, 32, .22); background: rgba(36, 29, 32, .04); }
+.rolepick__opt:hover { border-color: var(--line-strong); background: var(--wash); }
 .rolepick__opt--on {
   border-color: var(--accent);
-  background: rgba(131, 0, 81, .08);
+  background: color-mix(in srgb, var(--accent) 9%, transparent);
   color: var(--accent);
 }
 .rolepick__opt--on::after {
@@ -186,18 +244,18 @@ img { max-width: 100%; display: block; }
   cursor: pointer;
   transition: background .15s ease, border-color .15s ease, box-shadow .15s ease, transform .06s ease;
 }
-.btn:hover { border-color: rgba(36, 29, 32, .22); box-shadow: var(--shadow); }
+.btn:hover { border-color: var(--line-strong); box-shadow: var(--shadow); }
 .btn:active { transform: translateY(1px); }
 .btn:disabled { opacity: .5; cursor: default; box-shadow: none; transform: none; }
 
 .btn--primary {
   background: var(--accent);
   border-color: var(--accent);
-  color: #fff;
+  color: var(--solid-ink);
 }
 .btn--primary:hover {
-  background: #6d0043;
-  border-color: #6d0043;
+  background: var(--accent-hover);
+  border-color: var(--accent-hover);
 }
 
 .btn--ghost {
@@ -205,7 +263,7 @@ img { max-width: 100%; display: block; }
   border-color: transparent;
   color: var(--ink-soft);
 }
-.btn--ghost:hover { color: var(--ink); background: rgba(36, 29, 32, .05); border-color: transparent; box-shadow: none; }
+.btn--ghost:hover { color: var(--ink); background: var(--wash); border-color: transparent; box-shadow: none; }
 
 /* ---------------------------------------------------------------- chips & tags */
 
@@ -225,14 +283,14 @@ img { max-width: 100%; display: block; }
   cursor: pointer;
   transition: background .15s ease, color .15s ease, border-color .15s ease;
 }
-.chip:hover { color: var(--ink); border-color: rgba(36, 29, 32, .22); }
+.chip:hover { color: var(--ink); border-color: var(--line-strong); }
 
 .chip--on {
   background: var(--accent);
   border-color: var(--accent);
-  color: #fff;
+  color: var(--solid-ink);
 }
-.chip--on:hover { color: #fff; border-color: var(--accent); }
+.chip--on:hover { color: var(--solid-ink); border-color: var(--accent); }
 
 .tag {
   display: inline-flex;
@@ -240,7 +298,7 @@ img { max-width: 100%; display: block; }
   gap: 4px;
   padding: 1px 10px;
   border-radius: 999px;
-  background: rgba(36, 29, 32, .06);
+  background: var(--wash-2);
   color: var(--ink-soft);
   font-size: .8rem;
   font-weight: 600;
@@ -277,7 +335,7 @@ a.card:hover, .card--link:hover {
 /* ---------------------------------------------------------------- lanes (stage columns) */
 
 .lane {
-  background: rgba(36, 29, 32, .035);
+  background: var(--wash);
   border: 1px solid var(--line);
   border-radius: var(--radius);
   padding: 12px;
@@ -344,7 +402,7 @@ a.card:hover, .card--link:hover {
 .field select:focus {
   outline: none;
   border-color: var(--accent);
-  box-shadow: 0 0 0 3px rgba(131, 0, 81, .12);
+  box-shadow: 0 0 0 3px color-mix(in srgb, var(--accent) 14%, transparent);
 }
 
 /* ---------------------------------------------------------------- modal */
@@ -357,7 +415,7 @@ a.card:hover, .card--link:hover {
   align-items: center;
   justify-content: center;
   padding: 20px;
-  background: rgba(36, 29, 32, .38);
+  background: var(--overlay);
   opacity: 0;
   transition: opacity .16s ease;
 }
@@ -397,7 +455,7 @@ a.card:hover, .card--link:hover {
   border-radius: 10px;
   cursor: pointer;
 }
-.modal__x:hover { background: rgba(36, 29, 32, .06); color: var(--ink); }
+.modal__x:hover { background: var(--wash-2); color: var(--ink); }
 
 .modal__body { padding: 12px 20px; overflow-y: auto; }
 
@@ -438,8 +496,8 @@ a.card:hover, .card--link:hover {
   max-width: min(92vw, 480px);
 }
 .toast--in { opacity: 1; transform: none; }
-.toast--ok { background: var(--yes); color: #fff; }
-.toast--err { background: var(--no); color: #fff; }
+.toast--ok { background: var(--yes); color: var(--solid-ink); }
+.toast--err { background: var(--no); color: var(--solid-ink); }
 
 /* ---------------------------------------------------------------- votes */
 
@@ -447,9 +505,9 @@ a.card:hover, .card--link:hover {
 .vote-no { color: var(--no); }
 .vote-maybe { color: var(--maybe); }
 
-.chip.vote-yes.chip--on, .chip--on.vote-yes { background: var(--yes); border-color: var(--yes); color: #fff; }
-.chip.vote-no.chip--on, .chip--on.vote-no { background: var(--no); border-color: var(--no); color: #fff; }
-.chip.vote-maybe.chip--on, .chip--on.vote-maybe { background: var(--maybe); border-color: var(--maybe); color: #fff; }
+.chip.vote-yes.chip--on, .chip--on.vote-yes { background: var(--yes); border-color: var(--yes); color: var(--solid-ink); }
+.chip.vote-no.chip--on, .chip--on.vote-no { background: var(--no); border-color: var(--no); color: var(--solid-ink); }
+.chip.vote-maybe.chip--on, .chip--on.vote-maybe { background: var(--maybe); border-color: var(--maybe); color: var(--solid-ink); }
 
 /* ---------------------------------------------------------------- pins */
 
@@ -463,7 +521,7 @@ a.card:hover, .card--link:hover {
   justify-content: center;
   border-radius: 50%;
   background: var(--accent);
-  color: #fff;
+  color: var(--solid-ink);
   font-size: .8rem;
   font-weight: 700;
   line-height: 1;
@@ -482,9 +540,9 @@ a.card:hover, .card--link:hover {
 }
 
 @keyframes pin-pulse {
-  0%   { box-shadow: 0 0 0 2px #fff, 0 0 0 0 rgba(131, 0, 81, .45); }
-  70%  { box-shadow: 0 0 0 2px #fff, 0 0 0 12px rgba(131, 0, 81, 0); }
-  100% { box-shadow: 0 0 0 2px #fff, 0 0 0 0 rgba(131, 0, 81, 0); }
+  0%   { box-shadow: 0 0 0 2px #fff, 0 0 0 0 color-mix(in srgb, var(--accent) 45%, transparent); }
+  70%  { box-shadow: 0 0 0 2px #fff, 0 0 0 12px transparent; }
+  100% { box-shadow: 0 0 0 2px #fff, 0 0 0 0 transparent; }
 }
 
 /* ---------------------------------------------------------------- misc */
@@ -690,9 +748,9 @@ hr, .rule {
   display: flex; align-items: baseline; gap: 8px; flex-wrap: wrap;
   margin-bottom: 8px;
 }
-.gen-note--dry { border-color: rgba(179, 153, 93, .5); background: rgba(179, 153, 93, .08); }
-.gen-note--err { border-color: rgba(179, 64, 58, .5); background: rgba(179, 64, 58, .07); }
-.gen-note--work { border-color: rgba(131, 0, 81, .35); background: rgba(131, 0, 81, .05); }
+.gen-note--dry { border-color: color-mix(in srgb, var(--maybe) 50%, transparent); background: color-mix(in srgb, var(--maybe) 9%, transparent); }
+.gen-note--err { border-color: color-mix(in srgb, var(--no) 50%, transparent); background: color-mix(in srgb, var(--no) 8%, transparent); }
+.gen-note--work { border-color: color-mix(in srgb, var(--accent) 35%, transparent); background: color-mix(in srgb, var(--accent) 6%, transparent); }
 .gen-sub { color: var(--ink-soft); }
 
 /* Purely decorative. The global prefers-reduced-motion rule above carries
@@ -700,7 +758,7 @@ hr, .rule {
    right outcome: the sentence beside it is what actually reports progress. */
 .gen-spin {
   width: 13px; height: 13px; flex: 0 0 auto; border-radius: 50%;
-  border: 2px solid rgba(131, 0, 81, .25); border-top-color: var(--accent);
+  border: 2px solid color-mix(in srgb, var(--accent) 25%, transparent); border-top-color: var(--accent);
   animation: gen-spin 900ms linear infinite;
 }
 @keyframes gen-spin { to { transform: rotate(360deg); } }
@@ -727,7 +785,7 @@ hr, .rule {
 /* ---- the 9-up sheet and its tiles ---- */
 .gen-sheet {
   width: 100%; max-width: 420px; display: block; border-radius: var(--radius);
-  border: 1px solid var(--line); background: #fff;
+  border: 1px solid var(--line); background: var(--art-bg);
 }
 .gen-tiles { display: grid; grid-template-columns: repeat(3, 1fr); gap: 8px; }
 .gen-tiles--sm { grid-template-columns: repeat(auto-fill, minmax(96px, 1fr)); }
@@ -736,12 +794,12 @@ hr, .rule {
   background: var(--paper); display: flex; flex-direction: column;
   transition: border-color .12s ease, box-shadow .12s ease;
 }
-.gen-tile:hover { border-color: rgba(36, 29, 32, .25); }
+.gen-tile:hover { border-color: var(--line-strong); }
 /* The pick state has to read at a glance across nine cells, so it is a ring
    AND a check mark — colour alone would fail for a reviewer who cannot see it. */
 .gen-tile.is-on { border-color: var(--accent); box-shadow: var(--shadow); }
 .gen-tile img {
-  width: 100%; aspect-ratio: 1 / 1; object-fit: contain; background: #fff; display: block;
+  width: 100%; aspect-ratio: 1 / 1; object-fit: contain; background: var(--art-bg); display: block;
 }
 .gen-tiles--sm .gen-tile img { object-fit: cover; }
 .gen-tile__meta {
@@ -780,7 +838,7 @@ hr, .rule {
 }
 .gen-chain__step.is-here { border-color: var(--accent); }
 .gen-chain__step img {
-  width: 100%; aspect-ratio: 1 / 1; object-fit: contain; background: #fff;
+  width: 100%; aspect-ratio: 1 / 1; object-fit: contain; background: var(--art-bg);
   border-radius: 6px; display: block; margin-bottom: 4px;
 }
 
@@ -953,7 +1011,7 @@ hr, .rule {
 .pv-zoom button { border: 0; background: transparent; cursor: pointer;
   font: inherit; color: var(--ink-soft); min-height: 34px; min-width: 34px;
   border-radius: 999px; font-weight: 700; }
-.pv-zoom button:hover { color: var(--ink); background: rgba(28,21,24,.06); }
+.pv-zoom button:hover { color: var(--ink); background: var(--wash-2); }
 .pv-zoom__pct { min-width: 52px; text-align: center; font-size: .88rem;
   font-weight: 600; color: var(--ink-soft); cursor: pointer; }
 .pv-zoom__pct:hover { color: var(--ink); }

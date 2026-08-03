@@ -5,6 +5,12 @@
 <meta name="viewport" content="width=device-width, initial-scale=1">
 <title>בדיקת פוסט · Bayit Ba’Valley</title>
 <link rel="icon" href="data:,">
+<script>/* theme boot (dark mode 2026-08-02): stamp <html data-theme> BEFORE the
+stylesheet loads so first paint is already themed. 'smr:theme' is written by
+the nav toggle (ui.js); with nothing stored we follow the OS. */
+try{var t=localStorage.getItem('smr:theme');
+document.documentElement.dataset.theme=(t==='dark'||t==='light')?t:
+(matchMedia('(prefers-color-scheme: dark)').matches?'dark':'light');}catch(e){}</script>
 <link rel="stylesheet" href="css/app.css">
 <style>
 /* ============ post.html page styles (review screen) ============ */
@@ -134,10 +140,10 @@
 .pv-actionbar .hist-btn { min-width: 38px; padding: 5px 10px; font-size: 1rem; line-height: 1; }
 
 .pv-pinbtn { transition: box-shadow .15s ease; }
-.pv-pinbtn.on { background: var(--accent); color: #fff; box-shadow: 0 0 0 3px color-mix(in srgb, var(--accent) 30%, transparent); }
+.pv-pinbtn.on { background: var(--accent); color: var(--solid-ink); box-shadow: 0 0 0 3px color-mix(in srgb, var(--accent) 30%, transparent); }
 
 
-.pv-designbtn.on { background: var(--accent); color: #fff; border-color: var(--accent); box-shadow: 0 0 0 3px color-mix(in srgb, var(--accent) 30%, transparent); }
+.pv-designbtn.on { background: var(--accent); color: var(--solid-ink); border-color: var(--accent); box-shadow: 0 0 0 3px color-mix(in srgb, var(--accent) 30%, transparent); }
 
 /* voting lives above the tabs (v1.8): pick → say why → submit unlocks */
 .pv-votebox { border: 1px solid var(--line); border-radius: 12px; background: var(--paper); padding: 14px; margin-bottom: 16px; box-shadow: var(--shadow); }
@@ -214,7 +220,7 @@
 .pv-pinlayer { position: absolute; inset: 0; z-index: 5; pointer-events: none; }
 .pv-frame.armed { cursor: crosshair; }
 .pv-frame.armed .pv-pinlayer { pointer-events: auto; cursor: crosshair; }
-.pin-dot { position: absolute; transform: translate(-50%, -50%); width: 26px; height: 26px; border-radius: 50%; background: var(--accent); color: #fff; border: 2px solid #fff; font-size: 13px; font-weight: 700; display: flex; align-items: center; justify-content: center; box-shadow: 0 2px 10px rgba(0,0,0,.35); cursor: pointer; pointer-events: auto; z-index: 4; }
+.pin-dot { position: absolute; transform: translate(-50%, -50%); width: 26px; height: 26px; border-radius: 50%; background: var(--accent); color: var(--solid-ink); border: 2px solid #fff; font-size: 13px; font-weight: 700; display: flex; align-items: center; justify-content: center; box-shadow: 0 2px 10px rgba(0,0,0,.35); cursor: pointer; pointer-events: auto; z-index: 4; }
 .pin-dot.resolved { opacity: .4; }
 .pin-dot.flash { animation: pv-pulse 1s ease 2; }
 @keyframes pv-pulse { 0% { box-shadow: 0 0 0 0 color-mix(in srgb, var(--accent) 55%, transparent); } 70% { box-shadow: 0 0 0 14px transparent; } 100% { box-shadow: 0 0 0 0 transparent; } }
@@ -253,7 +259,7 @@
 .pv-tab { border: 0; background: none; padding: 10px 12px; font-size: .95rem; color: var(--ink-soft); cursor: pointer; border-bottom: 2px solid transparent; margin-bottom: -1px; display: inline-flex; align-items: center; gap: 6px; }
 .pv-tab:hover { color: var(--ink); }
 .pv-tab.on { color: var(--accent); border-bottom-color: var(--accent); font-weight: 700; }
-.pv-badge { min-width: 19px; height: 19px; padding: 0 5px; border-radius: 10px; background: var(--accent); color: #fff; font-size: .72rem; font-weight: 700; display: inline-flex; align-items: center; justify-content: center; }
+.pv-badge { min-width: 19px; height: 19px; padding: 0 5px; border-radius: 10px; background: var(--accent); color: var(--solid-ink); font-size: .72rem; font-weight: 700; display: inline-flex; align-items: center; justify-content: center; }
 
 .pv-body > * + * { margin-top: 14px; }
 .pv-note { color: var(--ink-soft); font-size: .88rem; line-height: 1.55; }
@@ -284,7 +290,7 @@
 .pin-card.resolved { opacity: .62; }
 .pin-card.flash { box-shadow: 0 0 0 3px color-mix(in srgb, var(--accent) 40%, transparent); }
 .pin-card .head { display: flex; align-items: center; gap: 8px; flex-wrap: wrap; }
-.pin-card .num { width: 22px; height: 22px; flex: none; border-radius: 50%; background: var(--accent); color: #fff; font-size: .75rem; font-weight: 700; display: inline-flex; align-items: center; justify-content: center; cursor: pointer; }
+.pin-card .num { width: 22px; height: 22px; flex: none; border-radius: 50%; background: var(--accent); color: var(--solid-ink); font-size: .75rem; font-weight: 700; display: inline-flex; align-items: center; justify-content: center; cursor: pointer; }
 .pin-card .who { font-weight: 700; font-size: .92rem; }
 .pin-card time { color: var(--ink-soft); font-size: .78rem; }
 .pin-card .jump { margin-inline-start: auto; }

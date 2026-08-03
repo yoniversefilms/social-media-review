@@ -6,6 +6,12 @@
 <meta name="robots" content="noindex, nofollow">
 <title>סקירת פוסטים — הלוח</title>
 <link rel="icon" href="data:,">
+<script>/* theme boot (dark mode 2026-08-02): stamp <html data-theme> BEFORE the
+stylesheet loads so first paint is already themed. 'smr:theme' is written by
+the nav toggle (ui.js); with nothing stored we follow the OS. */
+try{var t=localStorage.getItem('smr:theme');
+document.documentElement.dataset.theme=(t==='dark'||t==='light')?t:
+(matchMedia('(prefers-color-scheme: dark)').matches?'dark':'light');}catch(e){}</script>
 <link rel="stylesheet" href="./css/app.css">
 <style>
 /* ── page-specific: gallery ─────────────────────────────────────────── */
@@ -29,7 +35,7 @@
    before it's picked. Declared after .g-tab.is-on so it wins the tie. */
 .g-tab--wait{color:var(--no)}
 .g-tab--wait:hover{color:var(--no)}
-.g-tab--wait.is-on{color:#fff;background:var(--no);border-bottom-color:var(--no);
+.g-tab--wait.is-on{color:var(--solid-ink);background:var(--no);border-bottom-color:var(--no);
   border-radius:8px 8px 0 0}
 .g-tools{display:flex;gap:8px;align-items:center;flex-wrap:wrap;margin-inline-start:auto}
 .g-search{padding:7px 12px;border:1px solid var(--line);border-radius:999px;
@@ -41,7 +47,7 @@
   background:var(--paper);color:var(--ink);font:inherit;cursor:pointer;
   white-space:nowrap}
 .g-arrange:hover{border-color:var(--accent)}
-.g-arrange.is-on{background:var(--accent);border-color:var(--accent);color:#fff}
+.g-arrange.is-on{background:var(--accent);border-color:var(--accent);color:var(--solid-ink)}
 
 /* progress strip */
 .g-progress{display:flex;align-items:center;gap:12px;padding:14px 2px 4px}
@@ -64,11 +70,11 @@
 .g-card--mine-no{border-inline-start:4px solid var(--no)}
 .g-card--mine-maybe{border-inline-start:4px solid var(--maybe)}
 .g-cover{position:relative;aspect-ratio:4/5;border-radius:12px;overflow:hidden;
-  background:linear-gradient(160deg,#efe7db,#e4d8c8)}
+  background:linear-gradient(160deg,var(--ph-a),var(--ph-b))}
 .g-cover img{width:100%;height:100%;object-fit:cover;display:block}
 .g-cover__ph{position:absolute;inset:0;display:none;align-items:center;
   justify-content:center;font-size:2rem;color:var(--ink-soft);
-  background:linear-gradient(160deg,#efe7db,#e4d8c8)}
+  background:linear-gradient(160deg,var(--ph-a),var(--ph-b))}
 .g-cover.is-broken img{display:none}
 .g-cover.is-broken .g-cover__ph{display:flex}
 .g-title{font-weight:600;line-height:1.35;color:var(--ink);text-decoration:none;
@@ -98,15 +104,15 @@
 .g-cover.is-live img{visibility:hidden}
 .g-cover--edited::after{content:"";position:absolute;top:8px;inset-inline-start:8px;
   z-index:2;width:8px;height:8px;border-radius:999px;background:var(--accent);
-  box-shadow:0 0 0 2px rgba(255,253,249,.9)}
+  box-shadow:0 0 0 2px var(--paper)}
 
 /* version badge + dropdown */
 .g-ver{position:relative;z-index:2;appearance:none;border:none;font:inherit;
   font-size:.8rem;font-weight:600;cursor:pointer;
-  background:rgba(36,29,32,.06);color:var(--ink-soft)}
-.g-ver:hover{background:rgba(36,29,32,.12);color:var(--ink)}
+  background:var(--wash-2);color:var(--ink-soft)}
+.g-ver:hover{background:var(--wash-2);color:var(--ink)}
 /* :hover outranks a plain class — the previewing state must still win */
-.g-ver--past,.g-ver--past:hover{background:var(--accent);color:#fff}
+.g-ver--past,.g-ver--past:hover{background:var(--accent);color:var(--solid-ink)}
 .g-ver__n{direction:ltr}
 .g-ver__caret{font-size:.7em;opacity:.75}
 /* Anchored to the badge (bottom of the card), not to the ⋯ button. The
@@ -117,8 +123,8 @@
 .g-verlist__item{display:flex;flex-direction:column;align-items:flex-start;gap:1px;
   appearance:none;border:none;background:none;font:inherit;cursor:pointer;
   text-align:start;width:100%;padding:6px 8px;border-radius:8px;color:var(--ink)}
-.g-verlist__item:hover{background:rgba(36,29,32,.07)}
-.g-verlist__item.is-on{background:var(--accent);color:#fff}
+.g-verlist__item:hover{background:var(--wash-2)}
+.g-verlist__item.is-on{background:var(--accent);color:var(--solid-ink)}
 .g-verlist__item b{direction:ltr;unicode-bidi:plaintext;font-size:.9rem}
 .g-verlist__meta{font-size:.72rem;opacity:.72}
 
@@ -126,11 +132,11 @@
 .g-verhint{position:absolute;inset-inline:8px;bottom:8px;z-index:2;
   display:flex;align-items:center;gap:8px;justify-content:space-between;
   padding:5px 9px;border-radius:10px;font-size:.74rem;
-  background:rgba(36,29,32,.82);color:#fff}
-.g-verhint__reset{appearance:none;border:none;background:rgba(255,255,255,.22);
-  color:#fff;font:inherit;font-size:.72rem;padding:2px 8px;border-radius:999px;
+  background:color-mix(in srgb, var(--ink) 85%, transparent);color:var(--bg)}
+.g-verhint__reset{appearance:none;border:none;background:color-mix(in srgb, var(--bg) 25%, transparent);
+  color:var(--bg);font:inherit;font-size:.72rem;padding:2px 8px;border-radius:999px;
   cursor:pointer;white-space:nowrap}
-.g-verhint__reset:hover{background:rgba(255,255,255,.38)}
+.g-verhint__reset:hover{background:color-mix(in srgb, var(--bg) 40%, transparent)}
 
 /* waiting-view reason badge (v2.3, plan §7) — shown ONLY while the
    «ממתינים לאישור שיווק» toggle is on; every card there is none/stale/revoked
@@ -146,7 +152,7 @@
 /* per-card overflow menu */
 .g-menu-btn{position:absolute;top:16px;inset-inline-end:16px;z-index:2;
   width:30px;height:30px;border-radius:999px;border:none;cursor:pointer;
-  background:rgba(255,253,249,.92);color:var(--ink);font-size:1.1rem;
+  background:color-mix(in srgb, var(--paper) 92%, transparent);color:var(--ink);font-size:1.1rem;
   line-height:1;display:flex;align-items:center;justify-content:center;
   box-shadow:0 1px 4px rgba(36,29,32,.18)}
 .g-menu-btn:hover{background:var(--paper)}
@@ -166,7 +172,7 @@
 @keyframes g-shimmer{0%{background-position:150% 0}100%{background-position:-50% 0}}
 .g-skel{pointer-events:none}
 .g-skel .g-cover,.g-skel .g-sk-line{
-  background:linear-gradient(100deg,#ece4d8 40%,#f6f0e6 50%,#ece4d8 60%);
+  background:linear-gradient(100deg,var(--ph-a) 40%,var(--ph-b) 50%,var(--ph-a) 60%);
   background-size:200% 100%;animation:g-shimmer 1.3s infinite linear}
 .g-sk-line{height:14px;border-radius:6px}
 .g-sk-line--short{width:60%}

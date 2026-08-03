@@ -6,6 +6,12 @@
 <meta name="robots" content="noindex, nofollow">
 <title>Backend — developer docs</title>
 <link rel="icon" href="data:,">
+<script>/* theme boot (dark mode 2026-08-02): stamp <html data-theme> BEFORE the
+stylesheet loads so first paint is already themed. 'smr:theme' is written by
+the nav toggle (ui.js); with nothing stored we follow the OS. */
+try{var t=localStorage.getItem('smr:theme');
+document.documentElement.dataset.theme=(t==='dark'||t==='light')?t:
+(matchMedia('(prefers-color-scheme: dark)').matches?'dark':'light');}catch(e){}</script>
 <link rel="stylesheet" href="./css/app.css">
 <style>
 /* ── page-specific: developer docs (LTR English island in an RTL app) ── */
@@ -31,7 +37,7 @@
 .bk-sec li{margin-bottom:.35em}
 .bk-muted{color:var(--ink-soft)}
 .bk-planned{display:inline-block;padding:1px 8px;border-radius:999px;font-size:.72rem;
-  font-weight:700;letter-spacing:.03em;background:rgba(179,153,93,.16);color:#7a6633;
+  font-weight:700;letter-spacing:.03em;background:color-mix(in srgb, var(--maybe) 16%, transparent);color:color-mix(in srgb, var(--maybe) 72%, var(--ink));
   border:1px solid rgba(179,153,93,.4);vertical-align:2px}
 .bk-done{display:inline-block;padding:1px 8px;border-radius:999px;font-size:.72rem;
   font-weight:700;letter-spacing:.03em;background:rgba(46,125,79,.12);color:var(--yes);
@@ -39,7 +45,7 @@
 
 /* code */
 .bk-body code{font-family:ui-monospace,SFMono-Regular,Menlo,Consolas,monospace;
-  font-size:.86em;background:rgba(36,29,32,.06);border-radius:5px;padding:1px 5px;
+  font-size:.86em;background:var(--wash-2);border-radius:5px;padding:1px 5px;
   direction:ltr;unicode-bidi:embed}
 .bk-code{font-family:ui-monospace,SFMono-Regular,Menlo,Consolas,monospace;
   font-size:.82rem;line-height:1.6;background:#241d20;color:#f2ece2;
@@ -54,7 +60,7 @@
   border:1px solid var(--line);border-radius:10px;overflow:hidden}
 .bk-tbl th,.bk-tbl td{text-align:left;vertical-align:top;padding:9px 12px;
   border-bottom:1px solid var(--line)}
-.bk-tbl th{background:rgba(36,29,32,.04);font-size:.8rem;letter-spacing:.02em;
+.bk-tbl th{background:var(--wash);font-size:.8rem;letter-spacing:.02em;
   text-transform:uppercase;color:var(--ink-soft)}
 .bk-tbl tr:last-child td{border-bottom:none}
 .bk-tbl td code{white-space:nowrap}
@@ -63,7 +69,7 @@
 .bk-flow{display:flex;flex-direction:column;align-items:stretch;margin:18px 0 22px}
 .bk-node{background:var(--paper);border:1px solid var(--line);border-radius:12px;
   padding:12px 16px;box-shadow:var(--shadow)}
-.bk-node--app{border-color:rgba(131,0,81,.45);border-width:1.5px}
+.bk-node--app{border-color:color-mix(in srgb, var(--accent) 45%, transparent);border-width:1.5px}
 .bk-node__t{font-weight:700;font-size:.95rem}
 .bk-node__d{color:var(--ink-soft);font-size:.85rem;margin-top:2px}
 .bk-node__d code{font-size:.9em}
@@ -71,7 +77,7 @@
   padding:7px 0;color:var(--accent)}
 .bk-arrow svg{display:block}
 .bk-arrow__cmd{font-family:ui-monospace,SFMono-Regular,Menlo,Consolas,monospace;
-  font-size:.78rem;background:rgba(131,0,81,.08);color:var(--accent);
+  font-size:.78rem;background:color-mix(in srgb, var(--accent) 9%, transparent);color:var(--accent);
   border-radius:6px;padding:2px 9px;text-align:center;max-width:100%;
   overflow-wrap:anywhere}
 .bk-arrow__note{font-size:.76rem;color:var(--ink-soft)}
@@ -80,8 +86,8 @@
 .bk-lane-label{font-size:.78rem;font-weight:700;letter-spacing:.06em;
   text-transform:uppercase;color:var(--ink-soft);margin:4px 0 6px}
 .bk-loop{display:flex;align-items:center;gap:10px;margin-top:10px;
-  border:1px dashed rgba(131,0,81,.5);border-radius:12px;padding:10px 16px;
-  color:var(--accent);font-size:.85rem;background:rgba(131,0,81,.04)}
+  border:1px dashed color-mix(in srgb, var(--accent) 50%, transparent);border-radius:12px;padding:10px 16px;
+  color:var(--accent);font-size:.85rem;background:color-mix(in srgb, var(--accent) 5%, transparent)}
 .bk-loop b{font-size:1.1rem}
 @media (max-width:640px){.bk-split{grid-template-columns:1fr}}
 
@@ -90,7 +96,7 @@
 .bk-steps>li{position:relative;padding:0 0 16px 46px;margin:0}
 .bk-steps>li::before{counter-increment:bk;content:counter(bk);
   position:absolute;left:0;top:0;width:28px;height:28px;border-radius:999px;
-  background:var(--accent);color:#fff;font-weight:700;font-size:.85rem;
+  background:var(--accent);color:var(--solid-ink);font-weight:700;font-size:.85rem;
   display:flex;align-items:center;justify-content:center}
 .bk-steps>li::after{content:"";position:absolute;left:13.5px;top:32px;bottom:2px;
   width:1px;background:var(--line)}

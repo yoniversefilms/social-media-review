@@ -361,6 +361,27 @@ export function navBar(active) {
     return m;
   }
 
+  // Theme toggle (dark mode 2026-08-02). The head boot snippet stamped
+  // <html data-theme> before first paint; this button only flips it and
+  // persists the choice as localStorage['smr:theme'] — read directly, same
+  // no-cycle rule as the role chip above.
+  const themeBtn = el('button', {
+    class: 'nav__theme', type: 'button', onclick: flipTheme,
+  });
+  const paintTheme = () => {
+    const dark = document.documentElement.dataset.theme === 'dark';
+    themeBtn.textContent = dark ? '☀️' : '🌙';
+    themeBtn.title = dark ? 'מצב בהיר' : 'מצב כהה';
+    themeBtn.setAttribute('aria-label', themeBtn.title);
+  };
+  function flipTheme() {
+    const next = document.documentElement.dataset.theme === 'dark' ? 'light' : 'dark';
+    document.documentElement.dataset.theme = next;
+    try { localStorage.setItem('smr:theme', next); } catch { /* private mode */ }
+    paintTheme();
+  }
+  paintTheme();
+
   function rename() {
     const input = el('input', {
       class: 'field__input', type: 'text', maxlength: '40',
@@ -395,6 +416,7 @@ export function navBar(active) {
     ),
     roleChip,
     chip,
+    themeBtn,
   );
 }
 

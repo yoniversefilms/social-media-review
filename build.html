@@ -6,6 +6,12 @@
 <meta name="viewport" content="width=device-width, initial-scale=1">
 <meta name="robots" content="noindex, nofollow">
 <title>בניית פוסט — סקירת פוסטים</title>
+<script>/* theme boot (dark mode 2026-08-02): stamp <html data-theme> BEFORE the
+stylesheet loads so first paint is already themed. 'smr:theme' is written by
+the nav toggle (ui.js); with nothing stored we follow the OS. */
+try{var t=localStorage.getItem('smr:theme');
+document.documentElement.dataset.theme=(t==='dark'||t==='light')?t:
+(matchMedia('(prefers-color-scheme: dark)').matches?'dark':'light');}catch(e){}</script>
 <link rel="stylesheet" href="./css/app.css">
 <style>
 /* ── page-specific: builder ─────────────────────────────────────────── */
@@ -57,7 +63,7 @@
 /* center: the live preview */
 .b-center{display:flex;flex-direction:column;gap:10px;min-width:0}
 .b-stagebar{display:flex;align-items:center;gap:10px;flex-wrap:wrap}
-#b-design.on{background:var(--accent);color:#fff;border-color:var(--accent)}
+#b-design.on{background:var(--accent);color:var(--solid-ink);border-color:var(--accent)}
 .b-stage{background:var(--paper);border:1px solid var(--line);border-radius:12px;
   padding:14px;min-height:300px}
 /* the large preview gets the same boundary treatment as the post viewer's
@@ -86,7 +92,7 @@
   background:var(--paper);cursor:pointer;padding:10px;font:inherit;color:var(--ink);
   display:flex;flex-direction:column;gap:8px;text-align:start}
 .b-pick:hover{border-color:var(--accent)}
-.b-pick img{width:100%;border-radius:6px;display:block;background:#fff}
+.b-pick img{width:100%;border-radius:6px;display:block;background:var(--art-bg)}
 .b-pick__name{font-weight:600;font-size:.88rem}
 .b-pick__hint{font-size:.78rem;color:var(--ink-soft);line-height:1.4}
 .b-illgrid{grid-template-columns:repeat(auto-fill,minmax(96px,1fr))}
