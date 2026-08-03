@@ -60,7 +60,9 @@
    frame. The border is inside the box (global box-sizing:border-box), so
    compose.js's fit() — which scales the iframe to container.clientWidth —
    still fills it exactly: no letterboxing, no overflow. */
-.b-stage__mount{max-width:640px;margin:0 auto;background:var(--paper);
+/* --pv-zoom: set on #stage by ui.js zoomControl (build.js boot) — the same
+   variable, control and stored preference as the post page's frame. */
+.b-stage__mount{max-width:calc(640px * var(--pv-zoom, 1));margin:0 auto;background:var(--paper);
   border:1px solid var(--line);border-radius:12px;overflow:hidden;
   box-shadow:0 0 0 1px rgba(36,29,32,.07),var(--shadow)}
 .b-empty{display:flex;flex-direction:column;align-items:center;gap:14px;

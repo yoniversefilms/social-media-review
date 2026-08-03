@@ -31,7 +31,7 @@ import {
 import { mountHowMade } from './create-ai.js';
 import {
   el, modal, toast, fmtDate, fmtWhen, toLocalInput, fromLocalInput, voteGlyph,
-  stageLabel, categoryLabel, STAGES, navBar,
+  stageLabel, categoryLabel, STAGES, navBar, zoomControl,
 } from './ui.js';
 import { initCompose, mountSlide, manifest } from './compose.js';
 // v2.3 «English translation panel» — the ONE hash implementation, shared
@@ -756,36 +756,13 @@ function signingVnum() {
 // Round-tripping first puts the local object in the shape the server will
 // return, so the compare is content-vs-content and never encoding-vs-encoding.
 /* ── canvas zoom (operator quick-edit 2026-08-03) ─────────────────────
-   Scales .pv-frame's max-width cap via --pv-zoom (see post.html); compose
-   refits itself, design mode rides the same frame. Remembered per browser
-   (smr:pvzoom). Range 40%–200%; >100% is bounded by the column width
-   (width:100%), which is stated in the CSS comment rather than pretended
-   away with panning we did not build. */
-const ZOOM_MIN = 0.4, ZOOM_MAX = 2, ZOOM_STEP = 0.15;
-let pvZoom = 1;
-function applyZoom(z, pct) {
-  pvZoom = Math.min(ZOOM_MAX, Math.max(ZOOM_MIN, z));
-  const frame = $('frame');
-  if (frame) frame.style.setProperty('--pv-zoom', String(pvZoom));
-  if (pct) pct.textContent = Math.round(pvZoom * 100) + '%';
-  try { localStorage.setItem('smr:pvzoom', String(pvZoom)); } catch { /* private mode */ }
-}
+   ONE implementation, shared with build.html: ui.js zoomControl(). It sets
+   --pv-zoom on #frame; .pv-frame's max-width calc (post.html) does the rest,
+   compose refits itself, and design mode rides the same frame. */
 function wireZoom() {
   const group = document.querySelector('.pv-tools__group');
   if (!group || group.querySelector('.pv-zoom')) return;
-  const pct = el('span', {
-    class: 'pv-zoom__pct', title: 'איפוס ל-100%', role: 'button', tabindex: '0',
-    onclick: () => applyZoom(1, pct),
-  });
-  const btn = (glyph, title, dir) => el('button', {
-    type: 'button', title,
-    onclick: () => applyZoom(pvZoom + dir * ZOOM_STEP, pct),
-  }, glyph);
-  group.appendChild(el('div', { class: 'pv-zoom', role: 'group', 'aria-label': 'זום על השקף' },
-    btn('−', 'להקטין את השקף', -1), pct, btn('+', 'להגדיל את השקף', +1)));
-  let saved = 1;
-  try { saved = parseFloat(localStorage.getItem('smr:pvzoom')) || 1; } catch { /* ok */ }
-  applyZoom(saved, pct);
+  group.appendChild(zoomControl({ getEl: () => $('frame') }));
 }
 
 function onScreenHash() {

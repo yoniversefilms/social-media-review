@@ -11,7 +11,7 @@ import {
   listTemplates, deleteTemplate, whoAmI,
   listAssets, assetRowUrl,
 } from './store.js';
-import { el as h, navBar, toast, modal } from './ui.js';
+import { el as h, navBar, toast, modal, zoomControl } from './ui.js';
 import { initCompose, mountSlide, manifest } from './compose.js';
 import { initEditor } from './editor.js';
 
@@ -82,6 +82,14 @@ const sampleCache = new Map(); // template name -> sample vars (frozen master co
     return;
   }
   $('nav').replaceChildren(navBar('build'));
+
+  // Canvas zoom (shared ui.js control) — sets --pv-zoom on #stage, which
+  // .b-stage__mount's max-width calc reads through inheritance. Same stored
+  // preference as the post page.
+  const bar = document.querySelector('.b-stagebar');
+  if (bar && !bar.querySelector('.pv-zoom')) {
+    bar.appendChild(zoomControl({ getEl: () => $('stage') }));
+  }
 
   try {
     await initCompose(assetUrl);

@@ -397,3 +397,37 @@ export function navBar(active) {
     chip,
   );
 }
+
+/* ── canvas zoom control (operator quick-edit 2026-08-03) ──────────────
+   One implementation for every page with a slide canvas (post.html viewer +
+   design, build.html stage). Returns the ready control; `getEl()` names the
+   STATIC element that carries --pv-zoom (the page's own CSS reads the var
+   through inheritance — post.html #frame, build.html #stage). The zoom is
+   one shared preference (smr:pvzoom): a reviewer who likes 70% likes it on
+   both pages. Range 40%–200%; >100% is bounded by the column width — panning
+   was deliberately not built. */
+export function zoomControl({ getEl, key = 'smr:pvzoom' } = {}) {
+  const MIN = 0.4, MAX = 2, STEP = 0.15;
+  let z = 1;
+  const pct = el('span', {
+    class: 'pv-zoom__pct', title: 'איפוס ל-100%', role: 'button', tabindex: '0',
+    onclick: () => set(1),
+  });
+  function set(v) {
+    z = Math.min(MAX, Math.max(MIN, v));
+    const t = getEl && getEl();
+    if (t) t.style.setProperty('--pv-zoom', String(z));
+    pct.textContent = Math.round(z * 100) + '%';
+    try { localStorage.setItem(key, String(z)); } catch { /* private mode */ }
+  }
+  const btn = (glyph, title, dir) => el('button', {
+    type: 'button', title,
+    onclick: () => set(z + dir * STEP),
+  }, glyph);
+  const root = el('div', { class: 'pv-zoom', role: 'group', 'aria-label': 'זום על השקף' },
+    btn('−', 'להקטין את השקף', -1), pct, btn('+', 'להגדיל את השקף', +1));
+  let saved = 1;
+  try { saved = parseFloat(localStorage.getItem(key)) || 1; } catch { /* ok */ }
+  set(saved);
+  return root;
+}
