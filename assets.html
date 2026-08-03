@@ -32,6 +32,15 @@
     font-family: inherit; font-size: .9rem;
   }
 
+  /* folder-upload progress (spec 10 §A). Lives INSIDE the dock so it cannot be
+     missed, and stays a single line: «12/68 הועלו». */
+  .a-prog {
+    margin-top: 8px; font-size: .84rem; color: var(--ink);
+    direction: rtl; unicode-bidi: isolate;
+  }
+  .a-prog[hidden] { display: none; }
+  .a-drop .btn { min-height: 36px; padding: 4px 12px; font-size: .9rem; }
+
   .a-grid {
     display: grid; gap: 14px;
     grid-template-columns: repeat(auto-fill, minmax(150px, 1fr));
@@ -65,6 +74,18 @@
     background: var(--accent); color: #fff; border-radius: 999px;
     font-size: .64rem; line-height: 1; padding: 4px 7px;
   }
+  /* multi-select tick (spec 10 §D-1). Sits opposite the «מפוסט» badge so the
+     two never overlap, and carries its own plate — a bare checkbox over a
+     photo is invisible on light images. */
+  .a-pick {
+    position: absolute; inset-block-start: 6px; inset-inline-end: 6px;
+    background: var(--paper); border: 1px solid var(--line);
+    border-radius: 8px; padding: 3px 4px; line-height: 0; cursor: pointer;
+  }
+  .a-pick--on { border-color: var(--accent); background: var(--accent); }
+  .a-pick input { width: 16px; height: 16px; margin: 0; cursor: pointer; accent-color: var(--accent); }
+  .a-pick--on input { accent-color: #fff; }
+
   .a-meta { padding: 8px 10px 10px; display: flex; flex-direction: column; gap: 4px; }
   .a-name {
     font-weight: 700; font-size: .88rem; overflow-wrap: anywhere;

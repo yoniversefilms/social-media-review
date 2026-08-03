@@ -584,6 +584,22 @@ node scripts/publish-meta.mjs --live     <span class="c"># actually publishes, u
       <tr><td><code>node scripts/publish-meta.mjs</code> <span class="bk-muted">(<code>--live</code> · <code>--post &lt;id&gt;</code> · <code>--include-future</code> · <code>--local</code> · <code>--assume-public</code>)</span></td>
         <td>Consume queued <code>sm_publish</code> rows. Dry-run by default;
           <code>--live</code> only on the operator's say-so.</td></tr>
+      <tr><td><b>ארכיון</b> — <code>node scripts/archive-sync.mjs</code> <span class="bk-muted">(<code>--status</code> · <code>--push</code> · <code>--dry-run</code> · <code>--board &lt;key&gt;</code> · <code>--remote &lt;spec&gt;</code>)</span></td>
+        <td><b>Drive is the archive; Supabase stays the serving layer.</b> Wraps
+          <b>rclone</b> (operator installs once: <code>brew install rclone</code>
+          then <code>rclone config</code> → a Google&nbsp;Drive remote named
+          <code>archive</code>; OneDrive is the same tool with a different remote
+          type and needs no code change — pass <code>--remote onedrive</code>).
+          <code>--push</code> lists <code>sm-assets</code> +
+          <code>sm-photos</code> with the service role, stages them under
+          <code>archive-cache/</code>, then copies them plus the local
+          <code>exports/</code> dir to
+          <code>archive:SocialMediaReview/&lt;board&gt;/…</code>. It uses
+          <code>rclone copy</code>, never <code>sync</code> — an archive keeps
+          everything, and nothing is ever deleted on the remote. Runs
+          <b>factory-side only</b>: no browser code talks to Drive, and there is
+          deliberately no in-app Google OAuth. <code>--status</code> compares
+          cloud vs staged vs archive and prints the last push.</td></tr>
       <tr><td><code>node render.mjs</code> <span class="bk-muted">(<code>--only &lt;substr&gt;</code> · <code>--templates</code> · <code>--content</code>)</span></td>
         <td>Studio renderer — run <b>inside the studio dir</b>
           (<code>../Claude_JFCS/New_Workflow/studio</code>) after content

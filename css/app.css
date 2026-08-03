@@ -795,3 +795,78 @@ hr, .rule {
 @media (max-width: 720px) {
   .gen-tiles { grid-template-columns: repeat(2, 1fr); }
 }
+
+/* ===== v2.5.1 files & export (spec 10a) ===== */
+/* The export dialog's controls. They live in the SHARED sheet, not in
+   assets.html's page block, because spec 10 §D-2 gives the post download modal
+   the same format / quality / size row — one look, one place to change it. */
+
+/* `.field { display: flex }` is an AUTHOR rule and `[hidden] { display: none }`
+   is a UA rule, so the author rule wins and el.hidden = true does nothing at
+   all — the JPEG quality row stayed on screen under PNG, with no error and
+   nothing in the DOM to suggest why. Any element with an author `display` needs
+   its own hidden rule; `.field[hidden]` outranks `.field` without !important. */
+.field[hidden] { display: none; }
+
+.xp-range { display: flex; align-items: center; gap: 10px; }
+.xp-range input[type="range"] { flex: 1; min-width: 140px; accent-color: var(--accent); }
+/* The number is a Latin run in an RTL line: isolate it or it swaps sides with
+   its label the moment it goes from 90 to 100 (ENGINEERING-NOTES §6 family). */
+.xp-qnum {
+  unicode-bidi: isolate; direction: ltr;
+  min-width: 3ch; text-align: center;
+  font-variant-numeric: tabular-nums; color: var(--ink);
+}
+.xp-status { min-height: 1.2em; }
+.xp-status:empty { display: none; }
+
+/* The per-file failure list — folder upload and multi-export share it. Names
+   are filesystem paths (Latin, often long): they get their own scroll box so
+   the modal never pushes the page sideways. */
+.xp-fails {
+  margin: 8px 0 0; padding-inline-start: 18px;
+  max-height: 40vh; overflow: auto;
+  font-size: .86rem; line-height: 1.6;
+}
+.xp-fails li { margin: 2px 0; overflow-wrap: anywhere; }
+.xp-fails .ltr { unicode-bidi: isolate; direction: ltr; }
+
+/* ===== v2.5.1 fal pipeline (spec 09) ===== */
+/* Three surfaces, all of them RTL like the rest of the app:
+   · .ai-gen   — the «ליצור איורים חדשים» switch on create-ai.html (§D)
+   · .gen-modes — יחיד / אצווה in the photos route (§C)
+   · .gen-prog — the batch progress bar (§C)
+   Nothing here restyles an existing class; this section only adds. */
+
+/* ---- §D: the image-generation switch ---- */
+/* Boxed, not inline: this is the one control in the app that spends money, and
+   it should not read as one more checkbox in a row of preferences. */
+.ai-gen {
+  margin-top: 14px; padding: 12px 14px;
+  border: 1px solid var(--line); border-radius: 10px;
+  background: var(--bg);
+}
+.ai-gen .ai-check { font-weight: 600; }
+.ai-gen .ai-hint { margin: 6px 0 0; }
+
+/* ---- §C: mode chips + the batch progress bar ---- */
+.gen-modes { margin-bottom: 10px; }
+
+.gen-prog { margin: 10px 0; }
+.gen-prog__track {
+  height: 8px; border-radius: 999px; overflow: hidden;
+  background: var(--line);
+}
+/* The fill grows from the INLINE START, which in this RTL app is the right
+   edge — so the bar fills the way the text reads. */
+.gen-prog__fill {
+  height: 100%; width: 0; background: var(--accent);
+  border-radius: 999px; transition: width .25s ease;
+}
+.gen-prog__txt {
+  margin-top: 6px; font-size: .82rem; color: var(--ink-soft);
+  display: flex; gap: 8px; flex-wrap: wrap; align-items: baseline;
+}
+/* «3/12» is a Latin fraction inside a Hebrew sentence: isolate it or the
+   bidi algorithm reorders it to «12/3». */
+.gen-prog__txt .ltr { direction: ltr; unicode-bidi: isolate; font-variant-numeric: tabular-nums; }
