@@ -33,7 +33,7 @@ import {
   el, modal, toast, fmtDate, fmtWhen, toLocalInput, fromLocalInput, voteGlyph,
   stageLabel, categoryLabel, STAGES, navBar, zoomControl,
 } from './ui.js';
-import { initCompose, mountSlide, manifest } from './compose.js';
+import { initCompose, mountSlide, manifest, composeSlideHTML } from './compose.js';
 // v2.3 «English translation panel» — the ONE hash implementation, shared
 // verbatim with scripts/ingest.mjs and the factory's studio/translate.mjs.
 // Never re-implement it here: two implementations is precisely the
@@ -63,6 +63,11 @@ const S = {
   pinMode: false,
   live: false,
   composeReady: false,
+  // compose booted (tokens+manifest) is NOT compose painted — the first
+  // slide's template/SVG fetches are still in flight at composeReady. The PNG
+  // layer stays on top until this flips (first successful mountSlide into
+  // composeHost), or the reviewer sees a white frame for the whole fetch.
+  composeMounted: false,
   votes: [],
   pins: [],
   repliesByPin: new Map(),
@@ -1168,12 +1173,27 @@ function goTo(i) {
 function renderViewer() {
   const n = slideTotal();
   const img = $('slideImg');
+
+  // v1.7: live compose is not a mode the reviewer picks any more. Under v1.5
+  // every edit lands in the shared slides immediately, so for an edited post
+  // the studio PNG is stale by definition — the browser-composed render IS
+  // the post. The PNG survives only as the fallback when there is no slides
+  // data or compose failed to load.
+  S.live = hasSlidesData() && !S.composeFailed && S.composeReady;
+
   // v2.3: for an uploaded re-render the studio PNG does not exist (and would
   // show the pre-upload artwork if it did) — the fallback layer is the
   // uploaded file itself, so the two layers agree even when compose is down.
-  const cur = (S.slides || [])[S.cur];
-  const url = isImageSlide(cur) ? String(cur.image) : slideUrl(S.post, S.cur);
-  if (img.getAttribute('src') !== url) { $('frame').classList.remove('noimg'); img.src = url; }
+  //
+  // The PNG is fetched ONLY while it is (or may become) the visible layer —
+  // before the first compose mount, or when compose is down. Once the live
+  // compose covers the frame, a slide flip must not restart a 0.5–1MB storage
+  // download for an image nobody can see.
+  if (!S.live || !S.composeMounted) {
+    const cur = (S.slides || [])[S.cur];
+    const url = isImageSlide(cur) ? String(cur.image) : slideUrl(S.post, S.cur);
+    if (img.getAttribute('src') !== url) { $('frame').classList.remove('noimg'); img.src = url; }
+  }
   img.alt = `שקף ${S.cur + 1}`;
   renderDesignBtn();
 
@@ -1187,12 +1207,6 @@ function renderViewer() {
   }));
   $('slideCount').textContent = `שקף ${S.cur + 1} מתוך ${n}`;
 
-  // v1.7: live compose is not a mode the reviewer picks any more. Under v1.5
-  // every edit lands in the shared slides immediately, so for an edited post
-  // the studio PNG is stale by definition — the browser-composed render IS
-  // the post. The PNG survives only as (a) the fallback when there is no
-  // slides data or compose failed to load, and (b) the compare button.
-  S.live = hasSlidesData() && !S.composeFailed && S.composeReady;
   $('composeHost').hidden = !S.live;
   if (S.live) {
     if (designMode()) mountDesignSoon(0);
@@ -1206,6 +1220,9 @@ function renderViewer() {
 
   // lazy, once per page: bring compose up, then re-render into it
   if (hasSlidesData() && !S.composeReady && !S.composeFailed) bootCompose();
+
+  // only when the PNGs ARE the content — never while compose is merely booting
+  if (!hasSlidesData() || S.composeFailed) warmNeighborPngs();
 }
 
 // ------------------------------------------------ live preview (compose)
@@ -1235,7 +1252,11 @@ function bootCompose() {
 // surfaces only when there is nothing to compose (no slides data) or when a
 // compose failed — a fallback, never a user-facing choice.
 function applyCompare() {
-  $('frame').classList.toggle('pngtop', !S.live);
+  // Not !S.live alone: at composeReady only tokens+manifest have landed — the
+  // first slide's template and SVG fetches are still in flight. Dropping the
+  // PNG at that moment showed a white frame for the whole fetch (the on-load
+  // white flash). The PNG stays on top until a compose mount actually painted.
+  $('frame').classList.toggle('pngtop', !S.live || !S.composeMounted);
 }
 
 function mountPreviewSoon(delay = 300) {
@@ -1267,6 +1288,8 @@ async function mountPreview() {
     // overlay without destroying the controller)
     if (!S.live || designMode()) return;
     host.replaceChildren(tmp);
+    if (!S.composeMounted) { S.composeMounted = true; applyCompare(); }
+    warmNeighbors();
   } catch (e) {
     console.error('mountSlide failed', e);
     if (seq !== previewSeq) return;
@@ -1277,6 +1300,38 @@ async function mountPreview() {
     // throw. (See the boot() note above.)
     S.composeFailed = true;
     renderViewer();
+  }
+}
+
+// ------------------------------------------------ adjacent-slide prefetch
+// An arrow press used to pay a network round-trip on every first visit: the
+// next slide's template + illustration SVGs only started downloading after
+// the click. After each successful preview mount, both neighbors' fetches
+// are warmed into compose.js's in-memory caches (the composed HTML is
+// discarded); image slides warm the browser's image cache the same way.
+const warmedSlides = new Set();
+function warmNeighbors() {
+  if (!S.live) return;
+  for (const j of [S.cur + 1, S.cur - 1]) {
+    const s = (S.slides || [])[j];
+    if (!s || warmedSlides.has(j)) continue;
+    warmedSlides.add(j);
+    if (isImageSlide(s)) { new Image().src = String(s.image); continue; }
+    const composed = { template: s.template, vars: { ...s.vars } };
+    if (s.design) composed.design = s.design;
+    composeSlideHTML(composed).catch(() => {});
+  }
+}
+
+// PNG-fallback posts (no slides data, or compose down) flip between studio
+// PNGs — warm those instead, same one-shot-per-index discipline.
+const warmedPngs = new Set();
+function warmNeighborPngs() {
+  const n = slideTotal();
+  for (const j of [S.cur + 1, S.cur - 1]) {
+    if (j < 0 || j >= n || warmedPngs.has(j)) continue;
+    warmedPngs.add(j);
+    new Image().src = slideUrl(S.post, j);
   }
 }
 
@@ -1405,6 +1460,8 @@ async function mountDesign() {
     console.error('mountSlide (design) failed', e);
     return;
   }
+  // the editor's mount is a compose paint too — release the PNG layer
+  if (!S.composeMounted) { S.composeMounted = true; applyCompare(); }
   if (seq !== designSeq || !designMode()) return;
 
   // arm the editor (once per slide) — needs the {iframe, update, doc} handle

@@ -354,6 +354,9 @@ class SupabaseDriver {
         apikey: this.anon,
         Authorization: 'Bearer ' + this.anon,
         'Content-Type': file.type || 'application/octet-stream',
+        // uuid path = immutable object; without this storage serves `no-cache`
+        // and every board viewer re-downloads the photo on every visit
+        'cache-control': 'max-age=31536000',
       },
       body: file,
     });
@@ -382,6 +385,8 @@ class SupabaseDriver {
         apikey: this.anon,
         Authorization: 'Bearer ' + this.anon,
         'Content-Type': file.type || 'application/octet-stream',
+        // uuid path = immutable object (see uploadPhoto)
+        'cache-control': 'max-age=31536000',
       },
       body: file,
     });
@@ -534,6 +539,8 @@ class SupabaseDriver {
         apikey: this.anon,
         Authorization: 'Bearer ' + this.anon,
         'Content-Type': file.type || 'application/octet-stream',
+        // uuid path = immutable object (see uploadPhoto)
+        'cache-control': 'max-age=31536000',
       },
       body: file,
     });
