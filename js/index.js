@@ -56,7 +56,9 @@ const $ = (id) => document.getElementById(id);
   // click it). Never re-checked after boot — a role change mid-session does
   // not silently flip a toggle the reviewer may have set deliberately.
   waitingOnly = getRole() === 'marketing';
-  $('nav').replaceChildren(navBar('index'));
+  // v2.8: the gallery is the one long-scroll page here, so its nav folds away
+  // as you scroll down and returns on the way back up (or via the ⌄).
+  $('nav').replaceChildren(navBar('index', { collapsible: true }));
   wireToolbar();
   await refresh(true);
   subscribe(() => { refresh(false); });

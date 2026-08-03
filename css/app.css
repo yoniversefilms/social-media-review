@@ -146,9 +146,20 @@ img { max-width: 100%; display: block; }
   display: flex;
   gap: 4px;
   margin-inline-start: auto;
+  /* The eight tabs measure ~574px. Without these, the row forces the whole
+     PAGE wider than a phone viewport (scrollWidth 762 at a 402px width),
+     which makes Android-class browsers zoom the entire app out to fit.
+     min-width:0 lets this flex item shrink below its content width;
+     overflow-x lets the tabs scroll INSIDE it instead of pushing the
+     document. Found while measuring the mobile editing dock (v2.7). */
+  min-width: 0;
+  overflow-x: auto;
+  scrollbar-width: none;
 }
+.nav__links::-webkit-scrollbar { display: none; }
 
 .nav__link {
+  flex: none;
   display: inline-flex;
   align-items: center;
   min-height: 40px;
@@ -161,6 +172,60 @@ img { max-width: 100%; display: block; }
 .nav__link--on { color: var(--accent); background: color-mix(in srgb, var(--accent) 9%, transparent); }
 
 .nav__me { max-width: 20ch; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+
+/* ── collapse on scroll (v2.8) — opt-in per page via navBar(_, {collapsible})
+   Folded, the header keeps ONE line: the ⌄ control and the board name. The
+   tabs and chips collapse to zero height rather than display:none, so the
+   open/close is animatable and the links stay in the accessibility tree with
+   aria-expanded telling the truth. Grid rows would be cleaner but the nav is
+   a flex row shared by nine pages — max-height keeps this change additive. */
+.nav--collapsible { transition: padding .18s ease; }
+.nav__expand {
+  flex: none;
+  appearance: none;
+  border: 1px solid transparent;
+  background: none;
+  cursor: pointer;
+  width: 30px; height: 30px;
+  border-radius: 8px;
+  font-size: 1rem; line-height: 1;
+  color: var(--ink-soft);
+  display: flex; align-items: center; justify-content: center;
+  transition: transform .18s ease, background .12s ease, color .12s ease;
+}
+.nav__expand:hover { background: var(--wash); color: var(--ink); }
+.nav--collapsible.is-folded { padding-top: 4px; padding-bottom: 4px; }
+.nav--collapsible.is-folded .nav__expand { transform: rotate(180deg); }
+.nav--collapsible.is-folded .nav__links,
+.nav--collapsible.is-folded .nav__role,
+.nav--collapsible.is-folded .nav__me,
+.nav--collapsible.is-folded .nav__theme {
+  max-height: 0;
+  opacity: 0;
+  overflow: hidden;
+  pointer-events: none;
+  margin-block: 0;
+  padding-block: 0;
+  border-width: 0;
+}
+.nav--collapsible .nav__links,
+.nav--collapsible .nav__role,
+.nav--collapsible .nav__me,
+.nav--collapsible .nav__theme {
+  max-height: 44px;
+  transition: max-height .18s ease, opacity .14s ease;
+}
+/* Folded, the board name is the whole header — let it use the width the
+   tabs gave up instead of staying clipped at 34ch. */
+.nav--collapsible.is-folded .nav__board { max-width: none; }
+@media (prefers-reduced-motion: reduce) {
+  .nav--collapsible,
+  .nav--collapsible .nav__expand,
+  .nav--collapsible .nav__links,
+  .nav--collapsible .nav__role,
+  .nav--collapsible .nav__me,
+  .nav--collapsible .nav__theme { transition: none; }
+}
 
 /* Theme toggle (dark mode 2026-08-02) — sits at the nav's inline end. */
 .nav__theme {
