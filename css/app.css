@@ -498,3 +498,300 @@ hr, .rule {
 @media (prefers-reduced-motion: reduce) {
   * { animation: none !important; transition: none !important; }
 }
+
+/* ===== v2.5 create-ai (spec 08) ===== */
+/* «יצירה עם AI»: the request form (create-ai.html) plus the «איך זה נוצר»
+   transparency block, which post.html mounts too — one stylesheet section for
+   both, so the block cannot look like two different features. RTL-first, same
+   tokens as everything above; nothing here overrides a shared class. */
+
+.ai-wrap { max-width: 1180px; margin: 0 auto; padding: 0 20px 64px; }
+
+.ai-head { padding: 22px 0 6px; max-width: 62ch; }
+.ai-head h1 { margin: 0 0 8px; font-size: 1.5rem; }
+.ai-lede { margin: 0 0 12px; color: var(--ink-soft); line-height: 1.6; }
+
+/* The honest-latency statement. Deliberately loud and permanent — the spec
+   forbids implying this is instant, and a note that scrolls away is an
+   implication. */
+.ai-honest {
+  margin: 0;
+  padding: 12px 14px;
+  border-inline-start: 3px solid var(--accent);
+  border-radius: 0 var(--radius) var(--radius) 0;
+  background: color-mix(in srgb, var(--accent) 6%, var(--paper));
+  color: var(--ink);
+  font-size: .9rem;
+  line-height: 1.6;
+}
+.ai-honest b { color: var(--accent); }
+
+.ai-modes { display: flex; gap: 2px; margin: 20px 0 0; border-bottom: 1px solid var(--line); }
+.ai-mode {
+  appearance: none; background: none; border: none; cursor: pointer;
+  font: inherit; color: var(--ink-soft); padding: 8px 16px 10px;
+  border-bottom: 2px solid transparent;
+}
+.ai-mode:hover { color: var(--ink); }
+.ai-mode.is-on { color: var(--accent); border-bottom-color: var(--accent); font-weight: 600; }
+
+.ai-main {
+  display: grid; grid-template-columns: minmax(0, 1fr) 340px;
+  gap: 22px; align-items: start; padding-top: 18px;
+}
+@media (max-width: 900px) { .ai-main { grid-template-columns: 1fr; } }
+
+.ai-form { padding: 18px; }
+.ai-formbody { display: flex; flex-direction: column; gap: 18px; }
+.ai-field { margin: 0; }
+.ai-hint { margin: 6px 0 0; font-size: .8rem; color: var(--ink-soft); line-height: 1.5; }
+
+.ai-select, .ai-num {
+  padding: 7px 10px; border: 1px solid var(--line); border-radius: 8px;
+  background: var(--paper); color: var(--ink); font: inherit; cursor: pointer;
+}
+.ai-num { width: 96px; cursor: text; }
+
+.ai-check { display: flex; align-items: center; gap: 8px; font-size: .9rem; margin-bottom: 8px; }
+.ai-check input { width: 16px; height: 16px; }
+
+.ai-more { border: 1px solid var(--line); border-radius: var(--radius); padding: 10px 12px; }
+.ai-more > summary { cursor: pointer; font-weight: 600; font-size: .92rem; }
+.ai-more[open] > summary { margin-bottom: 10px; }
+
+.ai-rows { display: flex; flex-direction: column; gap: 10px; }
+.ai-row {
+  display: flex; align-items: flex-start; gap: 8px;
+  padding: 8px; border: 1px solid var(--line); border-radius: 10px; background: var(--paper);
+}
+.ai-row textarea, .ai-row .field__input { flex: 1 1 auto; min-width: 0; }
+.ai-row__n {
+  flex: 0 0 auto; width: 22px; height: 22px; margin-top: 6px;
+  display: flex; align-items: center; justify-content: center;
+  border-radius: 999px; background: var(--line); color: var(--ink-soft);
+  font-size: .78rem;
+}
+.ai-x {
+  appearance: none; border: none; background: none; cursor: pointer; font: inherit;
+  color: var(--ink-soft); padding: 4px 6px; border-radius: 6px; margin-top: 4px;
+}
+.ai-x:hover { background: var(--line); color: var(--ink); }
+.ai-x:disabled { opacity: .3; cursor: default; }
+.ai-add { align-self: flex-start; }
+
+.ai-submit { display: flex; align-items: center; gap: 14px; flex-wrap: wrap; }
+.ai-submit .ai-hint { margin: 0; max-width: 44ch; }
+
+/* ---- the status column ---- */
+.ai-side__h { margin: 0 0 10px; font-size: 1rem; }
+.ai-reqs { display: flex; flex-direction: column; gap: 12px; }
+.ai-req { padding: 12px; display: flex; flex-direction: column; gap: 8px; }
+.ai-req__head { display: flex; align-items: center; gap: 8px; flex-wrap: wrap; }
+.ai-req__kind { font-size: .78rem; color: var(--ink-soft); }
+.ai-req__when { font-size: .76rem; color: var(--ink-soft); margin-inline-start: auto; }
+.ai-req__what {
+  margin: 0; font-size: .88rem; line-height: 1.5;
+  display: -webkit-box; -webkit-line-clamp: 3; -webkit-box-orient: vertical; overflow: hidden;
+}
+
+/* Four states, four colours, no ambiguity: waiting is neutral, working is the
+   brand accent, done is the yes-green, failed is the no-red. */
+.ai-chip {
+  display: inline-block; padding: 3px 10px; border-radius: 999px;
+  font-size: .78rem; font-weight: 600;
+}
+.ai-chip--queued  { background: var(--line); color: var(--ink-soft); }
+.ai-chip--working { background: color-mix(in srgb, var(--accent) 14%, transparent);
+                    color: var(--accent); }
+.ai-chip--done    { background: color-mix(in srgb, var(--yes) 16%, transparent);
+                    color: color-mix(in srgb, var(--yes) 78%, var(--ink)); }
+.ai-chip--failed  { background: color-mix(in srgb, var(--no) 16%, transparent);
+                    color: color-mix(in srgb, var(--no) 78%, var(--ink)); }
+
+.ai-links { display: flex; flex-direction: column; gap: 4px; }
+.ai-postlink { font-size: .88rem; font-weight: 600; color: var(--accent); text-decoration: none; }
+.ai-postlink:hover { text-decoration: underline; }
+
+.ai-fail {
+  border-inline-start: 3px solid var(--no);
+  padding: 8px 10px; border-radius: 0 8px 8px 0;
+  background: color-mix(in srgb, var(--no) 6%, transparent);
+  font-size: .84rem; line-height: 1.5;
+}
+.ai-fail b { display: block; margin-bottom: 4px; color: var(--no); }
+.ai-fail p { margin: 0; }
+.ai-fail ul { margin: 6px 0 0; padding-inline-start: 18px; }
+
+/* ---- «איך זה נוצר» — shared with post.html ---- */
+.hm {
+  border: 1px solid var(--line); border-radius: var(--radius);
+  padding: 10px 12px; background: var(--paper);
+}
+.hm > summary { cursor: pointer; font-weight: 600; font-size: .9rem; color: var(--ink-soft); }
+.hm > summary:hover { color: var(--ink); }
+.hm[open] > summary { margin-bottom: 10px; }
+.hm-body { display: flex; flex-direction: column; gap: 12px; font-size: .84rem; }
+.hm-post { display: flex; flex-direction: column; gap: 6px; }
+.hm-post__t { font-size: .86rem; }
+.hm-list { margin: 0; padding-inline-start: 18px; display: flex; flex-direction: column; gap: 3px; }
+.hm-list code {
+  direction: ltr; unicode-bidi: plaintext;
+  background: var(--line); border-radius: 5px; padding: 1px 5px; font-size: .92em;
+}
+.hm-k { color: var(--ink-soft); margin-inline-end: 6px; }
+.hm-why { color: var(--maybe); }
+.hm-list--notes { color: var(--ink-soft); }
+
+/* the per-stage timeline (result.log) */
+.hm-log { margin: 6px 0 0; padding: 0; list-style: none; display: flex; flex-direction: column; gap: 2px; }
+.hm-log li { display: flex; align-items: baseline; gap: 8px; flex-wrap: wrap; }
+.hm-log__i { color: var(--yes); font-weight: 700; }
+.hm-log li.is-bad .hm-log__i { color: var(--no); }
+.hm-log__s { font-weight: 600; min-width: 9em; }
+.hm-log__ms { color: var(--ink-soft); font-size: .78rem; direction: ltr; unicode-bidi: plaintext; }
+.hm-log__d { color: var(--ink-soft); flex: 1 1 100%; padding-inline-start: 1.5em; }
+
+/* ---- the gallery author shelf (spec 08 §4) ---- */
+.g-authors { display: flex; gap: 6px; flex-wrap: wrap; align-items: center; }
+.g-authors__label { font-size: .8rem; color: var(--ink-soft); margin-inline-end: 2px; }
+
+/* ===== v2.5 image generation (spec 07) =====
+   Styles for app/js/generate.js — the «יצירת תמונות» tab. Appended at the END
+   of this file on purpose: the module is mounted from post.html today but owns
+   no markup there, and keeping its block last means it can never be split
+   across another section's anchors.
+
+   Everything is scoped under .gen. That scoping also lets the block re-declare
+   three helpers this module uses that are NOT global — .pv-note and .ltr live
+   in post.html's inline <style>, .a-row / .a-sub in assets.html's — so
+   generate.js renders correctly from any host page rather than silently losing
+   its muted text the first time someone mounts it somewhere else. Same values,
+   higher specificity, no visual change inside post.html. */
+
+.gen { display: flex; flex-direction: column; gap: 14px; }
+.gen-body { display: flex; flex-direction: column; gap: 14px; }
+
+/* re-declared helpers (see the note above) */
+.gen .pv-note { color: var(--ink-soft); font-size: .88rem; line-height: 1.55; }
+.gen .a-row { display: flex; gap: 8px; align-items: center; flex-wrap: wrap; }
+.gen .a-sub { color: var(--ink-soft); font-size: .8rem; }
+/* Latin runs inside RTL text need their own isolate, or "v2 · 1080×1350"
+   reorders on screen (the same bidi trap assets.js records). */
+.gen .ltr { unicode-bidi: isolate; direction: ltr; }
+
+/* ---- banner: what this tab can honestly do right now ---- */
+.gen-banner:empty { display: none; }
+.gen-note {
+  border: 1px solid var(--line); background: var(--paper); border-radius: var(--radius);
+  padding: 10px 12px; font-size: .88rem; line-height: 1.5; color: var(--ink);
+  display: flex; align-items: baseline; gap: 8px; flex-wrap: wrap;
+  margin-bottom: 8px;
+}
+.gen-note--dry { border-color: rgba(179, 153, 93, .5); background: rgba(179, 153, 93, .08); }
+.gen-note--err { border-color: rgba(179, 64, 58, .5); background: rgba(179, 64, 58, .07); }
+.gen-note--work { border-color: rgba(131, 0, 81, .35); background: rgba(131, 0, 81, .05); }
+.gen-sub { color: var(--ink-soft); }
+
+/* Purely decorative. The global prefers-reduced-motion rule above carries
+   !important, so it stops this spin and leaves a static ring — which is the
+   right outcome: the sentence beside it is what actually reports progress. */
+.gen-spin {
+  width: 13px; height: 13px; flex: 0 0 auto; border-radius: 50%;
+  border: 2px solid rgba(131, 0, 81, .25); border-top-color: var(--accent);
+  animation: gen-spin 900ms linear infinite;
+}
+@keyframes gen-spin { to { transform: rotate(360deg); } }
+
+/* ---- route chips + controls ---- */
+.gen-routes { display: flex; gap: 6px; flex-wrap: wrap; }
+.gen-controls { display: flex; gap: 12px; align-items: flex-end; flex-wrap: wrap; }
+.gen-controls .field { flex: 1 1 220px; margin: 0; }
+.gen-acts { display: flex; gap: 8px; align-items: center; flex-wrap: wrap; }
+.gen-grid2 { display: grid; grid-template-columns: repeat(auto-fit, minmax(190px, 1fr)); gap: 12px; }
+.gen-grid2 .field { margin: 0; }
+.gen-h { font-size: .95rem; margin: 4px 0 0; }
+.gen-lines { min-height: 92px; resize: vertical; line-height: 1.6; }
+.gen-range { display: flex; flex-direction: column; gap: 4px; }
+.gen-range input[type="range"] { width: 100%; accent-color: var(--accent); }
+
+/* the live «3 וריאציות לכל שורה» read-out under the input lines */
+.gen-hint { display: flex; gap: 6px; flex-wrap: wrap; align-items: baseline; }
+.gen-chip {
+  border: 1px solid var(--line); border-radius: 999px; padding: 1px 9px;
+  font-size: .78rem; color: var(--ink-soft); white-space: nowrap;
+}
+
+/* ---- the 9-up sheet and its tiles ---- */
+.gen-sheet {
+  width: 100%; max-width: 420px; display: block; border-radius: var(--radius);
+  border: 1px solid var(--line); background: #fff;
+}
+.gen-tiles { display: grid; grid-template-columns: repeat(3, 1fr); gap: 8px; }
+.gen-tiles--sm { grid-template-columns: repeat(auto-fill, minmax(96px, 1fr)); }
+.gen-tile {
+  border: 2px solid var(--line); border-radius: 10px; overflow: hidden; cursor: pointer;
+  background: var(--paper); display: flex; flex-direction: column;
+  transition: border-color .12s ease, box-shadow .12s ease;
+}
+.gen-tile:hover { border-color: rgba(36, 29, 32, .25); }
+/* The pick state has to read at a glance across nine cells, so it is a ring
+   AND a check mark — colour alone would fail for a reviewer who cannot see it. */
+.gen-tile.is-on { border-color: var(--accent); box-shadow: var(--shadow); }
+.gen-tile img {
+  width: 100%; aspect-ratio: 1 / 1; object-fit: contain; background: #fff; display: block;
+}
+.gen-tiles--sm .gen-tile img { object-fit: cover; }
+.gen-tile__meta {
+  display: flex; align-items: center; justify-content: space-between; gap: 6px;
+  padding: 5px 8px; font-size: .78rem; border-top: 1px solid var(--line);
+}
+.gen-tile__label {
+  overflow: hidden; text-overflow: ellipsis; white-space: nowrap; color: var(--ink-soft);
+}
+.gen-tile__mark { color: var(--accent); font-weight: 700; }
+
+/* ---- styles list ---- */
+.gen-styles { display: flex; flex-direction: column; gap: 10px; }
+.gen-style {
+  border: 1px solid var(--line); border-radius: var(--radius); background: var(--paper);
+  padding: 10px 12px; display: flex; flex-direction: column; gap: 6px;
+}
+.gen-style.is-off { opacity: .55; }
+.gen-style__head { display: flex; gap: 8px; align-items: center; flex-wrap: wrap; }
+.gen-style__notes { font-size: .86rem; }
+/* The scaffold is English and must render as such even inside an RTL panel —
+   without the isolate, a prompt that starts with a quote or a digit jumps. */
+.gen-style__prompt {
+  direction: ltr; unicode-bidi: isolate; text-align: left;
+  font-size: .78rem; color: var(--ink-soft); line-height: 1.5;
+  max-height: 5.4em; overflow: auto;
+  background: var(--bg); border-radius: 8px; padding: 6px 8px;
+}
+
+/* ---- derivation chain ---- */
+.gen-chain { display: flex; flex-direction: column; gap: 6px; }
+.gen-chain__row { display: flex; gap: 8px; overflow-x: auto; padding-bottom: 4px; }
+.gen-chain__step {
+  flex: 0 0 108px; border: 1px solid var(--line); border-radius: 10px;
+  padding: 6px; background: var(--paper); text-align: center;
+}
+.gen-chain__step.is-here { border-color: var(--accent); }
+.gen-chain__step img {
+  width: 100%; aspect-ratio: 1 / 1; object-fit: contain; background: #fff;
+  border-radius: 6px; display: block; margin-bottom: 4px;
+}
+
+/* ---- the dry-run plan ---- */
+/* Wide content scrolls inside its own box; the panel column must never scroll
+   sideways just because a fal URL is long. */
+.gen-plan {
+  direction: ltr; unicode-bidi: isolate; text-align: left;
+  font-family: ui-monospace, SFMono-Regular, Menlo, monospace; font-size: .74rem;
+  line-height: 1.5; background: var(--bg); border: 1px solid var(--line);
+  border-radius: 8px; padding: 10px; margin: 10px 0 0;
+  max-height: 46vh; overflow: auto; white-space: pre;
+}
+
+@media (max-width: 720px) {
+  .gen-tiles { grid-template-columns: repeat(2, 1fr); }
+}

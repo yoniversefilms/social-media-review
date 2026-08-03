@@ -202,6 +202,10 @@
       </div>
     </div>
     <div class="g-tabs" id="stage-tabs" role="tablist"></div>
+    <!-- author shelf (v2.5, spec 08): "their" shelf per therapist. Rendered
+         only when the board has posts carrying an author — a factory-only
+         board never grows an empty row of chips. Styles: css/app.css §v2.5. -->
+    <div class="g-authors" id="author-shelf" hidden></div>
   </header>
 
   <section class="g-progress" id="progress" hidden></section>

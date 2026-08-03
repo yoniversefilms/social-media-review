@@ -433,6 +433,11 @@
          beside it is the marketing hat's shortcut to the same action that
          always lives in the פרטים tab. Declared, never enforced. -->
     <div class="pv-approve" id="pvApprove"></div>
+    <!-- «איך זה נוצר» (v2.5, spec 08): present ONLY on origin='ai' posts.
+         Rendered by create-ai.js's mountHowMade() — one renderer shared with
+         create-ai.html, so the story a therapist reads here is the same story
+         they read there. Styles: css/app.css §v2.5. -->
+    <div class="pv-howmade" id="pvHowMade"></div>
     <!-- post-to-post navigation (prev/next within this post's category) -->
     <nav class="pv-nav" id="pvNav" aria-label="ניווט בין פוסטים"></nav>
   </div>
@@ -480,6 +485,28 @@
       <div class="pv-votebox" id="voteBox"></div>
       <div class="pv-tabs" id="tabs"></div>
       <div class="pv-body" id="tabBody"></div>
+
+      <!-- ===== v2.5 «יצירת תמונות» (spec 07) — no markup of its own =====
+           The image-generation suite is a TAB like every other one, rendered
+           into #tabBody above by post.js renderGenTab(). It deliberately has
+           no element declared here, and that is the whole design note worth
+           recording in this file:
+
+           app/js/generate.js owns a SINGLE root element that it builds once
+           and hands back on every render. renderActiveTab() calls
+           replaceChildren(), which would otherwise destroy an in-flight
+           generation — and a 4K sheet takes 20-120 seconds and costs real
+           money, so «I clicked הערות and lost my sheet» is not an acceptable
+           failure. Moving one persistent node in and out is what makes the
+           tab survivable; a <div id="genHost"> declared here would invite
+           someone to render into it instead and quietly undo that.
+
+           Styles live in css/app.css under the «v2.5 image generation»
+           section (the .gen-* block), not in this page's inline <style>,
+           because generate.js is mountable from any host page.
+           Secrets: none. FAL_KEY lives ONLY in the `generate` Edge Function;
+           nothing in app/ has ever seen it. -->
+
     </aside>
 
     <!-- edit mode (v2.1): the same column, editing chrome instead of review

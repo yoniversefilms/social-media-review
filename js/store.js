@@ -556,7 +556,11 @@ class SupabaseDriver {
       // 10s/60s polling below is what actually carries approval freshness.
       // Listed anyway so the day that changes needs no edit here.
       const tables = ['sm_posts', 'sm_votes', 'sm_pins', 'sm_replies', 'sm_edits',
-                      'sm_publish', 'sm_post_versions', 'sm_assets', 'sm_approvals'];
+                      'sm_publish', 'sm_post_versions', 'sm_assets', 'sm_approvals',
+                      // v2.5 (spec 08): same caveat as sm_approvals — anon
+                      // subscribers get nothing, the status of a generation
+                      // request rides the 10s/60s poll below.
+                      'sm_gen_requests'];
       for (const table of tables) {
         ch.on('postgres_changes',
           { event: '*', schema: 'public', table, filter: `board_key=eq.${this.board}` },
@@ -1815,4 +1819,425 @@ export function subscribe(fn) {
     notificationsStarted = true;
     need().startNotifications(notifyAll);
   }
+}
+
+// ---- generation requests (v2.5, spec 08) ----------------------------------
+// «יצירה עם AI»: the therapist writes what they want, this INSERTS a row, and
+// that is the entire client half. Nothing here generates anything and nothing
+// here can move a request forward — every status change and the whole `result`
+// payload are written by scripts/fulfill.mjs under the SERVICE role, on the
+// operator's machine, running their Claude subscription (spec 08 «the no-API
+// architecture»). Migration 026 makes that a GRANT, not a convention: anon
+// holds select + insert on sm_gen_requests and nothing else, so there is
+// deliberately no setGenStatus() below to match — a client function that
+// cannot exist server-side must not exist here either.
+//
+// Latency is therefore REAL and must be stated as such in the UI: minutes, and
+// only while the factory session is running. create-ai.js says so in words.
+// Progress rides the ordinary subscribe() cadence (10s/60s polling); realtime
+// delivers nothing to anon subscribers on a header-scoped board.
+//
+// Supabase table sm_gen_requests; LocalDriver mirrors via serve.mjs /api/gen
+// (+ the `gen` array in /api/state).
+
+export const GEN_STATUS_LABELS = {
+  queued: 'בתור',
+  working: 'נוצר עכשיו',
+  done: 'מוכן — בגלריה',
+  failed: 'לא הצלחנו',
+};
+
+// kind: 'post' | 'campaign' | 'style' (the migration's CHECK constraint).
+// The payload shape is the contract documented in scripts/fulfill.mjs.
+export async function createGenRequest({ kind, payload }) {
+  const me = await ensureName();
+  const k = ['post', 'campaign', 'style'].includes(kind) ? kind : 'post';
+  const row = {
+    kind: k,
+    payload: payload || {},
+    author: me.name,
+    author_id: me.author_id,
+  };
+  // status/result are left to their column defaults on purpose: sending
+  // status:'queued' from the browser would read as if the client owned the
+  // column, and one day someone would send a different value.
+  return need().insert(isLocal ? 'gen' : 'sm_gen_requests', row);
+}
+
+// The board's requests, newest first. Small table, one request — the status
+// list on create-ai.html re-reads it on every subscribe() tick.
+export async function listGenRequests() {
+  const d = need();
+  if (isLocal) return (await d.req('GET', '/gen')) || [];
+  return d.select('sm_gen_requests',
+    `select=*&board_key=eq.${enc(boardKey)}&order=created_at.desc`);
+}
+
+// One request by id (the status card polls this after submitting).
+export async function getGenRequest(id) {
+  const d = need();
+  if (isLocal) {
+    const rows = (await d.req('GET', `/gen?id=${enc(id)}`)) || [];
+    return rows[0] || null;
+  }
+  const rows = await d.select('sm_gen_requests',
+    `select=*&board_key=eq.${enc(boardKey)}&id=eq.${enc(id)}`);
+  return (rows && rows[0]) || null;
+}
+
+// PURE. The request that produced a given post, if any — post.js's
+// «איך זה נוצר» block asks this of the rows it already has, so a post page
+// never fans out per-request.
+//
+// Which row, when several mention the post: the one that BUILT it. A campaign
+// revision writes a later row about the same post, but its record carries only
+// what CHANGED (a version number, a conflict note) — it never re-records which
+// templates and drawings the post is made of, and «איך זה נוצר» is asking
+// exactly that. So a row carrying `templates` beats a newer row without one;
+// among equals, newest wins. The revision is not lost by this: it is a
+// numbered row in the sm_post_versions trail, which is where a change belongs.
+export function genRequestForPost(rows, postId) {
+  let best = null;
+  let bestRich = false;
+  for (const r of rows || []) {
+    const mine = ((r && r.result && r.result.posts) || [])
+      .find((p) => p && p.post_id === postId);
+    if (!mine) continue;
+    const rich = Array.isArray(mine.templates) && mine.templates.length > 0;
+    if (!best
+        || (rich && !bestRich)
+        || (rich === bestRich && String(r.created_at) > String(best.created_at))) {
+      best = r;
+      bestRich = rich;
+    }
+  }
+  return best;
+}
+
+// PURE. Every campaign this board knows about, newest first —
+// {campaign_id, title, posts:[…], created_at, author}. Derived from request
+// results rather than stored anywhere: the campaign is not a table, it is what
+// the fulfiller recorded, and deriving it means a revision can never disagree
+// with the requests that built it.
+export function campaignsFrom(rows) {
+  const out = new Map();
+  for (const r of rows || []) {
+    const res = r && r.result;
+    const id = res && res.campaign_id;
+    if (!id) continue;
+    const prev = out.get(id) || { campaign_id: id, posts: [], created_at: r.created_at, author: r.author };
+    for (const p of res.posts || []) {
+      if (p && p.post_id && !prev.posts.some((q) => q.post_id === p.post_id)) prev.posts.push(p);
+    }
+    if (String(r.created_at) < String(prev.created_at)) prev.created_at = r.created_at;
+    out.set(id, prev);
+  }
+  return [...out.values()].sort((a, b) => String(b.created_at).localeCompare(String(a.created_at)));
+}
+
+// PURE. The gallery's author shelf (spec 08 §4): every name that authored a
+// post on this board, with a count, most posts first. `author` is the only
+// identity sm_posts carries — migration 026 deliberately did NOT add an
+// author_id column — so this groups by the display name, which is also what
+// the shelf shows.
+export function authorShelf(posts) {
+  const counts = new Map();
+  for (const p of posts || []) {
+    const a = String((p && p.author) || '').trim();
+    if (!a) continue;
+    counts.set(a, (counts.get(a) || 0) + 1);
+  }
+  return [...counts.entries()]
+    .map(([author, n]) => ({ author, n }))
+    .sort((a, b) => b.n - a.n || a.author.localeCompare(b.author));
+}
+
+// ---- image generation (v2.5, spec 07) ----
+// Everything the «יצירת תמונות» tab needs. app/js/generate.js owns the UI and
+// never talks to a backend itself — this section is the whole surface.
+//
+// TWO BACKENDS, on purpose:
+//   · fal.ai work (sheets, photos, tracing, restyle) goes through the
+//     `generate` EDGE FUNCTION, because FAL_KEY must never reach the browser.
+//     Same shape as callPublisher: cloud only, throws in local mode.
+//   · styles and derived-asset rows are ordinary PostgREST writes with the
+//     board key, because they carry no secret. sm_styles' anon grant is
+//     column-scoped (migration 025) to exactly what updateStyle sends.
+//
+// MIGRATION 025 IS A FILE, NOT AN APPLIED MIGRATION, as of 2026-08-02. Every
+// read here degrades honestly when it is missing rather than throwing an
+// opaque error at a therapist: listStyles() returns [] and says so once,
+// saveDerivedAsset() drops the lineage columns and saves the asset anyway.
+// Losing the trail must never cost someone their picture.
+
+// The dimension presets, twinned with DIMS in supabase/functions/generate/index.ts.
+// Keep the KEYS identical — the browser sends the key and the function looks it
+// up; a key only one side knows is a refusal the reviewer cannot act on.
+export const GEN_DIMS = [
+  { key: '1080x1350', w: 1080, h: 1350, label: 'פוסט 4:5 · 1080×1350' },
+  { key: '1080x1080', w: 1080, h: 1080, label: 'ריבוע · 1080×1080' },
+  { key: '1920x1080', w: 1920, h: 1080, label: 'רוחב 16:9 · 1920×1080' },
+  { key: '1080x1920', w: 1080, h: 1920, label: 'סטורי 9:16 · 1080×1920' },
+];
+
+// PostgREST answers a missing TABLE with 404 + PGRST205 (and, on some
+// versions, SQLSTATE 42P01). That — and only that — is what "the migration is
+// not applied yet" looks like from here. Anything else propagates: offline,
+// RLS, an expired key and a missing table must not read the same.
+function missingTable(e) {
+  if (!e) return false;
+  const code = String(e.code || '');
+  if (code === 'PGRST205' || code === '42P01') return true;
+  return e.status === 404 && /does not exist|could not find the table/i.test(String(e.message || ''));
+}
+
+let genMigrationReported = false;
+function reportGenMigration(what) {
+  if (genMigrationReported) return;
+  genMigrationReported = true;
+  console.error(
+    `migration 025 (sm_styles + sm_assets.parent_id/derived) is not applied — ${what}. ` +
+    'The generation tab loads in a reduced state: no styles, no derivation trail. ' +
+    'Apply migrations/025-sm-styles-and-generated-assets.sql.');
+  toast('מיגרציה 025 עדיין לא הוחלה — הסגנונות ושרשרת הגזירה לא זמינות', 'err');
+}
+
+/**
+ * The `generate` Edge Function. Mirrors callPublisher: the board key is the
+ * capability, `operator_key` is a SECOND secret the operator's browser holds
+ * (it lifts the function's per-board daily image budget). Cloud only.
+ *
+ * modes: 'plan' (capability report, touches nothing) | 'illustration' |
+ *        'illustration-pick' | 'photo' | 'convert'
+ * Pass `dry: true` on any mode to get the exact fal calls back without
+ * spending anything, even when the function is live.
+ */
+export async function callGenerator({ mode = 'plan', operator_key = '', ...payload } = {}) {
+  if (isLocal) {
+    throw new Error('יצירת תמונות לא זמינה במצב מקומי — היא רצה בענן (Edge Function)');
+  }
+  const base = String(cfg().supabaseUrl || '').replace(/\/$/, '');
+  if (!base) throw new Error('חסר supabaseUrl ב-config.js');
+  const res = await fetch(base + '/functions/v1/generate', {
+    method: 'POST',
+    headers: {
+      'Content-Type': 'application/json',
+      'x-board-key': boardKey,
+      ...(operator_key ? { 'x-operator-key': operator_key } : {}),
+    },
+    body: JSON.stringify({ ...payload, mode }),
+  });
+  const body = await res.json().catch(() => null);
+  if (!res.ok) {
+    const msg = (body && (body.error || body.message)) || `HTTP ${res.status}`;
+    const err = new Error(msg);
+    err.status = res.status;
+    err.body = body;
+    throw err;
+  }
+  return body;
+}
+
+/* ---- styles (sm_styles, migration 025) ---- */
+
+// Oldest FIRST: the seeded house style should sit at the top of the dropdown,
+// and created_at.asc is what puts it there.
+export async function listStyles() {
+  if (isLocal) return [];
+  try {
+    return (await need().select('sm_styles',
+      `select=*&board_key=eq.${enc(boardKey)}&order=created_at.asc`)) || [];
+  } catch (e) {
+    if (missingTable(e)) { reportGenMigration('listStyles() returned nothing'); return []; }
+    throw e;
+  }
+}
+
+export async function createStyle({ kind, name, prompt_en, notes, refs } = {}) {
+  if (isLocal) throw new Error('סגנונות נשמרים בענן בלבד');
+  if (!['illustration', 'photo'].includes(kind)) throw new Error('סוג סגנון לא חוקי');
+  const clean = String(name || '').trim();
+  if (!clean) throw new Error('לסגנון צריך שם');
+  const me = await ensureName();
+  return need().insert('sm_styles', {
+    kind,
+    name: clean,
+    prompt_en: String(prompt_en || '').trim(),
+    notes: String(notes || '').trim(),
+    refs: Array.isArray(refs) ? refs : [],
+    version: 1,
+    archived: false,
+    author: me.name,
+    author_id: me.author_id,
+  });
+}
+
+/**
+ * Edit a style. `version` is bumped by the CALLER's intent, not silently here:
+ * every generated asset records the (style_id, style_version) that produced it,
+ * so a wording change that does not move the version makes old assets claim a
+ * scaffold that no longer exists. generate.js bumps whenever prompt_en changes
+ * and leaves it alone for a rename or a note.
+ *
+ * Only the columns in migration 025's `grant update (…)` list are sendable —
+ * PostgREST rejects the WHOLE statement if one column falls outside the grant
+ * (probed live on sm_posts: 401 `42501 permission denied for table`), so this
+ * filters rather than trusting the caller and half-saving.
+ */
+const STYLE_EDITABLE = ['name', 'prompt_en', 'notes', 'refs', 'version', 'archived'];
+export async function updateStyle(id, fields = {}) {
+  if (isLocal) throw new Error('סגנונות נשמרים בענן בלבד');
+  const patch = {};
+  for (const k of STYLE_EDITABLE) if (fields[k] !== undefined) patch[k] = fields[k];
+  if (!Object.keys(patch).length) throw new Error('אין מה לעדכן');
+  return need().update('sm_styles',
+    `board_key=eq.${enc(boardKey)}&id=eq.${enc(id)}`, patch);
+}
+
+// There is no DELETE grant and no DELETE policy on sm_styles, deliberately: a
+// style id is stamped into the `derived` of every asset it produced, so
+// deleting one would orphan history. Archiving takes it out of the dropdown.
+export function archiveStyle(id, archived = true) {
+  return updateStyle(id, { archived: !!archived });
+}
+
+/**
+ * «יצירת סגנון מרפרנסים» — deriving a prompt scaffold from a Pinterest board or
+ * screenshots is a VISION task, and spec 07 routes it through the generation
+ * request queue rather than an Edge Function: the request queues, the
+ * operator's local Claude session reads the references and writes the style row.
+ * That keeps vision + prompt-craft inside the factory where the voice gate is.
+ *
+ * WIRED, PENDING 08. This delegates to createGenRequest() above — spec 08 owns
+ * `sm_gen_requests` and migration 026, and two writers of one table with two
+ * payload shapes is exactly the drift both specs exist to avoid. Migration 026
+ * is also a file only right now, so a missing table is turned into a
+ * distinguishable `err.pending08` the UI states in words instead of a stack
+ * trace. Nothing here creates that table.
+ */
+export async function requestStyleFromRefs({ kind, name, notes, refs } = {}) {
+  if (isLocal) throw new Error('בקשות סגנון נשמרות בענן בלבד');
+  try {
+    return await createGenRequest({
+      kind: 'style',
+      payload: {
+        style_kind: kind,
+        name: String(name || '').trim(),
+        notes: String(notes || '').trim(),
+        refs: Array.isArray(refs) ? refs : [],
+      },
+    });
+  } catch (e) {
+    if (missingTable(e)) {
+      const err = new Error('תור הבקשות עדיין לא הותקן בשרת (מיגרציה 026) — הסגנון לא נשמר');
+      err.pending08 = true;
+      throw err;
+    }
+    throw e;
+  }
+}
+
+/* ---- derived assets (client-baked crops, fades, and anything downstream) ---- */
+
+/**
+ * Save an asset the BROWSER produced from another asset — the exact-pixel crop
+ * and the feathered edge fade that generate.js bakes on <canvas>.
+ *
+ * Why the browser and not the Edge Function: a fade is a deterministic alpha
+ * mask, so asking fal for one would cost money for a result canvas gives away,
+ * and it would not be re-derivable afterwards. The recipe rides in `derived`
+ * so the fade can be changed or removed later by re-baking from `parent_id` —
+ * which is also why the unfaded original stays in the library rather than
+ * being replaced by its faded child.
+ *
+ * NOTHING HERE TOUCHES THE COMPOSE PATH. The fade is baked into the PNG's own
+ * alpha channel, so the result is an ordinary photo as far as compose.js and
+ * render.mjs are concerned. The twin PARITY BLOCK is not involved, gains no
+ * new extra type, and must not.
+ */
+export async function saveDerivedAsset({ file, kind, label, tags, post_id, parent_id, derived } = {}) {
+  if (!file) throw new Error('לא נוצר קובץ');
+  const me = await ensureName();
+  const dim = await measure(file);
+  const base = {
+    kind: kind || 'photo',
+    source: 'generated',
+    name: file.name || 'derived.png',
+    mime: file.type || 'image/png',
+    width: dim.width, height: dim.height, bytes: file.size || null,
+    label: label || '',
+    tags: Array.isArray(tags) ? tags : [],
+    post_id: post_id || null,
+    author: me.name,
+    author_id: me.author_id,
+  };
+  const dir = post_id || 'library';
+  const d = need();
+  if (isLocal) {
+    // The local mirror has no lineage columns; it still stores the bytes, so
+    // the canvas bake is exercisable offline.
+    const res = await d.uploadAssetFull(file, dir, base);
+    return { url: res.url, row: res.row };
+  }
+  const storage_path = await d.uploadAssetBytes(file, dir);
+  const full = { ...base, storage_path, parent_id: parent_id || null, derived: derived || null };
+  try {
+    const saved = await d.insertAsset(full);
+    return { url: assetRowUrl(saved), row: saved };
+  } catch (e) {
+    // 42703 on parent_id/derived means migration 025 is unapplied. The bytes are
+    // already uploaded and the reviewer's work is real — save the asset without
+    // its lineage and SAY SO, rather than losing a picture over bookkeeping.
+    const missing = undefinedColumnName(e);
+    if (missing === 'parent_id' || missing === 'derived') {
+      reportGenMigration('the asset was saved WITHOUT its derivation trail');
+      const saved = await d.insertAsset({ ...base, storage_path });
+      return { url: assetRowUrl(saved), row: saved, lineage_dropped: true };
+    }
+    throw e;
+  }
+}
+
+/**
+ * PURE. The derivation chain around one asset: everything it came from, and
+ * everything that came from it.
+ *
+ *   assetChain(rows, id) -> { node, ancestors: [root … parent], descendants: [ … ] }
+ *
+ * `ancestors` is ordered root-first so the UI reads left-to-right as a history
+ * (original photo → restyled raster → traced drawing). `descendants` is
+ * breadth-first. Both walks are cycle-guarded: `parent_id` is a self-reference
+ * and a hand-edited row could point at itself.
+ */
+export function assetChain(rows, id) {
+  const byId = new Map((rows || []).map((a) => [a.id, a]));
+  const node = byId.get(id) || null;
+  const ancestors = [];
+  const seen = new Set([id]);
+  let cur = node;
+  while (cur && cur.parent_id && !seen.has(cur.parent_id)) {
+    seen.add(cur.parent_id);
+    const parent = byId.get(cur.parent_id);
+    if (!parent) break;
+    ancestors.unshift(parent);
+    cur = parent;
+  }
+  const kids = new Map();
+  for (const a of rows || []) {
+    if (!a.parent_id) continue;
+    if (!kids.has(a.parent_id)) kids.set(a.parent_id, []);
+    kids.get(a.parent_id).push(a);
+  }
+  const descendants = [];
+  const queue = [id];
+  const walked = new Set([id]);
+  while (queue.length) {
+    for (const child of kids.get(queue.shift()) || []) {
+      if (walked.has(child.id)) continue;
+      walked.add(child.id);
+      descendants.push(child);
+      queue.push(child.id);
+    }
+  }
+  return { node, ancestors, descendants };
 }

@@ -6,6 +6,9 @@ import {
   listPosts, listVotes, latestVotes, listAllPins, listAllVersions,
   listAllApprovals, approvalState, getRole,
   setStage, savePostOrder, subscribe,
+  // v2.5 (spec 08) — the author shelf. PURE helper: it just groups the posts
+  // this page already has, so the filter costs no request.
+  authorShelf,
 } from './store.js';
 import { initCompose, mountSlide } from './compose.js';
 import {
@@ -24,7 +27,11 @@ let versions = new Map();         // post_id -> [sm_post_versions row] vnum desc
 let approvalsByPost = new Map();  // post_id -> [sm_approvals row] (v2.3)
 let waitingOnly = false;          // «ממתינים לאישור שיווק» toggle (v2.3, plan §7)
 const viewing = new Map();        // post_id -> vnum | 'studio' (per-card VIEW state only)
-const filters = { cat: 'all', stage: 'all', sort: 'manual', q: '' };
+// `author` (v2.5, spec 08) is a fourth filter, composed with the other three:
+// 'all' or an exact sm_posts.author string. Posts with no author (everything
+// the studio shipped) are only ever hidden by picking a name — they are never
+// a bucket of their own, because "no author" is not a shelf.
+const filters = { cat: 'all', stage: 'all', sort: 'manual', q: '', author: 'all' };
 let refreshing = false;
 let arranging = false;            // «🔓 סידור חופשי» unlocked (manual sort, no filters)
 let dragging = false;             // a card is mid-drag right now
@@ -189,8 +196,10 @@ function wireToolbar() {
   wireArrange();
 }
 
-function matches(p, { skipCat = false, skipStage = false } = {}) {
+function matches(p, { skipCat = false, skipStage = false, skipAuthor = false } = {}) {
   if (!skipCat && filters.cat !== 'all' && p.category !== filters.cat) return false;
+  if (!skipAuthor && filters.author !== 'all'
+      && String(p.author || '') !== filters.author) return false;
   if (!skipStage) {
     // The waiting-on-marketing view IS the stage filter while it's on (its
     // own stage∉{parked,complete} clause, plan §7) — it composes with
@@ -206,7 +215,9 @@ function matches(p, { skipCat = false, skipStage = false } = {}) {
   return true;
 }
 
-function renderAll() { renderChips(); renderTabs(); renderProgress(); renderGrid(); syncToolbarState(); }
+function renderAll() {
+  renderChips(); renderTabs(); renderAuthors(); renderProgress(); renderGrid(); syncToolbarState();
+}
 
 // The sort dropdown has no effect while the waiting view forces its own
 // order — disable it rather than leave a control that silently does nothing.
@@ -229,6 +240,38 @@ function renderChips() {
   $('cat-chips').replaceChildren(
     chip('all', 'הכל'),
     ...cats.map((c) => chip(c.key, c.label)));
+}
+
+/* ── author shelf (v2.5, spec 08) ─────────────────────────────────────
+   «each therapist has "their" shelf». Built from the posts already on screen,
+   never from a separate request. It is a plain filter chip row — the same
+   composable shape as the category chips — and it hides itself entirely on a
+   board where nothing carries an author, so a factory-only board is unchanged. */
+function renderAuthors() {
+  const shelfEl = $('author-shelf');
+  if (!shelfEl) return;
+  // Counted against every OTHER filter (skipAuthor), so each name's number is
+  // what picking it will actually show — the same rule the category chips use.
+  const pool = posts.filter((p) => matches(p, { skipAuthor: true }));
+  const shelf = authorShelf(pool);
+  if (!shelf.length) {
+    shelfEl.hidden = true;
+    shelfEl.replaceChildren();
+    // A filter that survives its own chip disappearing would strand the
+    // gallery on an empty grid with no way back.
+    if (filters.author !== 'all') { filters.author = 'all'; renderGrid(); }
+    return;
+  }
+  shelfEl.hidden = false;
+  const chip = (key, label, n) => h('button', {
+    class: `chip${filters.author === key ? ' chip--on' : ''}`,
+    type: 'button',
+    onclick: () => { filters.author = filters.author === key ? 'all' : key; renderAll(); },
+  }, label, n == null ? null : h('span', { class: 'g-chip-n' }, n));
+  shelfEl.replaceChildren(
+    h('span', { class: 'g-authors__label' }, 'מדף לפי מי שיצר:'),
+    chip('all', 'כולם', pool.length),
+    ...shelf.map((a) => chip(a.author, a.author, a.n)));
 }
 
 function renderTabs() {
@@ -319,7 +362,8 @@ function sortPosts(list) {
 // clearing them reverts to it untouched, because overriding never writes.
 function arrangeEligible() {
   return filters.sort === 'manual' && !waitingOnly
-      && filters.stage === 'all' && !filters.q && posts.length > 1;
+      && filters.stage === 'all' && filters.author === 'all'
+      && !filters.q && posts.length > 1;
 }
 
 function setArranging(on) {
@@ -687,7 +731,7 @@ function renderGrid() {
 }
 
 function clearFilters() {
-  filters.cat = 'all'; filters.stage = 'all'; filters.q = '';
+  filters.cat = 'all'; filters.stage = 'all'; filters.q = ''; filters.author = 'all';
   $('search').value = '';
   renderAll();
 }
@@ -751,6 +795,12 @@ function card(p) {
     edited ? versionBadge(p) : (version ? h('span', { class: 'tag' }, version) : null),
     p.origin === 'builder' && p.category !== 'builder'
       ? h('span', { class: 'tag' }, 'נבנה בכלי') : null,
+    // v2.5 (spec 08): a generated post says so on the card, with the name it
+    // was made for — otherwise the author shelf lists names the gallery never
+    // explains. The full story is «איך זה נוצר» on the post page.
+    p.origin === 'ai'
+      ? h('span', { class: 'tag' }, '✨ נוצר עם AI' + (p.author ? ' · ' + p.author : ''))
+      : null,
     // v2.1: a review date set from the post's «תזמון» button surfaces on the
     // board too — a due date nobody sees is a due date nobody meets. Overdue
     // reads differently. (The PUBLISH side of scheduling has its own page.)

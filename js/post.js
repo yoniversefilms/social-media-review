@@ -19,7 +19,13 @@ import {
   // v2.3 marketing sign-off + review rounds + uploaded re-renders
   getRole, currentVnum, approvalState, contentHash,
   approvePost, revokeApproval, listApprovals, uploadRenderVersion,
+  // v2.5 «איך זה נוצר» (spec 08) — the request rows behind a generated post
+  listGenRequests,
 } from './store.js';
+// v2.5: the ONE renderer for the transparency block, shared with
+// create-ai.html. Importing that module here is safe by construction — its
+// page boot is guarded on an element only create-ai.html has.
+import { mountHowMade } from './create-ai.js';
 import {
   el, modal, toast, fmtDate, fmtWhen, toLocalInput, fromLocalInput, voteGlyph,
   stageLabel, categoryLabel, STAGES, navBar,
@@ -31,6 +37,11 @@ import { initCompose, mountSlide, manifest } from './compose.js';
 // "silently stale" failure this module exists to prevent.
 import { fieldHash } from './thash.js';
 import { initEditor, canonicalJSON, designSummary, PHOTO_DRAG_MIME } from './editor.js';
+// v2.5 «יצירת תמונות» (spec 07). MOUNT ONLY — every line of that tab's logic,
+// state, canvas work and DOM lives in generate.js, which owns its own
+// persistent root so an in-flight generation survives a tab switch. This file
+// must not learn what a fal model is.
+import { generateTab } from './generate.js';
 
 const $ = (id) => document.getElementById(id);
 
@@ -197,8 +208,19 @@ async function init() {
   // stays reachable from the פרטים tab for every role and for none.
   window.addEventListener('smr:role', () => renderApprovalBar());
 
-  // builder posts may have no PNG renders at all — fall into live preview
-  if (!S.post.asset_prefix && hasSlidesData()) setLive(true, { silent: true });
+  // Builder posts — and v2.5 generated posts — may have no PNG renders at all.
+  // There is nothing to do here any more: since v1.7 live compose is not a mode
+  // anyone turns on. renderViewer() DERIVES S.live from hasSlidesData() +
+  // composeReady, and bootCompose() starts itself.
+  //
+  // FIX (v2.5 — outside spec 08's lane, but spec 08 is dead without it): this
+  // line used to call `setLive(true, { silent: true })`, a function v1.7
+  // deleted. It threw «setLive is not defined» inside boot()'s try, so EVERY
+  // post with slides and no asset_prefix — every builder post, and every
+  // AI-generated post — rendered «משהו השתבש בטעינת הפוסט» instead of the post.
+  // Reproduced on the committed v2.3 tree (git show HEAD:js/post.js:201), so it
+  // predates both the spec-07 and spec-08 builds. Its twin, the dead
+  // `setLive(false)` in mountPreviewSoon()'s catch, is fixed the same way.
 }
 
 function showError(msg) {
@@ -344,7 +366,28 @@ function renderHeader() {
   );
   renderScheduleBar();
   renderApprovalBar();
+  renderHowMade();
   renderPostNav();
+}
+
+// ------------------------------------------------- «איך זה נוצר» (v2.5, 08)
+// Deliberately tiny here: post.js MOUNTS, create-ai.js RENDERS. The whole
+// footprint on this page is this function, the import, and one div in
+// post.html — a second copy of the transparency block would be a second thing
+// to keep true.
+//
+// The request rows are fetched at most once per page load, and only for a post
+// that says it was generated (origin 'ai'); an ordinary post never pays for
+// this at all. A failure degrades to "no block", never to a broken header.
+let howMadePromise = null;
+function renderHowMade() {
+  const slot = $('pvHowMade');
+  if (!slot) return;
+  if (!S.post || S.post.origin !== 'ai') { slot.replaceChildren(); return; }
+  if (!howMadePromise) howMadePromise = listGenRequests().catch(() => []);
+  howMadePromise.then((rows) => {
+    if (S.post && S.post.origin === 'ai') mountHowMade(slot, S.post, rows);
+  });
 }
 
 // I4 — the stage is a LANE, never a signature. Wherever «מאושר» shows without a
@@ -1213,7 +1256,12 @@ async function mountPreview() {
     console.error('mountSlide failed', e);
     if (seq !== previewSeq) return;
     toast('שגיאה בתצוגה החיה — חוזרים לרינדור הרגיל', 'err');
-    setLive(false);
+    // v1.7 removed setLive(); the fallback is a STATE flag renderViewer()
+    // derives from, not a call. Marking the compose failed is what actually
+    // puts the studio PNG back on top — the old dead call did nothing but
+    // throw. (See the boot() note above.)
+    S.composeFailed = true;
+    renderViewer();
   }
 }
 
@@ -2116,6 +2164,11 @@ const TABS = [
   // screen while the English is read — the side-by-side reading the panel is
   // for. See renderTransTab().
   { key: 'trans', label: 'English' },
+  // v2.5 (spec 07). Sits AFTER תמונות for a reason: the two are the same
+  // shelf from the reviewer's side — «תמונות» is what you uploaded, «יצירת
+  // תמונות» is what you made — and everything created here lands in that tab
+  // as well as in the board-wide library.
+  { key: 'gen', label: 'יצירת תמונות' },
 ];
 
 function buildTabs() {
@@ -2487,9 +2540,23 @@ function renderActiveTab(force = false) {
     return;
   }
   S.pendingTabRender = false;
-  const render = { caption: renderCaptionTab, pins: renderPinsTab, edit: renderEditTab, photos: renderPhotosTab, info: renderInfoTab, trans: renderTransTab }[S.tab]
+  const render = { caption: renderCaptionTab, pins: renderPinsTab, edit: renderEditTab, photos: renderPhotosTab, info: renderInfoTab, trans: renderTransTab, gen: renderGenTab }[S.tab]
     || renderCaptionTab;   // unknown/stale tab key must never throw mid-refresh
   body.replaceChildren(...[render() || []].flat(Infinity).filter(Boolean));
+}
+
+// v2.5 «יצירת תמונות» — a mount, not a renderer. generateTab() returns the
+// SAME element every call (generate.js keeps it), so replaceChildren() moves
+// that node back in rather than rebuilding it, and a sheet that is still
+// generating survives a trip to «הערות» and back. onSaved only refreshes the
+// page's data — it deliberately does NOT re-render this tab, because doing so
+// mid-generation would be re-entrant for no gain; the new asset shows in
+// «תמונות» the moment that tab is opened.
+function renderGenTab() {
+  return generateTab({
+    postId: S.post.id,
+    onSaved: () => { refreshAll().catch(() => {}); },
+  });
 }
 
 // ---------------------------------------------------------------- tab: vote

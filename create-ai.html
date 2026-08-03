@@ -1,0 +1,52 @@
+<!doctype html>
+<html dir="rtl" lang="he">
+<head>
+<meta charset="utf-8">
+<link rel="icon" href="data:image/svg+xml,<svg xmlns=%27http://www.w3.org/2000/svg%27 viewBox=%270 0 100 100%27><text y=%27.9em%27 font-size=%2790%27>✨</text></svg>">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<meta name="robots" content="noindex, nofollow">
+<title>יצירה עם AI — סקירת פוסטים</title>
+<!-- All page styling lives in the ONE «v2.5 create-ai» section at the end of
+     css/app.css, not in a <style> block here: the «איך זה נוצר» card is shared
+     with post.html and a second copy would drift. -->
+<link rel="stylesheet" href="./css/app.css">
+</head>
+<body>
+<div id="nav"></div>
+<div class="ai-wrap">
+
+  <header class="ai-head">
+    <h1>יצירה עם AI</h1>
+    <p class="ai-lede">
+      כותבים כאן מה רוצים — במשפט אחד או בפירוט מלא — והמפעל בונה מזה פוסט
+      אמיתי, בתבניות ובאיורים של בית בוואלי, שנוחת בגלריה כטיוטה על שמכם.
+    </p>
+    <!-- The honest-latency statement the spec makes non-negotiable. It is a
+         permanent part of the page, not a toast that scrolls away. -->
+    <p class="ai-honest">
+      <b>כמה זמן זה לוקח.</b> היצירה לא קורית בדפדפן ולא מיידית: הבקשה נכנסת
+      לתור, וסשן המפעל אצל המפעיל הוא שכותב אותה בפועל. כשהסשן פעיל — דקות.
+      כשהוא כבוי — הבקשה פשוט ממתינה בתור עד שהוא נדלק, ואפשר לסגור את החלון
+      בינתיים. הסטטוס כאן תמיד אמיתי; אין כאן ספינר מדומה.
+    </p>
+  </header>
+
+  <div class="ai-modes" role="tablist" aria-label="סוג הבקשה">
+    <button class="ai-mode is-on" id="mode-post" type="button" role="tab" aria-selected="true">פוסט אחד</button>
+    <button class="ai-mode" id="mode-campaign" type="button" role="tab" aria-selected="false">קמפיין</button>
+  </div>
+
+  <main class="ai-main">
+    <section class="ai-form card" id="form" aria-label="הבקשה"></section>
+    <aside class="ai-side" aria-label="הבקשות שלכם">
+      <h2 class="ai-side__h">הבקשות שלכם</h2>
+      <div id="requests" class="ai-reqs" aria-live="polite"></div>
+    </aside>
+  </main>
+</div>
+
+<noscript><p style="text-align:center;padding:40px">הכלי דורש JavaScript.</p></noscript>
+<script src="./config.js"></script>
+<script type="module" src="./js/create-ai.js"></script>
+</body>
+</html>
