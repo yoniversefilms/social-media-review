@@ -870,3 +870,64 @@ hr, .rule {
 /* «3/12» is a Latin fraction inside a Hebrew sentence: isolate it or the
    bidi algorithm reorders it to «12/3». */
 .gen-prog__txt .ltr { direction: ltr; unicode-bidi: isolate; font-variant-numeric: tabular-nums; }
+
+/* ===== v2.5.1 slide export (spec 10b) ===== */
+/* The post download modal's second path (§D-2): a size beyond 1080 is an
+   EXPORT REQUEST, fulfilled factory-side, and the modal has to hold a queue
+   status and a list of finished files without becoming a second page.
+
+   Almost nothing is needed here, and that is the point — the controls are the
+   ones §D-1 already added to the shared sheet (.field[hidden], .xp-range,
+   .xp-qnum, .xp-status, .xp-fails). One look, one place to change it. What
+   follows is only the file list, which §D-1 had no use for. */
+
+.xp-links { margin-top: 10px; }
+.xp-links:empty { display: none; }
+
+/* One line per slide: «שקף 3» then its Latin metadata. The list is inside a
+   modal whose width is the viewport on a phone, so long metadata wraps rather
+   than pushing the dialog sideways — an RTL page that scrolls horizontally is
+   the bug this whole sheet keeps not having. */
+.xp-files {
+  margin: 0; padding-inline-start: 18px;
+  max-height: 34vh; overflow: auto;
+  font-size: .9rem; line-height: 1.8;
+}
+.xp-files li { margin: 2px 0; overflow-wrap: anywhere; }
+.xp-files a { font-weight: 600; }
+/* «2480×3508 · 4607kB» is a Latin run in a Hebrew line: isolate it or the bidi
+   algorithm reorders the numbers around the separator (ENGINEERING-NOTES §6).
+   Muted and one step down, because the filename is the thing being clicked. */
+.xp-files .ltr {
+  unicode-bidi: isolate; direction: ltr;
+  color: var(--ink-soft); font-size: .84rem;
+  font-variant-numeric: tabular-nums;
+}
+
+/* The modal's two action rows — instant download vs «בקשת ייצוא» — of which
+   exactly one is ever visible. They were inline `style="display:flex"` first,
+   and `el.hidden = true` did nothing at all: an inline display beats the UA's
+   [hidden] rule even more decisively than the author rule that broke
+   `.field[hidden]` above. Same lesson, one layer deeper — a row with its own
+   `display` needs its own hidden rule, and it must not be inline. */
+.xp-acts { display: flex; gap: 8px; margin-top: 10px; flex-wrap: wrap; }
+.xp-acts[hidden] { display: none; }
+
+/* THE ESCALATION, and why it is not paranoia. §D-1 added `.field[hidden]` and
+   argued — correctly, as far as it went — that it outranks `.field` without
+   !important. It does. What it does not outrank is post.html's own page block,
+   which carries `.sched-form .field { display: block }`: the download modal's
+   form IS a .sched-form, that selector is 0,2,0 exactly like a bare
+   `.field[hidden]`, and it is declared later. So the JPEG quality row rendered
+   in PNG mode with `hidden` set on the element, matching `.field[hidden]`, and
+   computing `display: block`. It cost a browser check to see; nothing in the
+   DOM says a word about it.
+
+   `hidden` is a SEMANTIC — "this is not currently relevant" — not a layout
+   preference, and a layout rule three files away must not be able to outvote
+   it. Scoped to modals and to the two row classes this feature ships, because
+   a global [hidden]{!important} is a bigger promise than this build has tested.
+   Any NEW page block that styles `.field` inherits the fix for free. */
+.modal [hidden],
+.field[hidden],
+.xp-acts[hidden] { display: none !important; }

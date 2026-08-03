@@ -21,6 +21,9 @@ import {
   approvePost, revokeApproval, listApprovals, uploadRenderVersion,
   // v2.5 «איך זה נוצר» (spec 08) — the request rows behind a generated post
   listGenRequests,
+  // v2.5.1 slide export (spec 10 §D-2) — the download modal's «גודל» beyond
+  // 1080 is a REQUEST on the same queue, fulfilled by scripts/fulfill.mjs.
+  createGenRequest, getGenRequest, GEN_DIMS, GEN_STATUS_LABELS,
 } from './store.js';
 // v2.5: the ONE renderer for the transparency block, shared with
 // create-ai.html. Importing that module here is safe by construction — its
@@ -1943,40 +1946,155 @@ async function downloadSlide(i) {
   setTimeout(() => URL.revokeObjectURL(url), 4000);
 }
 
+/* ── size, format, quality (v2.5.1, spec 10 §D-2) ───────────────────────────
+ *
+ * TWO PATHS out of one modal, and the split is «גודל»:
+ *
+ *   «מקורי»  — exactly what this modal has always done: fetch the existing
+ *              PNGs and save them. Instant, offline-ish, no row, no waiting.
+ *              The format and quality controls are HIDDEN in this mode rather
+ *              than disabled-and-ignored, because a JPEG picker that quietly
+ *              hands back a PNG is worse than no picker. Re-encoding those
+ *              bytes in the browser would also throw away the one property
+ *              that makes them worth downloading: they are byte-for-byte the
+ *              files the publisher sends to Meta.
+ *
+ *   any size — a factory EXPORT REQUEST (kind:'export', migration 027). The
+ *              slide is re-rendered at that size by scripts/fulfill.mjs, which
+ *              is minutes, not milliseconds, and the modal says so before the
+ *              button is pressed. It applies to ALL slides: the payload
+ *              contract is per-POST, deliberately — a size is a deliverable
+ *              set, and «slide 3 only, at A4» is not a thing anyone asked for.
+ *
+ * The export is also the answer to this modal's oldest caveat. «ההורדה היא
+ * הרינדור מהסטודיו» — your board edits are not in these PNGs — is true of the
+ * instant path and FALSE of the export path, which renders the slides the board
+ * holds right now. So the warning shows in «מקורי» mode and is replaced, in
+ * export mode, by the sentence that is actually true there.
+ */
+
+const DL_ORIG = '__orig__';
+
+// A dependency-free poll. Realtime delivers nothing to anon subscribers on a
+// header-scoped board (see store.js), and the queue's own cadence is minutes,
+// so a 5s poll that stops when the modal closes is the honest mechanism.
+function pollGenRequest(id, alive, onTick) {
+  let stop = false;
+  const tick = async () => {
+    if (stop || !alive()) return;
+    let row = null;
+    try { row = await getGenRequest(id); } catch { /* keep polling; a blip is not a failure */ }
+    if (stop || !alive()) return;
+    if (row) onTick(row);
+    if (row && (row.status === 'done' || row.status === 'failed')) return;
+    setTimeout(tick, 5000);
+  };
+  setTimeout(tick, 2500);
+  return () => { stop = true; };
+}
+
 function openDownloadModal() {
   const total = slideTotal();
   const cur = S.cur;
 
   // Builder posts that were never rendered by the factory have no PNGs at all.
   // (An uploaded re-render has its own files, so it is downloadable regardless.)
-  if (!S.post.asset_prefix && !hasImageSlides()) {
-    modal('הורדת שקפים', el('div', { class: 'sched-hint' },
-      'לפוסט הזה אין עדיין רינדור מהסטודיו, ולכן אין קובצי PNG להורדה. ',
-      'פוסטים שנבנו בכלי מקבלים רינדור אחרי שהמפעל מריץ אותם.'));
-    return;
-  }
+  // They CAN still be exported — an export re-renders from the board's slides
+  // and does not need a prior studio run — so the refusal is scoped to the
+  // instant path and says which door is still open.
+  const noPngs = !S.post.asset_prefix && !hasImageSlides();
 
-  const status = el('div', { class: 'sched-hint' });
+  const status = el('div', { class: 'sched-hint xp-status' });
+  const links = el('div', { class: 'xp-links' });
   const one = el('button', { class: 'btn btn--primary', type: 'button' }, `השקף הנוכחי (${cur + 1})`);
   const all = el('button', { class: 'btn btn--ghost', type: 'button' }, `כל השקפים (${total})`);
+  const go = el('button', { class: 'btn btn--primary', type: 'button' }, `בקשת ייצוא — ${total} שקפים`);
+
+  const size = el('select', { class: 'field__input' },
+    el('option', { value: DL_ORIG }, 'מקורי — הקבצים שנשלחים לפרסום (1080×1350)'),
+    GEN_DIMS.map((d) => el('option', { value: d.key }, d.label)));
+  const format = el('select', { class: 'field__input' },
+    el('option', { value: 'png' }, 'PNG — ללא אובדן'),
+    el('option', { value: 'jpeg' }, 'JPEG — קובץ קטן'));
+  const quality = el('input', {
+    type: 'range', min: '60', max: '100', step: '1', value: '90',
+    'aria-label': 'איכות JPEG',
+  });
+  const qNum = el('span', { class: 'ltr xp-qnum' }, '90');
+  quality.addEventListener('input', () => { qNum.textContent = quality.value; });
+
+  // The saved versions, newest first, so «ייצוא של הגרסה שמרקטינג אישרה» is one
+  // select away. «נוכחי» is the default and sends no vnum at all — an absent
+  // vnum means "the board as it is", which is what a reviewer wants nine times
+  // in ten and what makes the export fresher than the studio PNGs.
+  const versions = (S.versionRows || []).slice()
+    .sort((a, b) => Number(b.vnum) - Number(a.vnum));
+  const vSel = el('select', { class: 'field__input' },
+    el('option', { value: '' }, 'נוכחי — מה שיש בלוח עכשיו'),
+    versions.map((v) => el('option', { value: String(v.vnum) },
+      `v${v.vnum}${v.author ? ' · ' + v.author : ''}${v.created_at ? ' · ' + fmtDate(v.created_at) : ''}`)));
+
+  // Every row that only exists in export mode is a .field, so the one CSS rule
+  // spec 10 §D-1 had to add — `.field[hidden] { display: none }` — governs all
+  // of them. (`.field { display: flex }` is an author rule and beats the UA's
+  // [hidden], which is why `el.hidden = true` alone does nothing here.)
+  const fRow = el('div', { class: 'field' }, el('label', { class: 'field__label' }, 'פורמט'), format);
+  const qRow = el('div', { class: 'field' },
+    el('label', { class: 'field__label' }, 'איכות JPEG'),
+    el('div', { class: 'xp-range' }, quality, qNum));
+  const vRow = el('div', { class: 'field' }, el('label', { class: 'field__label' }, 'גרסה'), vSel);
+
+  const staleWarn = el('div', { class: 'dz-warn' },
+    el('b', null, 'שימו לב: ההורדה היא הרינדור מהסטודיו.'),
+    el('div', { class: 'sched-sub' },
+      'לפוסט הזה יש עריכות שנעשו בלוח (טקסט או עיצוב) שעדיין לא עברו רינדור מחדש. ',
+      'הקבצים שיירדו לא כוללים אותן — הם מה שיתפרסם היום. ',
+      'אפשר לבקש ייצוא בגודל אחר (למטה): ייצוא מרנדר מחדש את מה שיש בלוח עכשיו, כולל העריכות.'));
+  const noPngWarn = el('div', { class: 'dz-warn' },
+    el('b', null, 'לפוסט הזה אין עדיין רינדור מהסטודיו.'),
+    el('div', { class: 'sched-sub' },
+      'אין קובצי PNG מוכנים להורדה מיידית. אפשר לבחור גודל ולבקש ייצוא — ',
+      'המפעל ירנדר את השקפים מהלוח, וזה לוקח כמה דקות.'));
+  const hint = el('div', { class: 'sched-hint' });
+
+  // NOT `style: {display:'flex'}` — an inline display beats the UA's
+  // `[hidden]{display:none}` even harder than an author rule does, and the row
+  // stays on screen with `el.hidden = true` set and nothing in the DOM to
+  // explain it. This is the SAME trap spec 10 §D-1 hit on `.field`, one layer
+  // further in; `.xp-acts` carries the flex AND its own hidden rule.
+  const instantRow = el('div', { class: 'toolbar xp-acts' }, one, all);
+  const exportRow = el('div', { class: 'toolbar xp-acts' }, go);
 
   const body = el('div', { class: 'sched-form' },
-    pngIsStale()
-      ? el('div', { class: 'dz-warn' },
-          el('b', null, 'שימו לב: ההורדה היא הרינדור מהסטודיו.'),
-          el('div', { class: 'sched-sub' },
-            'לפוסט הזה יש עריכות שנעשו בלוח (טקסט או עיצוב) שעדיין לא עברו רינדור מחדש. ',
-            'הקבצים שיירדו לא כוללים אותן — הם מה שיתפרסם היום. ',
-            'לקבלת הקבצים המעודכנים צריך רינדור מחדש במפעל.'))
-      : null,
-    el('div', { class: 'sched-hint' },
-      'הקבצים יורדים בגודל המקורי (1080×1350), אותם קבצים שנשלחים לפרסום.'),
-    el('div', { class: 'toolbar', style: { display: 'flex', gap: '8px', marginTop: '10px' } }, one, all),
-    status,
+    staleWarn, noPngWarn,
+    el('div', { class: 'field' }, el('label', { class: 'field__label' }, 'גודל'), size),
+    fRow, qRow, vRow,
+    hint, instantRow, exportRow, status, links,
   );
-  const m = modal('הורדת שקפים — ' + (S.post.title || S.post.id), body);
 
-  const run = async (indices, btn) => {
+  const sync = () => {
+    const exporting = size.value !== DL_ORIG;
+    fRow.hidden = !exporting;
+    qRow.hidden = !exporting || format.value !== 'jpeg';
+    vRow.hidden = !exporting || !versions.length;
+    instantRow.hidden = exporting || noPngs;
+    exportRow.hidden = !exporting;
+    staleWarn.hidden = exporting || noPngs || !pngIsStale();
+    noPngWarn.hidden = exporting || !noPngs;
+    hint.textContent = exporting
+      ? 'הייצוא נעשה במפעל: השקפים מרונדרים מחדש בגודל שנבחר, מהמצב שיש בלוח (או מגרסה שנבחרה). ' +
+        'זה לוקח כמה דקות ורק כשמפעל היצירה פועל — החלון הזה יתעדכן, ואפשר גם לחזור אליו אחר כך. ' +
+        'שקף שהיחס שלו שונה מ-4:5 משובץ במלואו במסגרת עם שוליים בצבע הרקע, בלי לחתוך טקסט.'
+      : 'הקבצים יורדים כמו שהם — אותם קבצים שנשלחים לפרסום. בלי המרה ובלי המתנה.';
+  };
+  size.addEventListener('change', sync);
+  format.addEventListener('change', sync);
+  sync();
+
+  const m = modal('הורדת שקפים — ' + (S.post.title || S.post.id), body);
+  const alive = () => document.body.contains(m.root);
+
+  const run = async (indices) => {
     one.disabled = true; all.disabled = true;
     let done = 0;
     const failed = [];
@@ -2003,8 +2121,64 @@ function openDownloadModal() {
     }
   };
 
-  one.addEventListener('click', () => { run([cur], one); });
-  all.addEventListener('click', () => { run([...Array(total).keys()], all); });
+  const showResult = (row) => {
+    const label = GEN_STATUS_LABELS[row.status] || row.status;
+    const res = row.result || {};
+    const files = Array.isArray(res.exports) ? res.exports : [];
+    // GEN_STATUS_LABELS.done reads «מוכן — בגלריה», which is true of a
+    // generated POST and not of an export: these files are in the download
+    // list right here, not in the gallery. Borrow the label only while the
+    // request is still moving.
+    status.textContent = files.length
+      ? `הייצוא מוכן · ${files.length} קבצים`
+      : `הבקשה נשלחה — ${label}. אפשר לסגור את החלון; הקבצים יחכו כאן.`;
+    links.replaceChildren(
+      ...(files.length
+        ? [el('ul', { class: 'xp-files' }, files.map((f) => el('li', null,
+            // The slide NUMBER is isolated too: «שקף 3» ends a Hebrew run with
+            // a Latin digit, and without isolation the space collapses against
+            // the following Latin metadata and it renders as «שקף3».
+            el('a', { href: f.url, download: f.name, target: '_blank', rel: 'noopener' },
+              'שקף\u00a0', el('span', { class: 'ltr' }, String(f.slide))),
+            el('span', { class: 'ltr' }, ` ${f.w}×${f.h} · ${Math.round((f.bytes || 0) / 1024)}kB · ${f.format === 'jpeg' ? 'JPEG' : 'PNG'}`))))]
+        : []),
+      ...((res.notes || []).length
+        ? [el('ul', { class: 'xp-fails' }, res.notes.map((n) => el('li', null, n)))]
+        : []),
+    );
+    if (row.status === 'done' && files.length) toast(`${files.length} קבצים מוכנים`, 'ok');
+    if (row.status === 'failed') toast('הייצוא לא הצליח', 'err');
+  };
+
+  one.addEventListener('click', () => { run([cur]); });
+  all.addEventListener('click', () => { run([...Array(total).keys()]); });
+  go.addEventListener('click', async () => {
+    go.disabled = true;
+    status.textContent = 'שולחים בקשת ייצוא…';
+    links.replaceChildren();
+    const payload = {
+      post_id: S.post.id,
+      format: format.value,
+      quality: Number(quality.value),
+      size: size.value,
+    };
+    if (vSel.value) payload.vnum = Number(vSel.value);
+    try {
+      const row = await createGenRequest({ kind: 'export', payload });
+      status.textContent = 'הבקשה בתור. הרינדור נעשה במפעל, וזה כמה דקות.';
+      pollGenRequest(row.id, alive, showResult);
+    } catch (e) {
+      // The one failure a reviewer cannot debug from the message alone: the
+      // CHECK constraint from migration 027 not being applied yet.
+      const msg = (e && e.message) || String(e);
+      status.textContent = /check|constraint|violates|400/i.test(msg)
+        ? 'הבקשה נדחתה. ייתכן שמיגרציה 027 עדיין לא הוחלה על הלוח — בלעדיה התור לא מקבל בקשות ייצוא.'
+        : 'לא הצלחנו לשלוח את הבקשה: ' + msg;
+      toast('הבקשה לא נשלחה', 'err');
+    } finally {
+      go.disabled = false;
+    }
+  });
 }
 
 // -------------------------------------------- undo/redo engine (v1.6)

@@ -1847,11 +1847,19 @@ export const GEN_STATUS_LABELS = {
   failed: 'לא הצלחנו',
 };
 
-// kind: 'post' | 'campaign' | 'style' (the migration's CHECK constraint).
+// kind: 'post' | 'campaign' | 'style' | 'export' (the migration's CHECK
+// constraint — 'export' arrives with migration 027, spec 10 §D-2).
 // The payload shape is the contract documented in scripts/fulfill.mjs.
+//
+// The whitelist is not decoration: an unknown kind falls back to 'post', and a
+// 'post' row with an export payload would be picked up by the fulfiller's post
+// pipeline and fail the voice gate on an empty draft. Adding a kind here
+// WITHOUT applying 027 is the other half of the trap — the insert is refused by
+// the CHECK, which surfaces as a 400 the reviewer cannot act on, so the modal
+// that sends 'export' says the migration is a prerequisite out loud.
 export async function createGenRequest({ kind, payload }) {
   const me = await ensureName();
-  const k = ['post', 'campaign', 'style'].includes(kind) ? kind : 'post';
+  const k = ['post', 'campaign', 'style', 'export'].includes(kind) ? kind : 'post';
   const row = {
     kind: k,
     payload: payload || {},
@@ -1972,13 +1980,66 @@ export function authorShelf(posts) {
 
 // The dimension presets, twinned with DIMS in supabase/functions/generate/index.ts.
 // Keep the KEYS identical — the browser sends the key and the function looks it
-// up; a key only one side knows is a refusal the reviewer cannot act on.
+// up; a key only one side knows is a refusal the reviewer cannot act on. The
+// twin is PROVEN, not promised: scripts/dims-check.mjs diffs this array against
+// the shipped bytes of index.ts and exits non-zero on any drift. Run it after
+// touching either side.
+//
+// v2.5.1 (spec 10 §C) grew the list from 4 to 9. Two fields carry the rest of
+// §C's contract, and both are DATA, not behaviour:
+//
+//   legacy  the '<w>x<h>' key this preset shipped under before §C renamed the
+//           first four. Nothing in the app writes those keys any more, but an
+//           sm_assets row generated before today has one in `derived.crop.dim`
+//           and the Edge Function still answers to it — dimByKey() resolves
+//           both spellings so no stored value becomes unreadable. A rename that
+//           orphans data is a rename that gets reverted at 2am.
+//
+//   res     the fal resolution enum member a GENERATION at this size should
+//           request: the SMALLEST of 0.5K/1K/2K/4K whose long side covers the
+//           preset, capped at 4K. "Nearest" in spec §C means nearest-that-does-
+//           not-force-an-upscale — rounding DOWN would hand the baker a source
+//           smaller than the target and make every large preset a silent
+//           enlargement, which is the exact thing §C forbids.
+//
+//   native  present only where the preset is BIGGER than the model can draw
+//           (`6k`: fal's 4K enum tops out near 4096px on the long side). It is
+//           the honest ceiling, and generate.js's baker uses the MEASURED source
+//           size — not this constant — to decide whether to stamp
+//           «הוגדל תוכנתית מ-…» on the asset. The constant tells the operator
+//           what to expect BEFORE they spend money; the measurement tells them
+//           what actually happened after.
+//
+// Wiring `res` into the Edge Function's falQueue body is deliberately NOT done
+// here: it changes what every generation costs (4K is double 1K per image) and
+// belongs to the session that owns the deploy. Until then the function requests
+// fal's default resolution and the baker's measured-source chip is what keeps
+// the app honest about it.
+export const FAL_LONG_SIDE_CAP = 4096;
+
 export const GEN_DIMS = [
-  { key: '1080x1350', w: 1080, h: 1350, label: 'פוסט 4:5 · 1080×1350' },
-  { key: '1080x1080', w: 1080, h: 1080, label: 'ריבוע · 1080×1080' },
-  { key: '1920x1080', w: 1920, h: 1080, label: 'רוחב 16:9 · 1920×1080' },
-  { key: '1080x1920', w: 1080, h: 1920, label: 'סטורי 9:16 · 1080×1920' },
+  { key: 'post',   legacy: '1080x1350', w: 1080, h: 1350, res: '2K', label: 'פוסט 4:5 · 1080×1350' },
+  { key: 'square', legacy: '1080x1080', w: 1080, h: 1080, res: '2K', label: 'ריבוע · 1080×1080' },
+  { key: 'story',  legacy: '1080x1920', w: 1080, h: 1920, res: '2K', label: 'סטורי 9:16 · 1080×1920' },
+  { key: 'land',   legacy: '1920x1080', w: 1920, h: 1080, res: '2K', label: 'רוחב 16:9 · 1920×1080' },
+  { key: 'pres',   w: 1280, h: 720,  res: '2K', label: 'מצגת קטנה · 1280×720' },
+  { key: 'wide2k', w: 2560, h: 1440, res: '4K', label: 'מצגת גדולה / באנר · 2560×1440' },
+  { key: '4k',     w: 3840, h: 2160, res: '4K', label: '4K · 3840×2160' },
+  { key: '6k',     w: 6144, h: 3456, res: '4K', native: { w: 4096, h: 2304 }, label: '6K · 6144×3456 (מעל גבול המודל)' },
+  { key: 'a4',     w: 2480, h: 3508, res: '4K', label: 'A4 להדפסה · 2480×3508' },
 ];
+
+// The ONE lookup. Accepts the §C key or the pre-§C '<w>x<h>' spelling, so a
+// value read back out of an old asset row still resolves. Returns null for an
+// unknown key — callers decide whether that is «מקורי» or a refusal, and a
+// silent fallback to GEN_DIMS[0] would resize someone's file to 1080×1350
+// without telling them.
+export function dimByKey(key) {
+  const k = String(key || '');
+  return GEN_DIMS.find((d) => d.key === k) ||
+         GEN_DIMS.find((d) => d.legacy === k) ||
+         null;
+}
 
 // PostgREST answers a missing TABLE with 404 + PGRST205 (and, on some
 // versions, SQLSTATE 42P01). That — and only that — is what "the migration is

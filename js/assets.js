@@ -23,7 +23,7 @@
 
 import {
   initStore, assetUrl, listAssets, uploadAsset, updateAsset,
-  reconcileStudioAssets, assetRowUrl, listPosts, subscribe, GEN_DIMS,
+  reconcileStudioAssets, assetRowUrl, listPosts, subscribe, GEN_DIMS, dimByKey,
 } from './store.js';
 import { el, modal, toast, fmtDate, navBar } from './ui.js';
 import { zipStore } from './zip.js';
@@ -637,10 +637,12 @@ function showUsage(a, used) {
    babysit. (Slide export is the opposite case — a slide is a template that
    must be RE-rendered at the new size, so spec §D-2 keeps it factory-side.)
 
-   The size list is GEN_DIMS, imported from store.js and NOT extended here.
-   The full §C dimension matrix is a later build that has to move GEN_DIMS and
-   its Edge-Function twin together (there is a programmatic-diff test); adding
-   keys on only this side would fail that test and refuse generations. */
+   The size list is GEN_DIMS, imported from store.js and NEVER extended here.
+   Spec §C's full nine-preset matrix landed with the §D-2 build: GEN_DIMS and
+   its Edge-Function twin moved together and scripts/dims-check.mjs now proves
+   it. This dialog picked the extra sizes up for free the moment they existed,
+   which is the whole point of importing the table instead of listing sizes
+   twice — adding keys on only one side refuses generations. */
 
 const ORIG = '__orig__';
 
@@ -740,7 +742,7 @@ async function exportOne(a, { format, quality, size }) {
   const { src, w: sw, h: sh, blob } = await loadSource(url);
   const base = String(a.name || a.label || 'asset').replace(/\.[^.]+$/, '') || 'asset';
 
-  const dim = size === ORIG ? null : GEN_DIMS.find((d) => d.key === size);
+  const dim = size === ORIG ? null : dimByKey(size);
   const w = dim ? dim.w : sw;
   const h = dim ? dim.h : sh;
 

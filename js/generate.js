@@ -34,7 +34,7 @@ import {
   callGenerator, listStyles, createStyle, updateStyle, archiveStyle,
   requestStyleFromRefs, saveDerivedAsset, assetChain,
   listAssets, listPhotos, assetRowUrl, photoUrl, uploadAsset,
-  GEN_DIMS,
+  GEN_DIMS, dimByKey, FAL_LONG_SIDE_CAP,
 } from './store.js';
 import { el, modal, toast, fmtDate } from './ui.js';
 
@@ -441,9 +441,22 @@ function runs(profile, n) {
  * destination-out with a linear gradient erases toward the chosen edge, which
  * is why it needs PNG (JPEG has no alpha) and why it is exactly reproducible
  * from the recipe stored in the asset's `derived`.
+ *
+ * v2.5.1 (spec 10 §C) — THE UPSCALE RULE. The preset list now runs past what
+ * the model can draw (6K at 6144px, against fal's ~4096px ceiling), and a cover
+ * crop enlarges without comment: ask for 6K, get 6K-shaped pixels that carry
+ * 1K of detail, and nothing on screen says so. So this returns what it did:
+ * `upscaledFrom` is the MEASURED source size whenever the target is bigger than
+ * the source in either axis, and null when it is not.
+ *
+ * Measured, deliberately, not read off GEN_DIMS[].native. The table says what
+ * the model SHOULD return at each preset; the bitmap says what it did. Those are
+ * different facts — today the Edge Function does not send `res` at all, so most
+ * sources come back around 1K and a table-driven chip would understate the
+ * enlargement on every preset above it. The chip has to be true, not tidy.
  */
 async function bakePhoto(src, { dim, fade }) {
-  const preset = GEN_DIMS.find((d) => d.key === dim) || GEN_DIMS[0];
+  const preset = dimByKey(dim) || GEN_DIMS[0];
   const bmp = await bitmapFrom(src);
   const c = document.createElement('canvas');
   c.width = preset.w; c.height = preset.h;
@@ -474,7 +487,17 @@ async function bakePhoto(src, { dim, fade }) {
 
   const blob = await new Promise((res) => c.toBlob(res, 'image/png'));
   if (!blob) throw new Error('לא הצלחנו ליצור את הקובץ');
-  return new File([blob], `gen-${dim}${fade && fade.sides.length ? '-fade' : ''}.png`, { type: 'image/png' });
+  const file = new File([blob], `gen-${dim}${fade && fade.sides.length ? '-fade' : ''}.png`, { type: 'image/png' });
+  const upscaledFrom = (preset.w > bmp.width || preset.h > bmp.height)
+    ? { w: bmp.width, h: bmp.height }
+    : null;
+  return { file, preset, upscaledFrom };
+}
+
+// The chip's words, spec §C verbatim. One place, so the tag on the asset and
+// the toast at save time can never say two different numbers.
+function upscaleChip(from) {
+  return `הוגדל תוכנתית מ-${from.w}×${from.h}`;
 }
 
 /* ================================================================== route: illustrations */
@@ -810,12 +833,30 @@ function renderPhoto() {
     oninput: () => { S.photo.lines = ta.value; },
   });
 
-  const dimSel = el('select', { class: 'field__input', onchange: () => { S.photo.dim = dimSel.value; } });
+  // §C: the size list runs past the model's reach, so the one preset the model
+  // cannot draw says so BEFORE the money is spent, not after. The note is
+  // driven off the table (long side vs FAL_LONG_SIDE_CAP), never off a
+  // hard-coded «6k» — add a 8K preset tomorrow and this warns about it too.
+  const dimWarn = el('div', { class: 'pv-note' });
+  const syncDimWarn = () => {
+    const d = dimByKey(S.photo.dim);
+    const over = d && Math.max(d.w, d.h) > FAL_LONG_SIDE_CAP;
+    dimWarn.hidden = !over;
+    dimWarn.textContent = over
+      ? `הגודל הזה גדול ממה שהמודל יודע לצייר (עד ${FAL_LONG_SIDE_CAP} פיקסלים בצלע הארוכה). ` +
+        'התמונה תוגדל תוכנתית בשמירה, והנכס יסומן בתגית שאומרת מאיזה גודל — בלי הגדלה שקטה.'
+      : '';
+  };
+  const dimSel = el('select', {
+    class: 'field__input',
+    onchange: () => { S.photo.dim = dimSel.value; syncDimWarn(); },
+  });
   for (const d of GEN_DIMS) {
     const o = el('option', { value: d.key }, d.label);
     if (d.key === S.photo.dim) o.selected = true;
     dimSel.appendChild(o);
   }
+  syncDimWarn();
 
   const countSel = el('select', { class: 'field__input', onchange: () => { S.photo.count = Number(countSel.value); } });
   for (const n of [1, 2, 4, 6]) {
@@ -896,7 +937,7 @@ function renderPhoto() {
   // second thing to keep in step.
   const controls = el('div', { class: 'gen-grid2' },
     field('סגנון', styleSelect('photo', S.photo.styleId, (v) => { S.photo.styleId = v; })),
-    field('גודל', dimSel),
+    field('גודל', el('div', null, dimSel, dimWarn)),
     field('כמות', countSel),
     b.on ? null
       : field('קצה', el('div', null, el('div', { class: 'a-row' }, fadeToggle), sideChips, feather)),
@@ -943,13 +984,16 @@ async function bakeAndSave(row) {
   if (S.photo.fadeOn && !fade.sides.length) { toast('צריך לבחור לפחות צד אחד לדהייה', 'err'); return; }
   setBusy('מכינים את הקובץ…');
   try {
-    const file = await bakePhoto(row.url, { dim, fade });
-    const preset = GEN_DIMS.find((d) => d.key === dim) || GEN_DIMS[0];
+    const { file, preset, upscaledFrom } = await bakePhoto(row.url, { dim, fade });
     const res = await saveDerivedAsset({
       file,
       kind: 'photo',
       label: row.label || '',
-      tags: ['generated', 'photo', fade ? 'fade' : 'crop'],
+      // §C: the enlargement is a TAG, not a footnote — tags are what the library
+      // renders as chips and what its search box reads, so «הוגדל תוכנתית מ-…»
+      // travels with the file to whoever finds it six months from now.
+      tags: ['generated', 'photo', fade ? 'fade' : 'crop',
+        ...(upscaledFrom ? [upscaleChip(upscaledFrom)] : [])],
       post_id: S.postId || null,
       parent_id: row.id,
       // The RECIPE, not the result. This is what makes the fade removable:
@@ -957,11 +1001,17 @@ async function bakeAndSave(row) {
       derived: {
         op: 'fade',
         from: row.id,
+        // `dim` is stored as the key that was CHOSEN. dimByKey() reads both the
+        // §C names and the pre-§C '<w>x<h>' spellings, so a row written before
+        // today still resolves and a row written today still will after the
+        // next rename.
         crop: { w: preset.w, h: preset.h, dim },
         fade: fade || null,
+        upscaled_from: upscaledFrom,   // null when the source was big enough
       },
     });
     if (res.lineage_dropped) toast('נשמר, אבל בלי שרשרת הגזירה (מיגרציה 025 לא הוחלה)', 'err');
+    else if (upscaledFrom) toast(`נשמר · ${upscaleChip(upscaledFrom)}`, 'ok');
     else toast('נשמר בספרייה', 'ok');
     await refreshAssets();
     if (S.onSaved) S.onSaved();
