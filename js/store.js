@@ -228,12 +228,17 @@ export function photoUrl(row) {
 }
 
 // URL for an sm_assets row (v2.0 library). Two populations, two homes:
-// source='studio' rows point INTO the sm-assets board mirror (the same base
-// assetUrl() serves), reviewer uploads live in sm-photos exactly like
-// sm_photos rows. Both drivers, one function — nothing else resolves assets.
+// source='studio' AND source='generated' rows point INTO the sm-assets board
+// mirror (the same base assetUrl() serves) — fal-made drawings are written by
+// fulfill.mjs to the board's studio/illustrations/ exactly like mirrored ones,
+// they only carry a different source so the library can tell them apart (spec
+// 07 constraint 4). Reviewer uploads live in sm-photos exactly like sm_photos
+// rows. Both drivers, one function — nothing else resolves assets.
 export function assetRowUrl(row) {
   if (!row || !row.storage_path) return '';
-  if (row.source === 'studio') return assetUrl(row.storage_path);
+  if (row.source === 'studio' || row.source === 'generated') {
+    return assetUrl(row.storage_path);
+  }
   return photoUrl(row);
 }
 
