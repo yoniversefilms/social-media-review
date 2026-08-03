@@ -30,10 +30,15 @@ import { zipStore } from './zip.js';
 
 const $ = (id) => document.getElementById(id);
 
+// OPERATOR CHANGE 2026-08-03: the one «איורים» tab split in two — «Simple» is
+// the hand-curated set (source 'studio' + reviewer uploads), «AI Generated» is
+// everything fal made (source 'generated'), grouped by style. The Latin labels
+// are the operator's own naming (precedent: the post page's «English» tab).
 const KINDS = [
   { key: 'all', label: 'כל הנכסים' },
   { key: 'photo', label: 'תמונות' },
-  { key: 'illustration', label: 'איורים' },
+  { key: 'ill-simple', label: 'Simple' },
+  { key: 'ill-ai', label: 'AI Generated' },
   { key: 'brand', label: 'נכסי מותג' },
   { key: 'logo', label: 'לוגו' },
 ];
@@ -144,10 +149,29 @@ function buildUsage(assets, posts) {
   return usage;
 }
 
+// The two illustration pseudo-kinds resolve on kind + source, not on a stored
+// column: 'ill-simple' = illustrations that are NOT fal-made (studio + reviewer
+// uploads), 'ill-ai' = source 'generated'. Everything else is a literal kind.
+function kindMatch(a) {
+  const k = a.kind || 'other';
+  if (S.kind === 'all') return true;
+  if (S.kind === 'ill-simple') return k === 'illustration' && a.source !== 'generated';
+  if (S.kind === 'ill-ai') return k === 'illustration' && a.source === 'generated';
+  return k === S.kind;
+}
+
+// The style a generated asset belongs to, for the «AI Generated» grouping.
+// Producers stamp a `style:<name>` tag (fulfill.mjs runSheet, the generate
+// Edge Function); anything older or unstamped groups under «ללא סגנון».
+function styleOf(a) {
+  const t = (Array.isArray(a.tags) ? a.tags : []).find((x) => String(x).startsWith('style:'));
+  return t ? String(t).slice(6) || 'ללא סגנון' : 'ללא סגנון';
+}
+
 function visible() {
   const q = S.q;
   const list = S.assets.filter((a) => {
-    if (S.kind !== 'all' && (a.kind || 'other') !== S.kind) return false;
+    if (!kindMatch(a)) return false;
     if (S.onlyUploads && a.source === 'studio') return false;
     if (!q) return true;
     const hay = [a.name, a.label, ...(Array.isArray(a.tags) ? a.tags : [])]
@@ -472,6 +496,23 @@ function renderGrid() {
         ? 'אין נכס שמתאים לסינון הזה.'
         : el('span', null, el('b', null, 'הספרייה עדיין ריקה. '),
             'מעלים כאן תמונות, לוגו או איורים — והם יהיו זמינים בכל הפוסטים.')));
+    return;
+  }
+  // «AI Generated» groups by style, newest style-batch first; every other
+  // view stays one flat grid.
+  if (S.kind === 'ill-ai') {
+    const groups = new Map();
+    for (const a of list) {
+      const s = styleOf(a);
+      if (!groups.has(s)) groups.set(s, []);
+      groups.get(s).push(a);
+    }
+    $('grid').replaceChildren(...[...groups.entries()].map(([name, items]) =>
+      el('section', { class: 'a-group' },
+        el('h3', { class: 'a-group__head' },
+          el('bdi', null, name),
+          el('span', { class: 'a-group__n' }, String(items.length))),
+        el('div', { class: 'a-grid' }, items.map(card)))));
     return;
   }
   $('grid').replaceChildren(el('div', { class: 'a-grid' }, list.map(card)));

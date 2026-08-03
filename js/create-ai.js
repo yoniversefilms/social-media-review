@@ -52,9 +52,9 @@ let submitting = false;
 // status poll re-rendering the side column) never eats a half-written request.
 const F = {
   post: { intent: '', slides: [{ what: '', layout: '' }], caption: '', captionFromSlides: true,
-          cta: '', category: 'general', illustrations: '', generateImages: false },
+          cta: '', category: 'general', illustrations: '', generateImages: true },
   campaign: { brief: '', count: 5, lines: [], caption: '', cta: '',
-              category: 'general', illustrations: '', generateImages: false,
+              category: 'general', illustrations: '', generateImages: true,
               revise: false, campaign_id: '', instruction: '' },
 };
 
@@ -137,10 +137,10 @@ function select(options, value, onchange) {
 
    The status line under it states the COST MODEL, not a reassurance. «עד 2
    גליונות» is the fulfiller's real per-request budget (MAX_SHEETS_PER_REQUEST),
-   not a rounded number, and «בלי התאמה» is the real trigger — a good library
-   match never generates anything. If either of those changes there, change the
-   sentence here: a switch that describes a rule it no longer has is worse than
-   no switch. */
+   not a rounded number. OPERATOR CHANGE 2026-08-03: generation is now the
+   DEFAULT and fal-first — the library is only the stand-in/fallback. If the
+   fulfiller's rule changes again, change the sentence here too: a switch that
+   describes a rule it no longer has is worse than no switch. */
 function generateToggle(model) {
   const box = h('input', {
     type: 'checkbox', checked: model.generateImages,
@@ -148,12 +148,13 @@ function generateToggle(model) {
   });
   return h('div', { class: 'ai-gen' },
     h('label', { class: 'ai-check' }, box,
-      h('span', {}, '🎨 ליצור איורים חדשים כשאין התאמה בספרייה')),
+      h('span', {}, '🎨 איורים חדשים ב-AI לכל שקופית (ברירת המחדל)')),
     h('p', { class: 'ai-hint' },
-      'כבוי כברירת מחדל. המפעל תמיד מחפש קודם בספרייה — ',
-      'איור קיים שמתאים אף פעם לא יגרום ליצירה חדשה. ',
-      h('b', {}, 'כשמדליקים: יוצר עד 2 גליונות fal לבקשה'),
-      ' (תשעה ציורים בגיליון), והאיורים שנוצרו נשמרים בספרייה ומסומנים ככאלה. ',
+      'כל איור נוצר חדש, בסגנון הלוח, במיוחד לפוסט הזה — ',
+      h('b', {}, 'עד 2 גליונות fal לבקשה'),
+      ' (תשעה ציורים בגיליון). עד שהאיור מוכן, ואם היצירה נכשלת, מוצב ',
+      'האיור הקרוב ביותר מהספרייה. האיורים שנוצרו נשמרים בספרייה תחת ',
+      '«AI Generated». כיבוי המתג חוזר לאיורי הספרייה בלבד. ',
       'בקמפיין זה חל על כל פוסט בסדרה.'));
 }
 

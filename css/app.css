@@ -4,19 +4,22 @@
    Custom props + shared classes per the PLAN contract. */
 
 :root {
-  --bg: #f7f3ec;
+  /* Contrast pass 2026-08-03 (operator: «it all looks washed out»): deeper
+     cream bg so the white cards separate, darker inks, borders .10 → .18,
+     stronger shadows. Token-only — every surface inherits. */
+  --bg: #f1eadd;
   --paper: #fffdf9;
-  --ink: #241d20;
-  --ink-soft: #6b5f63;
+  --ink: #1c1518;
+  --ink-soft: #55484d;
   --accent: #830051;
-  --line: rgba(36, 29, 32, .1);
-  --yes: #2e7d4f;
-  --no: #b3403a;
-  --maybe: #b3995d;
+  --line: rgba(28, 21, 24, .18);
+  --yes: #256b42;
+  --no: #a83730;
+  --maybe: #97803f;
 
   --radius: 12px;
-  --shadow: 0 1px 2px rgba(36, 29, 32, .05), 0 6px 24px rgba(36, 29, 32, .06);
-  --shadow-lift: 0 2px 6px rgba(36, 29, 32, .08), 0 14px 40px rgba(36, 29, 32, .12);
+  --shadow: 0 1px 2px rgba(28, 21, 24, .08), 0 6px 24px rgba(28, 21, 24, .10);
+  --shadow-lift: 0 2px 6px rgba(28, 21, 24, .12), 0 14px 40px rgba(28, 21, 24, .18);
   --font: 'Assistant', -apple-system, 'Segoe UI', 'Arial Hebrew', 'Noto Sans Hebrew', sans-serif;
 }
 
@@ -931,3 +934,14 @@ hr, .rule {
 .modal [hidden],
 .field[hidden],
 .xp-acts[hidden] { display: none !important; }
+
+/* ===== v2.5.2 library style groups (operator quick-edit 2026-08-03) ===== */
+/* «AI Generated» tab: one section per style, header = style name + count. */
+.a-group { margin: 0 0 18px; }
+.a-group__head {
+  display: flex; align-items: baseline; gap: 8px;
+  margin: 14px 0 8px; padding-bottom: 6px;
+  border-bottom: 1px solid var(--line);
+  font-size: 1.02rem;
+}
+.a-group__n { color: var(--ink-soft); font-size: .85rem; font-weight: 400; }
