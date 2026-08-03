@@ -167,7 +167,13 @@
 // stays covered). Alt is the ONE deliberate-bleed modifier — the same key
 // that frees the magnets — and every draggable selection's toolbar says so.
 
-import { el, modal, toast } from './ui.js';
+import { el, modal, toast, uploadProgress } from './ui.js';
+// v2.10.1: the picker's upload tile joins the shared upload pipeline. imgprep
+// imports NOTHING (stacks.js precedent), so pulling it here keeps the
+// "editor.js never talks to store.js" promise intact: bytes are snapshotted
+// and batches refused HERE, while the actual upload still arrives through
+// opts.uploadAsset from the host page.
+import { snapshotFiles, batchTooBig, summarizeFailures } from './imgprep.js';
 // v2.5.2 version stacks. stacks.js imports NOTHING — that is deliberate, and
 // it is why the shared helper is not simply exported from assets.js: reaching
 // into assets.js would pull store.js and zip.js into every editor host and
@@ -4322,6 +4328,10 @@ export function initEditor(handle, slide, opts = {}) {
       title: 'SVG · PNG · JPG · WEBP',
       onclick: () => file.click(),
     }, UP_LABEL);
+    // v2.10.1: same bar as the assets dock and the post page. It lives right
+    // under the picker's toolbar so the reviewer watching the grid sees the
+    // count move where they are looking, not in a corner toast.
+    const prog = uploadProgress();
     file.addEventListener('change', async () => {
       const files = [...file.files];
       file.value = '';
@@ -4330,17 +4340,41 @@ export function initEditor(handle, slide, opts = {}) {
         ? (f) => opts.uploadAsset(f)
         : (typeof opts.uploadFile === 'function' ? (f) => opts.uploadFile(f) : null);
       if (!up) { toast('העלאת נכסים לא מחוברת בעמוד הזה', 'err'); return; }
+      // Refused before anything is read; the bar never shows for a batch that
+      // will not run (paint-honesty rule from the assets dock).
+      const tooBig = batchTooBig(files);
+      if (tooBig) { toast(tooBig, 'err'); return; }
       upBtn.disabled = true;
       upBtn.textContent = 'מעלים…';
+      // Snapshot at the change event — this is the iOS window where photo-
+      // picker Files go stale (the v2.6 diagnosis); reading them later in the
+      // sequential loop is exactly what loses every file after the first.
+      prog.phase('מכינים את הקבצים…');
+      const snap = await snapshotFiles(files);
+      if (snap.failed.length) toast(summarizeFailures(snap.failed), 'err');
+      if (!snap.ok.length) {
+        prog.hide();
+        upBtn.disabled = false;
+        upBtn.textContent = UP_LABEL;
+        return;
+      }
+      prog.start(snap.ok.length);
       let last = null;
-      for (const f of files) {
+      let done = 0;
+      for (const f of snap.ok) {
         try {
           const res = await up(f);
           if (res && res.url) last = res;
         } catch (err) {
           toast('ההעלאה של ' + (f.name || 'הקובץ') + ' נכשלה: ' + (err && err.message || err), 'err');
         }
+        prog.tick(++done, f.name);
       }
+      // Let the full bar reach the screen before it is retired — hiding in the
+      // same synchronous block as the last tick means «3/3» never paints and
+      // the upload looks one short (the trap the assets dock documents).
+      await new Promise((r) => requestAnimationFrame(() => requestAnimationFrame(r)));
+      prog.hide();
       upBtn.disabled = false;
       upBtn.textContent = UP_LABEL;
       if (!last) return;
@@ -4360,6 +4394,7 @@ export function initEditor(handle, slide, opts = {}) {
     draw();
     const root = el('div', { class: inline ? 'smr-sb__pane' : null },
       el('div', { class: 'smr-edlibbar' }, search, upBtn, file),
+      prog.root,
       chipRow,
       count,
       inline ? null : el('div', { style: { height: '8px' } }),
