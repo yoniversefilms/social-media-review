@@ -577,7 +577,6 @@ function renderIll() {
       S.ill.sliceNote = '';
       setBusy('חותכים את הגיליון ל-9 ציורים…');
       await doSlice(false);
-      toast('הגיליון מוכן — בוחרים מה לשמור', 'ok');
     } catch (e) {
       toast((e && e.message) || String(e), 'err');
     } finally {
@@ -595,7 +594,7 @@ function renderIll() {
   return [
     el('p', { class: 'pv-note' },
       'גיליון אחד = תשעה ציורים באותו קו. כותבים שורה לכל ציור שרוצים; אם יש פחות מתשע שורות, ',
-      'התאים מתחלקים ביניהן ומקבלים כמה וריאציות לכל שורה. בסוף בוחרים מה נשמר.'),
+      'התאים מתחלקים ביניהן ומקבלים כמה וריאציות לכל שורה. הכול נשמר אוטומטית — וריאציות נערמות כגרסאות בספרייה.'),
     field('מה לצייר', ta),
     hint,
     controls,
@@ -630,6 +629,11 @@ async function doSlice(fixed) {
     S.ill.sliceNote = 'החיתוך נכשל: ' + ((e && e.message) || e);
   }
   render();
+  // OPERATOR CHANGE 2026-08-03: no pick step. Every sliced drawing files
+  // itself to the post + library automatically (variants of one line carry a
+  // shared stack tag and pile up as versions there). This runs after BOTH cut
+  // paths — the automatic gutter walk and the manual 3×3 rescue.
+  if (S.ill.tiles.length) await fileAll();
 }
 
 function renderSheet() {
@@ -660,45 +664,44 @@ function renderSheet() {
     return (c && c.label) || '';
   };
 
+  // Result gallery, not a picker (operator change 2026-08-03): every tile is
+  // already on its way to the library, so the cards just show what landed.
   out.push(el('div', { class: 'gen-tiles' }, S.ill.tiles.map((t) => {
-    const on = S.ill.picks.has(t.cell);
-    const card = el('div', { class: 'gen-tile' + (on ? ' is-on' : '') },
+    const saved = S.ill.picks.has(t.cell);   // picks now means "filed" ✓
+    return el('div', { class: 'gen-tile' + (saved ? ' is-on' : '') },
       el('img', { src: t.dataUrl, alt: labelFor(t.cell) || `ציור ${t.cell}`, loading: 'lazy' }),
       el('div', { class: 'gen-tile__meta' },
         el('span', { class: 'gen-tile__label' }, labelFor(t.cell) || `תא ${t.cell}`),
-        el('span', { class: 'gen-tile__mark' }, on ? '✓' : '')));
-    card.addEventListener('click', () => {
-      if (on) S.ill.picks.delete(t.cell); else S.ill.picks.add(t.cell);
-      render();
-    });
-    return card;
+        el('span', { class: 'gen-tile__mark' }, saved ? '✓ נשמר' : '')));
   })));
 
   out.push(el('div', { class: 'gen-acts' },
-    el('button', {
-      class: 'btn btn--primary', type: 'button',
-      disabled: disabledWhileBusy() || !S.ill.picks.size,
-      onclick: savePicks,
-    }, S.ill.picks.size ? `שמירת ${S.ill.picks.size} ציורים` : 'בוחרים ציורים לשמירה'),
     el('span', { class: 'pv-note' },
-      'מה שלא נבחר לא נשמר כנכס — אבל נרשם בגיליון, כדי שנדע מה נדחה.')));
+      'הכול נשמר אוטומטית לפוסט ולספרייה. וריאציות של אותה שורה נערמות ',
+      'כגרסאות של איור אחד — בספרייה לוחצים על איור כדי לדפדף ביניהן, ',
+      'וגוררים את הגרסה שרואים אל השקף.')));
   return out;
 }
 
-async function savePicks() {
-  const picks = S.ill.tiles
-    .filter((t) => S.ill.picks.has(t.cell))
-    .map((t) => {
-      const c = (S.ill.cells || []).find((x) => x.cell === t.cell);
-      return { cell: t.cell, label: (c && c.label) || '', image: t.dataUrl };
-    });
-  const rejected = S.ill.tiles.filter((t) => !S.ill.picks.has(t.cell)).map((t) => t.cell);
-  setBusy(`ממירים ${picks.length} ציורים לוקטור…`);
+// Files EVERY sliced tile — the pick/save step is gone (operator, 2026-08-03).
+// Each pick carries its input-line index so the function can stamp the shared
+// stack tag that makes variants of one line pile up as versions in the library.
+async function fileAll() {
+  const picks = S.ill.tiles.map((t) => {
+    const c = (S.ill.cells || []).find((x) => x.cell === t.cell);
+    return {
+      cell: t.cell,
+      label: (c && c.label) || '',
+      line: c && Number.isFinite(c.line_index) ? c.line_index : null,
+      image: t.dataUrl,
+    };
+  });
+  setBusy(`ממירים ושומרים ${picks.length} ציורים…`);
   try {
     const res = await callGenerator({
       mode: 'illustration-pick',
       sheet_id: S.ill.sheet.id,
-      picks, rejected,
+      picks, rejected: [],
       post_id: S.postId || undefined,
       operator_key: opKey(),
     });
@@ -707,10 +710,12 @@ async function savePicks() {
     if (res.errors && res.errors.length) toast(res.errors.join(' · '), 'err');
     const n = (res.saved || []).length;
     if (n) {
-      toast(n === 1 ? 'הציור נשמר בספרייה' : `${n} ציורים נשמרו בספרייה`, 'ok');
-      S.ill.picks = new Set();
+      S.ill.picks = new Set((res.saved || []).map((s) => s.cell).filter((x) => x != null));
+      if (!S.ill.picks.size) S.ill.picks = new Set(picks.map((p) => p.cell));
+      toast(n === 1 ? 'הציור נשמר בפוסט ובספרייה' : `${n} ציורים נשמרו בפוסט ובספרייה`, 'ok');
       await refreshAssets();
       if (S.onSaved) S.onSaved();
+      render();
     }
   } catch (e) {
     toast((e && e.message) || String(e), 'err');
