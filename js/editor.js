@@ -589,28 +589,40 @@ function injectStyles() {
 .smr-edov.is-hit{cursor:pointer}
 .smr-edov.is-drag{cursor:grabbing}
 .smr-edbox{position:absolute;pointer-events:none;border-radius:2px}
-.smr-edbox--hover{outline:1.5px dashed rgba(131,0,81,.55)}
+/* CONTENT-AWARE CHROME (operator, 2026-08-03): every box is a DUAL RING —
+   a light ring plus a dark ring — so one of them always contrasts, whatever
+   the slide paints underneath. The old single brand-magenta ring vanished on
+   the brand's own magenta fields. State is now carried by the OUTER ring's
+   colour (dark=hover/sel, green=snap, gold=peek, magenta=companions); the
+   white inner ring is constant. */
+.smr-edbox--hover{outline:1.5px dashed rgba(255,255,255,.92);
+  box-shadow:0 0 0 2.5px rgba(28,21,24,.45)}
 /* v1.8 depth peek — the thing UNDER what you are hovering. Gold, not brand
    red, so it never reads as the live selection; the tag hangs above the box
    and is pointer-transparent so it can never eat the click it advertises. */
-.smr-edbox--peek{outline:1.5px dashed rgba(179,153,93,.95);
+.smr-edbox--peek{outline:1.5px dashed rgba(255,255,255,.9);
+  box-shadow:0 0 0 2.5px rgba(179,153,93,.95);
   background:rgba(179,153,93,.10);pointer-events:none}
 .smr-edbox__tag{position:absolute;inset-inline-start:0;bottom:100%;
   margin-bottom:3px;white-space:nowrap;pointer-events:none;
   background:#B3995D;color:#fff;border-radius:4px;padding:1px 6px;
   font:600 11px/1.6 'Assistant',-apple-system,sans-serif}
-.smr-edbox--sel{outline:2px solid #830051;box-shadow:0 0 0 4px rgba(131,0,81,.15)}
-/* v2.2 group companions: the same brand ink as the primary but hollow and
-   without handles, so which box a resize would grab stays unambiguous */
-.smr-edbox--more{outline:2px dashed rgba(131,0,81,.75);
+.smr-edbox--sel{outline:2px solid rgba(255,255,255,.98);
+  box-shadow:0 0 0 3.5px rgba(28,21,24,.85),0 0 14px rgba(0,0,0,.25)}
+/* v2.2 group companions: hollow and handle-less so which box a resize would
+   grab stays unambiguous; magenta outer ring, white inner like everything */
+.smr-edbox--more{outline:2px dashed rgba(255,255,255,.92);
+  box-shadow:0 0 0 3px rgba(131,0,81,.85);
   background:rgba(131,0,81,.06)}
-.smr-edbox--sel.is-snap{outline-color:#2e7d4f;box-shadow:0 0 0 4px rgba(46,125,79,.25)}
+.smr-edbox--sel.is-snap{
+  box-shadow:0 0 0 3.5px #2e7d4f,0 0 14px rgba(0,0,0,.25)}
 .smr-edh{position:absolute;width:16px;height:16px;border-radius:50%;background:#fff;
-  border:2px solid #830051;box-shadow:0 1px 4px rgba(0,0,0,.3);pointer-events:auto}
+  border:2px solid #1c1518;box-shadow:0 0 0 1.5px rgba(255,255,255,.9),0 1px 4px rgba(0,0,0,.4);
+  pointer-events:auto}
 .smr-edh--rz{bottom:-9px;left:-9px;cursor:nwse-resize}
 .smr-edh--rot{top:-30px;left:50%;transform:translateX(-50%);cursor:grab}
 .smr-edh--rot::after{content:'';position:absolute;top:14px;left:50%;width:2px;height:14px;
-  background:#830051;transform:translateX(-50%)}
+  background:#1c1518;box-shadow:0 0 0 1px rgba(255,255,255,.85);transform:translateX(-50%)}
 .smr-eddrop[hidden],.smr-edbusy[hidden]{display:none}
 .smr-eddrop{position:absolute;inset:10px;z-index:6;pointer-events:none;
   display:flex;align-items:center;justify-content:center;border-radius:14px;
