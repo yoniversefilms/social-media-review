@@ -163,6 +163,35 @@ const CATEGORY_OPTIONS = [
   ...CATEGORIES.filter((c) => c.key !== 'builder').map((c) => ({ key: c.key, label: c.label })),
 ];
 
+/* A category picker with «+ tab חדשה…» at the bottom. A custom tab is just a
+   category string — the Hebrew name itself is stored on the post, and the
+   library's tab row picks it up automatically (categoryLabel falls back to
+   the raw string). No schema change, no registry: the post carrying the name
+   IS the tab's existence. */
+function categorySelect(value, onchange) {
+  const NEW = '__new__';
+  let current = value;
+  const opts = [...CATEGORY_OPTIONS, { key: NEW, label: '+ tab חדשה…' }];
+  const s = h('select', { class: 'ai-select' },
+    opts.map((o) => h('option', { value: o.key, selected: o.key === value }, o.label)));
+  if (value && !opts.some((o) => o.key === value)) {
+    // an already-chosen custom tab (e.g. a campaign revision) — show it
+    s.insertBefore(h('option', { value, selected: true }, value), s.lastChild);
+  }
+  s.addEventListener('change', () => {
+    if (s.value !== NEW) { current = s.value; onchange(current); return; }
+    const name = (window.prompt('איך לקרוא ל-tab החדשה בגלריה?') || '').trim();
+    if (!name) { s.value = current; return; }
+    if (![...s.options].some((o) => o.value === name)) {
+      s.insertBefore(h('option', { value: name }, name), s.lastChild);
+    }
+    s.value = name;
+    current = name;
+    onchange(name);
+  });
+  return s;
+}
+
 /* ── the form ── */
 
 function renderForm() {
@@ -214,8 +243,8 @@ function postForm() {
     field('כיתוב (קפשן)', h('div', {}, capToggle, capBox)),
     field('סיום / קריאה לפעולה', input(p.cta, (v) => { p.cta = v; },
       'למשל: אם זה מהדהד לכם, אנחנו כאן.')),
-    field('מדף בספרייה', select(CATEGORY_OPTIONS, p.category, (v) => { p.category = v; }),
-      'לאיזו לשונית בגלריה הפוסט ייכנס.'),
+    field('מדף בספרייה', categorySelect(p.category, (v) => { p.category = v; }),
+      'לאיזו לשונית בגלריה הפוסט ייכנס. אפשר גם לפתוח tab חדשה.'),
     field('איורים', textarea(p.illustrations, (v) => { p.illustrations = v; },
       'תיאור חופשי — למשל: דלת פתוחה קצת, או שתי ידיים שלא נוגעות.', 2),
       'המפעל מחפש קודם כול בין האיורים הקיימים לפי התיאור העברי שלהם. ' +
@@ -268,7 +297,7 @@ function campaignForm() {
       linesBox),
     field('סיום / קריאה לפעולה', input(c.cta, (v) => { c.cta = v; },
       'מה שסוגר את הפוסט האחרון בסדרה')),
-    field('מדף בספרייה', select(CATEGORY_OPTIONS, c.category, (v) => { c.category = v; })),
+    field('מדף בספרייה', categorySelect(c.category, (v) => { c.category = v; })),
     field('איורים', textarea(c.illustrations, (v) => { c.illustrations = v; },
       'תיאור חופשי לכל הסדרה', 2)),
     generateToggle(c));

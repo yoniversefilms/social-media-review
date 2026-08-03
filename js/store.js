@@ -1183,7 +1183,7 @@ export async function uploadPhoto({ post_id, pin_id, file, note }) {
   return res;
 }
 
-export async function createBuilderPost({ id, title, caption, slides, slide_count }) {
+export async function createBuilderPost({ id, title, caption, slides, slide_count, category }) {
   const me = await ensureName();
   return need().insert(isLocal ? 'posts' : 'sm_posts', {
     id,
@@ -1191,7 +1191,7 @@ export async function createBuilderPost({ id, title, caption, slides, slide_coun
     caption: caption || '',
     slides: slides || [],
     slide_count: slide_count || (slides ? slides.length : 0),
-    category: 'builder',
+    category: category || 'builder',
     origin: 'builder',
     asset_prefix: '',
     stage: 'in_review',

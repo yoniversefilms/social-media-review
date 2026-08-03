@@ -13,7 +13,7 @@ import {
 import { initCompose, mountSlide } from './compose.js';
 import {
   el as h, navBar, toast, voteGlyph, fmtDate, fmtWhen,
-  STAGES, CATEGORIES, STAGE_LABELS, CATEGORY_LABELS,
+  STAGES, CATEGORIES, STAGE_LABELS, CATEGORY_LABELS, categoryLabel,
 } from './ui.js';
 
 const VOTE_LABELS = { yes: 'בעד', no: 'נגד', maybe: 'מתלבטים' };
@@ -235,11 +235,21 @@ function renderChips() {
     type: 'button',
     onclick: () => { filters.cat = filters.cat === cat ? 'all' : cat; renderAll(); },
   }, label, h('span', { class: 'g-chip-n' }, count(cat)));
-  const cats = CATEGORIES.filter((c) =>
-    c.key !== 'builder' || posts.some((p) => p.category === 'builder'));
+  // The tab row is data-driven: known categories appear when a post carries
+  // them, and any OTHER category string found on a post (custom tabs created
+  // in the forms, 'general' from the AI queue) gets its own tab automatically,
+  // labeled via categoryLabel's raw-string fallback. A tab with no posts does
+  // not render — there is nothing behind it to show.
+  const present = new Set(posts.map((p) => p.category || ''));
+  const known = CATEGORIES.filter((c) => present.has(c.key));
+  const extra = [...present]
+    .filter((k) => k && !CATEGORIES.some((c) => c.key === k))
+    .sort((a, b) => categoryLabel(a).localeCompare(categoryLabel(b), 'he'))
+    .map((k) => ({ key: k, label: categoryLabel(k) }));
   $('cat-chips').replaceChildren(
     chip('all', 'הכל'),
-    ...cats.map((c) => chip(c.key, c.label)));
+    ...known.map((c) => chip(c.key, c.label)),
+    ...extra.map((c) => chip(c.key, c.label)));
 }
 
 /* ── author shelf (v2.5, spec 08) ─────────────────────────────────────
