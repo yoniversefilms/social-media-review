@@ -73,6 +73,65 @@ function need() {
   return driver;
 }
 
+// ---------------------------------------------------------------- v2.9 soft delete
+// Migration 029 (soft-delete columns + sm_folders) is on the OPERATOR's punch
+// list — Claude sessions are classifier-blocked from applying migrations, so
+// this code runs against boards where those columns and that table do not
+// exist yet, for as long as that takes. The 019 trap is the rule here: a board
+// missing a migration must keep WORKING, not degrade into a dead page.
+//
+// Two halves to that promise, and they are asymmetric on purpose:
+//   READS never mention the new columns. `deleted_at=is.null` as a query param
+//     would 42703 the WHOLE list on an unapplied board and empty the library —
+//     so the filter is client-side (below), where a missing column reads as
+//     `undefined`, which is exactly "not deleted". One code path, correct
+//     before and after the migration.
+//   WRITES cannot be faked, so they fail — but they fail in ONE recognisable
+//     way, with one Hebrew sentence, instead of a raw PostgREST string.
+const MIGRATION_029 = 'המחיקה עוד לא הופעלה בשרת (מיגרציה 029)';
+const MIGRATION_029_FOLDERS = 'התיקיות עוד לא הופעלו בשרת (מיגרציה 029)';
+
+// SQLSTATEs and PostgREST codes that mean "029 has not been applied here":
+//   42P01 undefined_table      — sm_folders does not exist
+//   42703 undefined_column     — deleted_at does not exist
+//   42501 insufficient_privilege — the column grant was never widened; this is
+//         what a PATCH naming deleted_at actually returns on a live board,
+//         because RLS lets the row through and the GRANT is what refuses
+//   PGRST204 / PGRST205        — PostgREST's own schema-cache misses, which is
+//         what you get in the window between the DDL and a cache reload
+const MIGRATION_CODES = new Set(['42P01', '42703', '42501', 'PGRST204', 'PGRST205']);
+
+function needsMigration029(e) {
+  if (!e) return false;
+  if (MIGRATION_CODES.has(String(e.code || ''))) return true;
+  // Belt for drivers that answer without a code (serve.mjs's simulate switch
+  // sends one, but a proxy or an older local server may not) — matched on the
+  // names this migration introduces, never on a bare status, so an unrelated
+  // 400 still propagates as itself.
+  const msg = String((e && e.message) || '');
+  return /deleted_at|deleted_by|sm_folders|\bfolders\b/i.test(msg) &&
+    (e.status === 400 || e.status === 401 || e.status === 403 || e.status === 404);
+}
+
+// One Hebrew sentence for every unapplied-029 failure, and the original error
+// untouched for everything else (offline, RLS, an expired key). `.needsMigration`
+// rides along so a caller can tell the two apart without parsing text.
+function migrationError(what) {
+  const e = new Error(what);
+  e.needsMigration = true;
+  return e;
+}
+
+// A row is DELETED when it carries a truthy deleted_at. On an unapplied board
+// the column is absent, so this is `undefined` → live, which is the honest
+// answer there. Every list wrapper runs rows through here, which is what makes
+// every downstream consumer — grids, rails, folder counts, the editor picker's
+// designAssets feed, stacks, export selections — inherit the filter without
+// knowing it exists.
+function live(rows) {
+  return (Array.isArray(rows) ? rows : []).filter((r) => !(r && r.deleted_at));
+}
+
 // File extension for a storage path: the real one when the name carries a
 // sane one, otherwise derived from the MIME type. Never trusts the name for
 // anything but the suffix.
@@ -423,6 +482,54 @@ class SupabaseDriver {
       `board_key=eq.${enc(this.board)}&id=eq.${enc(id)}`, fields);
   }
 
+  // ---- v2.9 soft delete + folders (migration 029) ----
+  // ONE PATCH for the whole selection: `id=in.(…)` is what makes a 30-row bulk
+  // delete a single request, and — more to the point — makes it ATOMIC. A loop
+  // of PATCHes can half-succeed, and an undo toast that restores 12 of 30 rows
+  // is worse than no undo at all.
+  stampAssets(ids, fields) {
+    const list = (ids || []).map((id) => enc(id)).join(',');
+    return this.req('PATCH',
+      `sm_assets?board_key=eq.${enc(this.board)}&id=in.(${list})`, fields);
+  }
+
+  stampPhoto(id, fields) {
+    return this.update('sm_photos',
+      `board_key=eq.${enc(this.board)}&id=eq.${enc(id)}`, fields);
+  }
+
+  // Live folders only. Deleted folder rows are filtered CLIENT-side (live()),
+  // never with a `deleted_at=is.null` param — same 42703 reasoning as the
+  // asset and photo lists, and the column is in this very migration.
+  listFolders() {
+    return this.select('sm_folders',
+      `select=*&board_key=eq.${enc(this.board)}&order=path.asc`);
+  }
+
+  // 409 = another tab created the same folder first, which is success from
+  // here. That reading is only true because the unique index is PARTIAL
+  // (`where deleted_at is null`, schema §23): a 409 therefore means a LIVE
+  // folder with this path exists, which is exactly what the caller wanted.
+  // Against a non-partial index the same 409 could mean "a DELETED row is
+  // squatting on the path" — reported as success, while live() hid the row and
+  // the folder did not exist. Do not relax the index without revisiting this.
+  async insertFolder(row) {
+    const res = await fetch(this.rest + 'sm_folders', {
+      method: 'POST',
+      headers: this.headers({
+        'Content-Type': 'application/json',
+        Prefer: 'return=representation',
+      }),
+      body: JSON.stringify({ ...row, board_key: this.board }),
+    });
+    if (res.ok) {
+      const rows = await res.json().catch(() => null);
+      return Array.isArray(rows) ? rows[0] : rows;
+    }
+    if (res.status === 409) return null;
+    throw await restError(res);
+  }
+
   // Studio reconcile: a plain bulk INSERT of the rows the board is missing.
   // The partial unique index (board_key, kind, name) where source='studio'
   // makes a racing second reconcile fail loudly instead of duplicating — 409
@@ -649,7 +756,12 @@ class LocalDriver {
     } catch {
       throw new Error('השרת המקומי לא רץ — node scripts/serve.mjs');
     }
-    if (!res.ok) throw new Error(await errText(res));
+    // restError, not errText: SAME message (it reads body.error first, which is
+    // what serve.mjs sends), plus .status/.code. v2.9's simulate-unapplied-029
+    // switch answers with a real SQLSTATE, and without this line the local
+    // driver would strip it and the degradation path would be untestable
+    // locally — which is the one place it CAN be tested.
+    if (!res.ok) throw await restError(res);
     this.invalidate(); // every write invalidates the cached state
     const text = await res.text();
     return text ? JSON.parse(text) : null;
@@ -733,6 +845,26 @@ class LocalDriver {
   async insertStudioAssets(rows) {
     if (!rows.length) return [];
     return (await this.req('POST', '/assets/studio', { rows })) || [];
+  }
+
+  // ---- v2.9 soft delete + folders (serve.mjs routes) ----
+  // serve.mjs has no `in.(…)` filter language, so the bulk stamp is one route
+  // that takes the id LIST. Same atomicity as the PostgREST twin: the server
+  // applies all of them or answers 4xx and applies none.
+  stampAssets(ids, fields) {
+    return this.req('PATCH', '/assets/stamp', { ids: ids || [], fields });
+  }
+
+  stampPhoto(id, fields) {
+    return this.patch('photos', id, fields);
+  }
+
+  async listFolders() {
+    return (await this.req('GET', '/folders')) || [];
+  }
+
+  insertFolder(row) {
+    return this.req('POST', '/folders', row);
   }
 
   // ---- drafts (serve.mjs /api/drafts, v1.3) ----
@@ -1005,18 +1137,24 @@ export async function listAllEdits() {
   return d.select('sm_edits', `select=*&board_key=eq.${enc(boardKey)}&order=created_at.asc`);
 }
 
+// v2.9: `select=*` and live() — deliberately NOT `deleted_at=is.null`. Naming
+// the column in the query would 42703 the whole list on a board where 029 is
+// unapplied and leave the תמונות tab permanently empty; filtering here is
+// correct in both worlds. Every consumer of these two functions (the post
+// page's tab, designPhotos → the editor picker, the discussions hub) inherits
+// the filter for free.
 export async function listPhotos(post_id) {
   const d = need();
-  if (isLocal) return ((await d.state()).photos || []).filter((p) => p.post_id === post_id).sort(byCreatedAsc);
-  return d.select('sm_photos', `select=*&board_key=eq.${enc(boardKey)}&post_id=eq.${enc(post_id)}&order=created_at.asc`);
+  if (isLocal) return live(((await d.state()).photos || []).filter((p) => p.post_id === post_id)).sort(byCreatedAsc);
+  return live(await d.select('sm_photos', `select=*&board_key=eq.${enc(boardKey)}&post_id=eq.${enc(post_id)}&order=created_at.asc`));
 }
 
 // ALL photo rows for the board in one request (discussions hub shows photos
 // attached to any pin) — same shape as listAllPins/listAllReplies.
 export async function listAllPhotos() {
   const d = need();
-  if (isLocal) return [...((await d.state()).photos || [])].sort(byCreatedAsc);
-  return d.select('sm_photos', `select=*&board_key=eq.${enc(boardKey)}&order=created_at.asc`);
+  if (isLocal) return live([...((await d.state()).photos || [])]).sort(byCreatedAsc);
+  return live(await d.select('sm_photos', `select=*&board_key=eq.${enc(boardKey)}&order=created_at.asc`));
 }
 
 export async function listQueue() {
@@ -1774,9 +1912,13 @@ function defaultKind(file) {
   return /svg/i.test(file.type || '') ? 'illustration' : 'photo';
 }
 
-// every sm_assets row for the board, newest first
+// every LIVE sm_assets row for the board, newest first.
+// v2.9: the soft-delete filter lives HERE, in the one wrapper every surface
+// already goes through — the grid, the folder counts, the stacks, the export
+// selection, post.js's designAssets() feed into the editor picker. That is why
+// editor.js needed no edit at all to stop showing deleted assets.
 export async function listAssets() {
-  return (await need().listAssets()) || [];
+  return live(await need().listAssets());
 }
 
 // Upload bytes + create the library row. `post_id` set = uploaded ON a post.
@@ -1833,6 +1975,112 @@ export async function updateAsset(id, { label, tags }) {
   return need().updateAsset(id, fields);
 }
 
+// ---------------------------------------------------------------- v2.9 delete
+// SOFT, always. `deleted_at` is a stamp; the row stays, the bytes stay, and no
+// storage object is ever removed. Slides place photos by public URL, so a hard
+// delete would break carousels that are already designed and approved.
+//
+// deleted_by is the reviewer's own name (ensureName), which is also what makes
+// the undo honest to a second reviewer looking at the same board: they can see
+// who removed it before they put it back.
+
+export async function deleteAssets(ids) {
+  const list = [...new Set((ids || []).filter(Boolean))];
+  if (!list.length) return [];
+  const me = await ensureName();
+  try {
+    return await need().stampAssets(list, {
+      deleted_at: new Date().toISOString(),
+      deleted_by: me.name,
+    });
+  } catch (e) {
+    if (needsMigration029(e)) throw migrationError(MIGRATION_029);
+    throw e;
+  }
+}
+
+// Undo. Nulling the stamp is the WHOLE restore — no re-upload, no re-tag, no
+// row re-creation — which is exactly why deletion was made soft.
+export async function restoreAssets(ids) {
+  const list = [...new Set((ids || []).filter(Boolean))];
+  if (!list.length) return [];
+  try {
+    return await need().stampAssets(list, { deleted_at: null, deleted_by: null });
+  } catch (e) {
+    if (needsMigration029(e)) throw migrationError(MIGRATION_029);
+    throw e;
+  }
+}
+
+export async function deletePhoto(id) {
+  if (!id) return null;
+  const me = await ensureName();
+  try {
+    return await need().stampPhoto(id, {
+      deleted_at: new Date().toISOString(),
+      deleted_by: me.name,
+    });
+  } catch (e) {
+    if (needsMigration029(e)) throw migrationError(MIGRATION_029);
+    throw e;
+  }
+}
+
+export async function restorePhoto(id) {
+  if (!id) return null;
+  try {
+    return await need().stampPhoto(id, { deleted_at: null, deleted_by: null });
+  } catch (e) {
+    if (needsMigration029(e)) throw migrationError(MIGRATION_029);
+    throw e;
+  }
+}
+
+// ---------------------------------------------------------------- v2.9 folders
+// sm_folders persists folder EXISTENCE. Membership is still the `folder:` tag
+// on sm_assets (v2.6) and nothing about that changed — these two sources are
+// merged by the browser, so an unapplied 029 degrades to exactly v2.6 behaviour
+// (folders derived from tags) rather than to no folders at all.
+
+let foldersMissingReported = false;
+
+// Returns live folder rows, or [] when 029 is unapplied. It does NOT throw for
+// that case: a missing table must cost the assets page a feature, never a page.
+// The console line fires once per load, not once per 10s poll tick.
+export async function listFolders() {
+  try {
+    return live(await need().listFolders());
+  } catch (e) {
+    if (!needsMigration029(e)) throw e;
+    if (!foldersMissingReported) {
+      foldersMissingReported = true;
+      console.warn(
+        'listFolders(): sm_folders is not there yet (migration 029 unapplied). ' +
+        'The folder browser falls back to folders derived from `folder:` tags — ' +
+        'v2.6 behaviour — so an EMPTY folder cannot persist until 029 is applied.');
+    }
+    return [];
+  }
+}
+
+// `path` is slash-joined NORMALIZED segments, normalized by the caller
+// (assets.js normalizeFolderSegment — the server cannot see that function, and
+// the unique index is what actually stops duplicates). Returns the row, or null
+// when the folder already existed, which is success either way.
+export async function createFolder(path) {
+  const p = String(path || '').trim();
+  if (!p) throw new Error('צריך שם לתיקייה');
+  const me = await ensureName();
+  try {
+    return await need().insertFolder({
+      path: p, author: me.name, author_id: me.author_id,
+    });
+  } catch (e) {
+    if (needsMigration029(e)) throw migrationError(MIGRATION_029_FOLDERS);
+    throw e;
+  }
+}
+
 // Reconcile the studio's own assets into library rows, idempotent and keyed
 // by kind+name (PLAN contract). `entries` is manifest.library — ingest emits
 // it, go-live seeds these rows server-side, and this is the browser-side
@@ -1840,8 +2088,25 @@ export async function updateAsset(id, { label, tags }) {
 export async function reconcileStudioAssets(entries) {
   const want = (entries || []).filter((e) => e && e.name && e.storage_path);
   if (!want.length) return [];
+  // need().listAssets(), NOT the exported listAssets() — this ONE read must be
+  // UNFILTERED, and it is the only place in this file that wants a deleted row.
+  //
+  // WHY (found by executing it, not by reading it): "already present" here is a
+  // question about the partial unique index (board_key, kind, name) where
+  // source='studio', and that index does not care about deleted_at. Ask the
+  // live()-filtered wrapper instead and a single soft-deleted studio row reads
+  // as ABSENT, so every boot re-sends it, the bulk INSERT 409s on that index,
+  // and insertStudioAssets swallows the 409 for the WHOLE array — so every
+  // genuinely NEW studio asset in the same batch silently never lands. One
+  // deleted drawing wedges the studio pipeline permanently, with no error
+  // anywhere. Executed on a real Postgres: new rows 0.
+  //
+  // It also keeps the two drivers symmetrical: serve.mjs's /api/assets/studio
+  // has always deduped against the unfiltered state.assets, which is why local
+  // mode was immune to this. Both sides now ask the same question of the same
+  // data — do not "tidy" this back into the wrapper.
   const have = new Set(
-    (await listAssets())
+    ((await need().listAssets()) || [])
       .filter((a) => a.source === 'studio')
       .map((a) => a.kind + ' ' + a.name));
   const missing = want

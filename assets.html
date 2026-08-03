@@ -38,13 +38,10 @@ document.documentElement.dataset.theme=(t==='dark'||t==='light')?t:
     font-family: inherit; font-size: .9rem;
   }
 
-  /* folder-upload progress (spec 10 §A). Lives INSIDE the dock so it cannot be
-     missed, and stays a single line: «12/68 הועלו». */
-  .a-prog {
-    margin-top: 8px; font-size: .84rem; color: var(--ink);
-    direction: rtl; unicode-bidi: isolate;
-  }
-  .a-prog[hidden] { display: none; }
+  /* The spec-10 `.a-prog` line lived here until v2.8 replaced it with the
+     shared ui.js upload bar (.upbar, css/app.css). Removed in v2.9 — the v2.8
+     allowlist could not reach this file, and dead CSS that names a class no
+     module renders is the kind of thing the next reader trusts. */
   .a-drop .btn { min-height: 36px; padding: 4px 12px; font-size: .9rem; }
 
   /* v2.6 — the dock's control row. flex + wrap rather than inline text nodes:
@@ -57,19 +54,106 @@ document.documentElement.dataset.theme=(t==='dark'||t==='light')?t:
   }
   .a-dockctl select { max-width: 100%; }
 
-  /* v2.6 — the folder rail. The label anchors the row so a board with one
-     folder still reads as "folders", not as a stray chip. */
-  .a-folders { gap: 6px; }
-  .a-flabel { color: var(--ink-soft); font-size: .82rem; margin-inline-end: 2px; }
-  .a-folders--sub { padding-inline-start: 14px; }
-  /* The count is a Latin run inside a Hebrew chip: without isolation "3" and
-     the folder name swap sides on a name that starts with a Latin letter. */
-  .a-fcount {
-    margin-inline-start: 6px; opacity: .7; font-size: .78rem;
+  /* v2.9 — the dock's destination line. Louder than .a-sub because it is the
+     one thing in the dock that changes as you walk around, and a batch landing
+     in the wrong folder is the mistake this line exists to prevent. */
+  .a-dest { margin-top: 6px; font-size: .88rem; color: var(--ink); }
+  .a-dest b { color: var(--accent); }
+  /* The path is a mixed-script run — see the .a-fold__b note below for the
+     measurement. Same treatment, same reason. */
+  .a-dest bdi { unicode-bidi: isolate; direction: ltr; }
+
+  /* v2.9 — the breadcrumb. It replaced the v2.6 chip rail: chips FILTER, and
+     what this page needed was a place you are standing IN. The row is the
+     document's own RTL, so «הספרייה» sits at the right and each '‹' steps
+     leftward — the direction a Hebrew reader travels. Verified in a browser. */
+  .a-crumbs { gap: 4px; row-gap: 6px; }
+  .a-crumb {
+    font: inherit; font-size: .88rem; cursor: pointer;
+    background: none; border: 0; padding: 2px 4px; border-radius: 8px;
+    color: var(--accent); max-width: 100%;
+    overflow: hidden; text-overflow: ellipsis; white-space: nowrap;
+  }
+  .a-crumb:hover { background: var(--paper); }
+  /* Where we ARE is not a link. Same size, no colour, no pointer — otherwise
+     the last crumb invites a click that does nothing. */
+  .a-crumb--cur { color: var(--ink); font-weight: 700; cursor: default; }
+  .a-crumb--cur:hover { background: none; }
+  .a-crumb__sep { color: var(--ink-soft); font-size: .8rem; }
+  .a-newfolder {
+    min-height: 0; padding: 3px 10px; font-size: .8rem;
+    border-color: var(--line); color: var(--ink-soft); margin-inline-start: 8px;
+  }
+  .a-newfolder:hover { border-color: var(--accent); color: var(--accent); }
+
+  /* v2.9 — folder tiles. They sit ABOVE the cards because a folder is the
+     bigger object: looking for «צילומי ספטמבר» must not mean scrolling past
+     forty loose photos. Deliberately NOT the same grid as .a-grid — a tile is
+     a row of text, not a thumbnail, and matching the card width would make an
+     empty folder look like a broken image. */
+  .a-tiles {
+    display: grid; gap: 8px; margin: 0 0 14px;
+    grid-template-columns: repeat(auto-fill, minmax(190px, 1fr));
+  }
+  .a-tile {
+    font: inherit; text-align: start; cursor: pointer;
+    display: flex; align-items: center; gap: 8px;
+    background: var(--paper); color: var(--ink);
+    border: 1px solid var(--line); border-radius: var(--radius);
+    padding: 10px 12px; min-height: 44px;
+  }
+  .a-tile:hover { border-color: var(--accent); }
+  .a-tile__ico { font-size: 1.1rem; line-height: 1; flex: none; }
+  .a-tile__name {
+    flex: 1; font-weight: 600; font-size: .9rem;
+    overflow: hidden; text-overflow: ellipsis; white-space: nowrap;
+  }
+  /* A folder NAME is a single segment, so it needs isolation but not an LTR
+     base — «day1» inside a Hebrew row must not drag the count across it. */
+  .a-tile__name bdi { unicode-bidi: isolate; }
+  /* The count is a Latin run in a Hebrew row: without isolation "3" and the
+     name swap sides on a name that starts with a Latin letter. */
+  .a-tile__n {
+    flex: none; color: var(--ink-soft); font-size: .8rem;
     unicode-bidi: isolate; direction: ltr;
   }
+  .a-tile--none { border-style: dashed; }
+  /* Created but not persisted — migration 029 is not applied on this board.
+     Dashed and faded so it does not read as an equal to a real folder. */
+  .a-tile--ghost { opacity: .62; border-style: dashed; }
+
   .a-ferr { color: var(--no); font-size: .85rem; margin: 6px 0 0; }
   .a-ferr[hidden] { display: none; }
+
+  /* v2.9 — the drill-in picker inside the move dialog. Same tree, same
+     breadcrumb component, one level of children at a time: a flat <select> is
+     fine at six folders and unreadable at forty, and it cannot express "into a
+     NEW folder inside this one" at all. */
+  .a-picker { border: 1px solid var(--line); border-radius: var(--radius); overflow: hidden; }
+  .a-crumbs--pick { padding: 8px 10px; background: var(--paper); border-bottom: 1px solid var(--line); }
+  .a-picker__list { max-height: 240px; overflow-y: auto; padding: 6px; }
+  .a-picker__row {
+    font: inherit; width: 100%; text-align: start; cursor: pointer;
+    display: flex; align-items: center; justify-content: space-between; gap: 8px;
+    background: none; border: 0; border-radius: 8px; padding: 8px 10px;
+    color: var(--ink); font-size: .9rem;
+  }
+  .a-picker__row:hover { background: var(--paper); }
+  .a-picker__row bdi { unicode-bidi: isolate; }
+  .a-picker__go { color: var(--ink-soft); }
+  .a-picker__foot {
+    display: flex; align-items: center; justify-content: space-between; gap: 8px;
+    flex-wrap: wrap; padding: 8px 10px; border-top: 1px solid var(--line);
+    background: var(--paper);
+  }
+  .a-picker__dest { font-size: .85rem; color: var(--ink-soft); }
+  .a-picker__dest b { color: var(--ink); }
+  .a-picker__dest bdi { unicode-bidi: isolate; direction: ltr; }
+
+  /* v2.9 — the one destructive action on this page, and the only one that gets
+     a colour. Ghost until hovered, so a card's action row does not read as a
+     row of warnings. */
+  .a-danger:hover { border-color: var(--no); color: var(--no); }
 
   /* the folder chip on a card */
   .a-fold { display: flex; }

@@ -20,6 +20,8 @@
 //   injectFonts(assetUrlFn)          runtime @font-face for Assistant
 //   uploadProgress()                 v2.8 shared upload bar ->
 //                                    {root, start, tick, phase, hide}
+//   undoToast(msg, onUndo, opts)     v2.9 10s toast with a «ביטול» button ->
+//                                    {root, close}; UNDO_MS is its window
 
 // ---------------------------------------------------------------- el
 
@@ -110,19 +112,93 @@ export function modal(title, bodyEl, opts = {}) {
 
 let toastWrap = null;
 
-export function toast(msg, kind = '') {
+function ensureToastWrap() {
   if (!toastWrap || !document.body.contains(toastWrap)) {
     toastWrap = el('div', { class: 'toast-wrap' });
     document.body.appendChild(toastWrap);
   }
+  return toastWrap;
+}
+
+export function toast(msg, kind = '') {
+  const wrap = ensureToastWrap();
   const t = el('div', { class: 'toast' + (kind ? ' toast--' + kind : '') }, msg);
-  toastWrap.appendChild(t);
+  wrap.appendChild(t);
   requestAnimationFrame(() => t.classList.add('toast--in'));
   setTimeout(() => {
     t.classList.remove('toast--in');
     setTimeout(() => t.remove(), 300);
   }, 3500);
   return t;
+}
+
+// ---------------------------------------------------------------- undoToast
+/* v2.9 — the toast that can be ARGUED WITH. Deletion on this board is soft (a
+   `deleted_at` stamp, schema §23), which only pays for itself if the way back
+   is one click and is visible at the moment of regret. Both delete surfaces —
+   the assets grid and the post page's תמונות tab — need the identical thing, so
+   it lives here rather than twice.
+
+   Three things it does that plain toast() cannot:
+   1. It STAYS. 3.5s is a notification; 10s is a decision window. The default
+      matches the sentence the confirm modal promises («10 שניות»), and both
+      read UNDO_MS so the copy and the timer can never drift apart.
+   2. It is CLICKABLE. .toast-wrap carries `pointer-events: none` (so a toast
+      never eats a click on the page under it) and that is INHERITED — a button
+      inside a normal toast is inert and looks like a bug in the restore. The
+      re-enable is inline because css/app.css is not this build's to edit.
+   3. It is SINGULAR. A second delete retires the first toast rather than
+      stacking: two «ביטול» buttons on screen, one of them for rows you can no
+      longer see, is a way to restore the wrong thing.
+
+   The caller does the restoring. This returns {close} so a page that navigates
+   away, or re-renders the thing being undone, can retire the offer honestly. */
+export const UNDO_MS = 10000;
+
+let openUndo = null;
+
+export function undoToast(msg, onUndo, { ms = UNDO_MS, label = 'ביטול' } = {}) {
+  if (openUndo) openUndo();
+  const wrap = ensureToastWrap();
+
+  let done = false;
+  const close = () => {
+    if (done) return;
+    done = true;
+    clearTimeout(timer);
+    if (openUndo === close) openUndo = null;
+    t.classList.remove('toast--in');
+    setTimeout(() => t.remove(), 300);
+  };
+
+  const btn = el('button', {
+    type: 'button',
+    // Inline, for the same reason as pointer-events: the shared button classes
+    // live in css/app.css. currentColor keeps it legible on the dark toast
+    // plate in BOTH themes without knowing which one is on.
+    style: {
+      font: 'inherit', fontWeight: '700', cursor: 'pointer',
+      background: 'transparent', color: 'inherit',
+      border: '1px solid currentColor', borderRadius: '999px',
+      padding: '2px 12px', marginInlineStart: '10px',
+    },
+    onclick: () => {
+      close();
+      try { onUndo(); } catch (e) { console.error('undoToast handler failed:', e); }
+    },
+  }, label);
+
+  const t = el('div', {
+    class: 'toast',
+    role: 'status',
+    style: { pointerEvents: 'auto', display: 'flex', alignItems: 'center' },
+  }, el('span', null, msg), btn);
+
+  wrap.appendChild(t);
+  requestAnimationFrame(() => t.classList.add('toast--in'));
+  const timer = setTimeout(close, ms);
+  openUndo = close;
+  return { close, root: t };
 }
 
 // ---------------------------------------------------------------- fmtDate

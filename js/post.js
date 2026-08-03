@@ -27,6 +27,12 @@ import {
   // v2.9 photo editing (spec 12) — «הסרת רקע» in the design editor. The editor
   // never talks to store.js, so the host passes this in as opts.removeBackground.
   removeBackground,
+  // v2.10 (delete + folders): a reviewer may remove a photo from this post's
+  // תמונות tab. SOFT — a `deleted_at` stamp, never a row drop and never a
+  // storage delete. The bytes are what an already-designed slide points at by
+  // public URL, and an approved carousel must not break because someone tidied
+  // up afterwards.
+  deletePhoto, restorePhoto,
 } from './store.js';
 // v2.5: the ONE renderer for the transparency block, shared with
 // create-ai.html. Importing that module here is safe by construction — its
@@ -35,6 +41,7 @@ import { mountHowMade } from './create-ai.js';
 import {
   el, modal, toast, fmtDate, fmtWhen, toLocalInput, fromLocalInput, voteGlyph,
   stageLabel, categoryLabel, STAGES, navBar, zoomControl, uploadProgress,
+  undoToast, UNDO_MS,
 } from './ui.js';
 import { initCompose, mountSlide, manifest, composeSlideHTML } from './compose.js';
 // v2.3 «English translation panel» — the ONE hash implementation, shared
@@ -3593,6 +3600,17 @@ function renderPhotosTab() {
         ph.note ? el('span', { class: 'note' }, ph.note) : null,
         el('span', null, (ph.author ? ph.author + ' · ' : '') + fmtDate(ph.created_at)),
         pinRef,
+        // v2.9. Styled inline rather than with a class because post.html is not
+        // on this build's allowlist — the shared .btn look is borrowed, the two
+        // card-scale numbers are set here.
+        el('button', {
+          class: 'btn btn--ghost', type: 'button',
+          style: {
+            minHeight: '0', padding: '3px 9px', fontSize: '.72rem',
+            justifySelf: 'start', borderColor: 'var(--line)', color: 'var(--ink-soft)',
+          },
+          onclick: () => deletePhotoDialog(ph),
+        }, '🗑 מחיקה'),
       ),
     );
   });
@@ -3606,6 +3624,65 @@ function renderPhotosTab() {
       ? el('div', { class: 'ph-grid' }, cards)
       : el('div', { class: 'pv-note' }, 'אין עדיין תמונות לפוסט הזה.'),
   ];
+}
+
+/* v2.9 — removing a photo from the תמונות tab (spec 12).
+
+   SOFT, and undoable for 10s, which is the same decision twice: the stamp is
+   what makes the undo a null-out instead of a re-upload.
+
+   A photo PINNED to an open note KEEPS its pin. sm_pins holds the reference,
+   nothing about the pin row changes, and the pin's own card goes on rendering —
+   the photo simply stops appearing in this tab. Saying so in the confirm is the
+   difference between a reviewer tidying up and a reviewer afraid to touch
+   anything. */
+function deletePhotoDialog(ph) {
+  const secs = Math.round(UNDO_MS / 1000);
+  const pinned = !!ph.pin_id;
+
+  const run = async (close) => {
+    try {
+      await deletePhoto(ph.id);
+    } catch (e) {
+      // store.js has already collapsed every unapplied-029 failure into one
+      // Hebrew sentence; anything else arrives as itself.
+      toast((e && e.message) || 'המחיקה נכשלה', 'err');
+      return;
+    }
+    if (close) close();
+    // Off the screen now, not after a round trip — a delete that waits to
+    // become visible reads as a failure and gets clicked twice.
+    S.photos = S.photos.filter((p) => p.id !== ph.id);
+    renderActiveTab(true);
+
+    undoToast('התמונה נמחקה', async () => {
+      try {
+        await restorePhoto(ph.id);
+      } catch (e) {
+        toast('השחזור נכשל: ' + ((e && e.message) || e), 'err');
+        return;
+      }
+      // A full refresh rather than putting the row back by hand: the photo also
+      // feeds the pin cards and the editor's picker (designPhotos), and only a
+      // re-read restores all three to exactly what they were.
+      await refreshAll();
+      renderActiveTab(true);
+      toast('התמונה שוחזרה', 'ok');
+    });
+  };
+
+  modal('מחיקת תמונה', el('div', null,
+    el('p', null, 'התמונה תרד מלשונית «תמונות» של הפוסט הזה.'),
+    el('p', { class: 'pv-note' },
+      `הקובץ עצמו נשמר, ושקפים שכבר עוצבו איתו ימשיכו להיראות כרגיל. ` +
+      `יהיה אפשר לבטל תוך ${secs} שניות.`),
+    pinned
+      ? el('p', { class: 'pv-note' }, 'ההערה שאליה התמונה מוצמדת נשארת פתוחה כמו שהיא.')
+      : null,
+  ), { actions: [
+    { label: 'ביטול' },
+    { label: '🗑 מחיקה', primary: true, onClick: (c) => { run(c); return false; } },
+  ] });
 }
 
 // ---------------------------------------------------------------- tab: info
