@@ -91,6 +91,13 @@ const OP_LABEL = {
 };
 const LS_OPKEY = 'smr:genop';
 
+// Local mode has no Edge Function — store.callGenerator() throws by design, so
+// every route in this tab is cloud-only. Read straight off the URL rather than
+// asking store.js for a new export: `?local=1` is the same signal initStore()
+// itself reads, and this file only needs it to say so in words instead of
+// letting someone press a button that cannot work. (spec 09 §C)
+const IS_LOCAL = new URLSearchParams(location.search).get('local') === '1';
+
 let ROOT = null;          // the persistent element handed back to post.js
 let HOST = null;          // the body inside it that each route renders into
 
@@ -109,6 +116,12 @@ const S = {
   photo: {
     lines: '', styleId: '', dim: GEN_DIMS[0].key, count: 1,
     fadeOn: false, sides: new Set(['right']), feather: 0.18, results: [],
+    // §C «אצווה»: one queue, one call in flight, and a state object that is the
+    // single source of truth for the progress line — no second counter.
+    batch: {
+      on: false, lines: '', running: false, cancel: false,
+      done: 0, total: 0, landed: 0, current: '', stopped: '', errors: [],
+    },
   },
   convert: { src: null, styleId: '', results: [] },
 };
@@ -214,7 +227,15 @@ function renderBanner() {
       el('span', { class: 'gen-sub' }, ' — יצירת תמונה לוקחת בין 20 שניות לשתי דקות. אפשר לעבור טאב, העבודה נמשכת.')));
   }
 
-  if (S.capsError) {
+  if (IS_LOCAL) {
+    // Not an error — a fact about where this feature lives. The local board has
+    // no Edge Function and never will, so saying "unavailable" with a reason
+    // beats letting someone press a button that throws.
+    bits.push(el('div', { class: 'gen-note gen-note--dry' },
+      el('b', null, 'מצב מקומי — יצירת תמונות לא זמינה כאן. '),
+      'היא רצה ב-Edge Function בענן, שמחזיק את מפתח fal; ללוח המקומי אין כזה. ',
+      'הסגנונות והספרייה כן נקראים, אבל שום כפתור כאן לא ייצור תמונה.'));
+  } else if (S.capsError) {
     bits.push(el('div', { class: 'gen-note gen-note--err' },
       el('b', null, 'שירות היצירה לא זמין. '), S.capsError));
   } else if (S.caps && !S.caps.live) {
@@ -635,6 +656,153 @@ async function savePicks() {
 
 /* ================================================================== route: photos */
 
+/* ---------------------------------------------------------- §C: batch mode
+ * N subject lines → a QUEUE of ordinary photo calls, run one at a time.
+ *
+ * Three things this deliberately does NOT do:
+ *   · it does not invent a second save path. Every call is the same
+ *     mode:'photo' the single route already makes, and the function's own
+ *     auto-upload is what lands the images in the library (spec 07). Batch adds
+ *     a loop and a progress line, nothing else.
+ *   · it does not run calls in parallel. fal rate-limits burst submits
+ *     (fal-api.md §7, 429) and the per-board daily budget is checked
+ *     server-side per call — firing twelve at once would race the budget check
+ *     and blow past it.
+ *   · it does not keep going after a refusal. A refused call means the board's
+ *     daily budget is gone; the honest thing is to stop and say how many
+ *     landed, not to hammer the function eleven more times for eleven more
+ *     refusals.
+ * Cancel stops the queue AFTER the call in flight — that image is already paid
+ * for, so abandoning it would throw away something the board was charged for.
+ */
+async function runBatch() {
+  const b = S.photo.batch;
+  const lines = linesOf(b.lines);
+  if (!lines.length) { toast('צריך לפחות שורה אחת', 'err'); return; }
+  if (!S.photo.styleId) { toast('צריך לבחור סגנון תמונה', 'err'); return; }
+
+  Object.assign(b, {
+    running: true, cancel: false, done: 0, total: lines.length,
+    landed: 0, current: '', stopped: '', errors: [],
+  });
+
+  for (const [i, line] of lines.entries()) {
+    if (b.cancel) { b.stopped = `בוטל אחרי ${b.done} שורות.`; break; }
+    b.current = line;
+    setBusy(`אצווה: שורה ${i + 1} מתוך ${lines.length}…`);
+    try {
+      const res = await callGenerator({
+        mode: 'photo',
+        lines: [line], style_id: S.photo.styleId,
+        dim: S.photo.dim, count: S.photo.count,
+        post_id: S.postId || undefined,
+        operator_key: opKey(),
+      });
+      if (res.status === 'refused') { b.stopped = res.reason || 'הבקשה נדחתה'; break; }
+      if (res.status === 'planned') {
+        // A dry run of a batch is a plan for the FIRST line, not twelve plans.
+        b.stopped = 'מצב הדגמה — הוצגו הקריאות של השורה הראשונה בלבד.';
+        showPlan('מה היה נשלח ל-fal', res);
+        break;
+      }
+      const saved = res.saved || [];
+      b.landed += saved.length;
+      S.photo.results = [...saved, ...S.photo.results];
+      if (res.errors && res.errors.length) b.errors.push(...res.errors);
+    } catch (e) {
+      // 429 IS the budget. Anything else is one bad line, and one bad line must
+      // not throw away the eleven good ones behind it.
+      if (e && e.status === 429) { b.stopped = (e && e.message) || 'המכסה היומית נגמרה'; break; }
+      b.errors.push(`«${line.slice(0, 40)}»: ${(e && e.message) || String(e)}`);
+    }
+    b.done = i + 1;
+  }
+
+  b.running = false;
+  b.current = '';
+  setBusy('');
+  await refreshAssets().catch(() => {});
+  if (S.onSaved) S.onSaved();
+  toast(b.stopped
+    ? `האצווה נעצרה — ${b.landed} תמונות נשמרו בספרייה.`
+    : `האצווה הסתיימה — ${b.landed} תמונות נשמרו בספרייה.`,
+    b.stopped ? 'err' : 'ok');
+  render();
+}
+
+function renderBatch() {
+  const b = S.photo.batch;
+
+  if (IS_LOCAL) {
+    return [el('div', { class: 'gen-note gen-note--dry' },
+      el('b', null, 'אצווה לא זמינה במצב מקומי. '),
+      'יצירת תמונות רצה ב-Edge Function בענן, ובמצב המקומי אין לו קיום — ',
+      'אז אין כאן כפתור שמתחזה לעבוד. פותחים את הלוח בענן וזה עובד.')];
+  }
+
+  const ta = el('textarea', {
+    class: 'field__input gen-lines', rows: '6', value: b.lines,
+    placeholder: 'שורה אחת = נושא אחד.\nכוס תה על אדן חלון, אור בוקר רך\nכיסא ריק במטבח\nשמיכה מקופלת על הספה',
+    oninput: () => { b.lines = ta.value; count.replaceChildren(...batchHint()); },
+    disabled: b.running,
+  });
+  const batchHint = () => {
+    const n = linesOf(b.lines).length;
+    if (!n) return ['כל שורה כאן הופכת לקריאה נפרדת.'];
+    return [`${n} שורות × ${S.photo.count} וריאציות = ${n * S.photo.count} תמונות, ` +
+            `ב-${n} קריאות שרצות אחת אחרי השנייה.`];
+  };
+  const count = el('div', { class: 'pv-note gen-hint' }, ...batchHint());
+
+  const bar = b.total
+    ? el('div', { class: 'gen-prog' },
+        el('div', { class: 'gen-prog__track' },
+          el('div', {
+            class: 'gen-prog__fill',
+            style: { width: `${Math.round((b.done / Math.max(1, b.total)) * 100)}%` },
+          })),
+        el('div', { class: 'gen-prog__txt' },
+          el('span', { class: 'ltr' }, `${b.done}/${b.total}`),
+          ` · ${b.landed} תמונות נשמרו`,
+          b.current ? ` · עכשיו: ${b.current.slice(0, 40)}` : ''))
+    : null;
+
+  const stopped = b.stopped
+    ? el('div', { class: 'gen-note gen-note--err' },
+        el('b', null, 'האצווה נעצרה. '), b.stopped, ' ',
+        `נשמרו ${b.landed} תמונות מתוך ${b.total} שורות (${b.done} שורות רצו).`)
+    : null;
+
+  const errs = b.errors.length
+    ? el('div', { class: 'gen-note gen-note--err' },
+        el('b', null, `${b.errors.length} שורות נכשלו: `), b.errors.slice(0, 6).join(' · '))
+    : null;
+
+  return [
+    el('p', { class: 'pv-note' },
+      'מדביקים רשימת נושאים, ובוחרים סגנון וגודל למעלה. ',
+      'הקריאות רצות אחת אחרי השנייה, לא במקביל, וכל תמונה נשמרת בספרייה מיד. ',
+      el('b', null, 'אם המכסה היומית של הלוח נגמרת באמצע — האצווה נעצרת ואומרת כמה נשמרו.')),
+    field('הנושאים', ta),
+    count,
+    bar,
+    stopped,
+    errs,
+    el('div', { class: 'gen-acts' },
+      el('button', {
+        class: 'btn btn--primary', type: 'button',
+        disabled: b.running || Boolean(S.busy),
+        onclick: runBatch,
+      }, b.running ? 'רץ…' : 'הפעלת האצווה'),
+      b.running
+        ? el('button', {
+            class: 'btn btn--ghost', type: 'button', disabled: b.cancel,
+            onclick: () => { b.cancel = true; render(); },
+          }, b.cancel ? 'עוצר אחרי הקריאה הנוכחית…' : 'ביטול')
+        : null),
+  ];
+}
+
 function renderPhoto() {
   const ta = el('textarea', {
     class: 'field__input gen-lines', rows: '4', value: S.photo.lines,
@@ -712,18 +880,40 @@ function renderPhoto() {
     }
   };
 
+  const b = S.photo.batch;
+  const modeChips = el('div', { class: 'a-row gen-modes' },
+    el('button', {
+      class: 'chip' + (b.on ? '' : ' chip--on'), type: 'button', disabled: b.running,
+      onclick: () => { b.on = false; render(); },
+    }, 'יחיד'),
+    el('button', {
+      class: 'chip' + (b.on ? ' chip--on' : ''), type: 'button', disabled: b.running,
+      onclick: () => { b.on = true; render(); },
+    }, '📚 אצווה'));
+
+  // The style/size/count controls are SHARED by both modes on purpose: they are
+  // the same three fal parameters either way, and a second copy would be a
+  // second thing to keep in step.
+  const controls = el('div', { class: 'gen-grid2' },
+    field('סגנון', styleSelect('photo', S.photo.styleId, (v) => { S.photo.styleId = v; })),
+    field('גודל', dimSel),
+    field('כמות', countSel),
+    b.on ? null
+      : field('קצה', el('div', null, el('div', { class: 'a-row' }, fadeToggle), sideChips, feather)),
+  );
+
+  if (b.on) {
+    return [modeChips, controls, ...renderBatch(), ...renderPhotoResults()];
+  }
+
   return [
+    modeChips,
     el('p', { class: 'pv-note' },
       'התמונות שנוצרות נשמרות מיד בספרייה בגודל שהמודל החזיר. ',
       'החיתוך המדויק לגודל שבחרתם והדהייה בקצה נעשים כאן בדפדפן בשמירה — ',
       'כך אפשר לשנות או לבטל אותם אחר כך, והמקור נשאר.'),
     field('מה לצלם', ta),
-    el('div', { class: 'gen-grid2' },
-      field('סגנון', styleSelect('photo', S.photo.styleId, (v) => { S.photo.styleId = v; })),
-      field('גודל', dimSel),
-      field('כמות', countSel),
-      field('קצה', el('div', null, el('div', { class: 'a-row' }, fadeToggle), sideChips, feather)),
-    ),
+    controls,
     el('div', { class: 'gen-acts' },
       el('button', { class: 'btn btn--primary', type: 'button', disabled: disabledWhileBusy(), onclick: go(false) }, 'יצירת תמונות'),
       el('button', { class: 'btn btn--ghost', type: 'button', disabled: disabledWhileBusy(), onclick: go(true) }, 'תצוגה יבשה'),

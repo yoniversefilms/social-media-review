@@ -52,9 +52,9 @@ let submitting = false;
 // status poll re-rendering the side column) never eats a half-written request.
 const F = {
   post: { intent: '', slides: [{ what: '', layout: '' }], caption: '', captionFromSlides: true,
-          cta: '', category: 'general', illustrations: '' },
+          cta: '', category: 'general', illustrations: '', generateImages: false },
   campaign: { brief: '', count: 5, lines: [], caption: '', cta: '',
-              category: 'general', illustrations: '',
+              category: 'general', illustrations: '', generateImages: false,
               revise: false, campaign_id: '', instruction: '' },
 };
 
@@ -128,6 +128,35 @@ function select(options, value, onchange) {
   return s;
 }
 
+/* ── §D: the image-generation switch (spec 09) ─────────────────────────────
+   DEFAULT OFF, and it stays off unless someone deliberately turns it on: this
+   is the only control in the app that spends money on a therapist's click. It
+   rides the payload as `generate_images` and is what gates §A in
+   scripts/fulfill.mjs — with it off, a wish with no library match behaves
+   exactly as it did in 08.
+
+   The status line under it states the COST MODEL, not a reassurance. «עד 2
+   גליונות» is the fulfiller's real per-request budget (MAX_SHEETS_PER_REQUEST),
+   not a rounded number, and «בלי התאמה» is the real trigger — a good library
+   match never generates anything. If either of those changes there, change the
+   sentence here: a switch that describes a rule it no longer has is worse than
+   no switch. */
+function generateToggle(model) {
+  const box = h('input', {
+    type: 'checkbox', checked: model.generateImages,
+    onchange: (e) => { model.generateImages = e.target.checked; },
+  });
+  return h('div', { class: 'ai-gen' },
+    h('label', { class: 'ai-check' }, box,
+      h('span', {}, '🎨 ליצור איורים חדשים כשאין התאמה בספרייה')),
+    h('p', { class: 'ai-hint' },
+      'כבוי כברירת מחדל. המפעל תמיד מחפש קודם בספרייה — ',
+      'איור קיים שמתאים אף פעם לא יגרום ליצירה חדשה. ',
+      h('b', {}, 'כשמדליקים: יוצר עד 2 גליונות fal לבקשה'),
+      ' (תשעה ציורים בגיליון), והאיורים שנוצרו נשמרים בספרייה ומסומנים ככאלה. ',
+      'בקמפיין זה חל על כל פוסט בסדרה.'));
+}
+
 const CATEGORY_OPTIONS = [
   { key: 'general', label: 'כללי' },
   ...CATEGORIES.filter((c) => c.key !== 'builder').map((c) => ({ key: c.key, label: c.label })),
@@ -189,8 +218,9 @@ function postForm() {
     field('איורים', textarea(p.illustrations, (v) => { p.illustrations = v; },
       'תיאור חופשי — למשל: דלת פתוחה קצת, או שתי ידיים שלא נוגעות.', 2),
       'המפעל מחפש קודם כול בין האיורים הקיימים לפי התיאור העברי שלהם. ' +
-      'אם אין התאמה, הוא רושם «רוצים איור חדש» ומעביר את זה הלאה — ' +
-      'ציור חדש נעשה במפעל, לא כאן.'),
+      'אם אין התאמה, הוא רושם «רוצים איור חדש» — או, אם תדליקו את המתג למטה, ' +
+      'מצייר איור חדש בקו של הלוח.'),
+    generateToggle(p),
 
     submitBar('שליחה ליצירה'));
 }
@@ -239,7 +269,8 @@ function campaignForm() {
       'מה שסוגר את הפוסט האחרון בסדרה')),
     field('מדף בספרייה', select(CATEGORY_OPTIONS, c.category, (v) => { c.category = v; })),
     field('איורים', textarea(c.illustrations, (v) => { c.illustrations = v; },
-      'תיאור חופשי לכל הסדרה', 2)));
+      'תיאור חופשי לכל הסדרה', 2)),
+    generateToggle(c));
 
   const reviseWrap = h('div', {},
     field('איזה קמפיין', campaigns.length
@@ -297,6 +328,9 @@ async function submit() {
       cta: p.cta.trim(),
       category: p.category,
       illustrations: p.illustrations.trim(),
+      // §D. Always sent, never inferred: the fulfiller treats a missing field as
+      // OFF, and an explicit false is the record of what the therapist chose.
+      generate_images: !!p.generateImages,
     };
   } else {
     const c = F.campaign;
@@ -314,6 +348,8 @@ async function submit() {
         cta: c.cta.trim(),
         category: c.category,
         illustrations: c.illustrations.trim(),
+        // §D — in campaign mode the switch applies to every member post.
+        generate_images: !!c.generateImages,
       };
     }
   }
@@ -374,7 +410,7 @@ function requestCard(r) {
 
   const head = h('div', { class: 'ai-req__head' },
     h('span', { class: `ai-chip ai-chip--${status}` }, GEN_STATUS_LABELS[status] || status),
-    h('span', { class: 'ai-req__kind' }, r.kind === 'campaign' ? 'קמפיין' : 'פוסט'),
+    h('span', { class: 'ai-req__kind' }, KIND_WORD[r.kind] || 'פוסט'),
     h('span', { class: 'ai-req__when' }, fmtDate(r.created_at)));
 
   const what = summarise(r);
@@ -418,8 +454,16 @@ function summarise(r) {
     if (p.revise) return `רביזיה ל־${p.revise.campaign_id}: ${p.revise.instruction || ''}`;
     return p.brief || 'קמפיין';
   }
+  // spec 09 §B — a style request has no intent and no brief; what it has is a
+  // name and a pile of references.
+  if (r.kind === 'style') {
+    const n = (p.refs || []).length;
+    return `סגנון «${p.name || 'ללא שם'}»` + (n ? ` · ${n} רפרנסים` : ' · בלי רפרנסים');
+  }
   return p.intent || 'פוסט';
 }
+
+const KIND_WORD = { campaign: 'קמפיין', style: 'סגנון', post: 'פוסט' };
 
 /* =====================================================================
  * «איך זה נוצר» — the transparency block. Rendered here, mounted by BOTH
@@ -434,6 +478,8 @@ const STAGE_LABELS = {
   'voice gate': 'שער הקול (VOICE.md)',
   'template fit': 'התאמת תבניות',
   'render check': 'בדיקת גלישה',
+  'illustration generation': 'יצירת איורים',
+  'style': 'שמירת הסגנון',
   'write': 'שמירה ללוח',
   'campaign revision': 'רביזיית קמפיין',
 };
