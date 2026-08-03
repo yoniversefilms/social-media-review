@@ -2444,6 +2444,82 @@ function showTab(key) {
 }
 
 // ---- design mode: armed from the viewer's control row, not from a tab ----
+
+// v2.7 — the mobile editing surface. Below 920px an armed editor takes the
+// whole screen (body.pv-editfs, styled in this page's <style>): nav, post head
+// and review tools go away, and the page becomes head / slide / editor.js's
+// bottom dock. Above it, nothing changes — the two-column edit mode is
+// untouched. THE breakpoint is 920px, the same one editor.js and every other
+// collapse on this page already use.
+const FS_MQ = window.matchMedia('(max-width: 920px)');
+
+// The fullscreen stage puts BODY in `position: fixed` (post.html explains why:
+// `overflow:hidden` alone left the document 80px taller than the viewport), and
+// that zeroes the page's scroll offset. Nothing gives it back on its own, so a
+// reviewer who scrolled the slide into view, armed, and pressed ✕ landed at the
+// top of the page with the slide ~460px below the fold (measured 402×874:
+// scrollY 299 → 0; 360×640: 390 → 0).
+//
+// One stash, one restore, and the guard below is what keeps it honest:
+//   · null means «not stashed» — the value is cleared the instant it is spent,
+//     so a second exit can never replay a stale offset;
+//   · the class check makes this idempotent, so a repeat call cannot overwrite
+//     the stash with the 0 that body{position:fixed} is currently reporting.
+// Every path through the mode flips this class and nothing else does — the ✕,
+// the 🎨 toggle and the breakpoint crossing all land here.
+let PV_SCROLL_Y = null;
+
+// `enterY` is the offset to stash when ENTERING, captured by the caller before
+// it touched the DOM. It matters: setDesign() hides #reviewPanel before it gets
+// here, which SHORTENS the document, and the browser clamps the live scroll
+// offset to the new maximum on the spot. Reading window.scrollY at this point
+// therefore stashes an already-clamped number — measured at 360×640, a page
+// scrolled to 450 was clamped to 400 before the stash, so the ✕ handed back 400.
+// The mq listener passes nothing, and is right to: nothing mutates the DOM
+// ahead of it, so the live offset is the true one.
+function syncEditFs(enterY) {
+  const want = !!S.design && FS_MQ.matches;
+  const have = document.body.classList.contains('pv-editfs');
+  if (want === have) return;
+  if (want) {
+    // stash BEFORE the class lands: applying it is what zeroes the offset
+    const live = window.scrollY || document.documentElement.scrollTop || 0;
+    PV_SCROLL_Y = Number.isFinite(enterY) ? enterY : live;
+    document.body.classList.add('pv-editfs');
+    return;
+  }
+  document.body.classList.remove('pv-editfs');
+  if (PV_SCROLL_Y == null) return;
+  const y = PV_SCROLL_Y;
+  PV_SCROLL_Y = null;               // spent — never replayable
+  window.scrollTo(0, y);
+  // ONE restore, asserted twice: setDesign() re-renders the viewer and unhides
+  // the review panel AFTER this runs, so the document can still be shorter than
+  // `y` at this instant and the browser would clamp the scroll. Re-asserting the
+  // SAME captured value on the next frame is what makes it stick; it is not a
+  // second restore — the stash is already spent and cannot produce a new one.
+  requestAnimationFrame(() => window.scrollTo(0, y));
+}
+
+// arming on a desktop-width tablet and then rotating it into portrait has to
+// ENTER fullscreen, not leave a half-collapsed sidebar behind
+FS_MQ.addEventListener('change', syncEditFs);
+
+// v2.7 — the way out of fullscreen. On desktop the 🎨 toggle is still on
+// screen; in fullscreen it is one of the things the mode hides, so the edit
+// head carries its own ✕. Built once and re-parented like every other mover.
+let fsExitBtn = null;
+function fsExit() {
+  if (!fsExitBtn) {
+    fsExitBtn = el('button', {
+      class: 'btn btn--ghost pv-edit__x', type: 'button',
+      title: 'סגירת מצב העיצוב', 'aria-label': 'סגירת מצב העיצוב',
+    }, '✕');
+    fsExitBtn.addEventListener('click', () => setDesign(false));
+  }
+  return fsExitBtn;
+}
+
 function setDesign(on) {
   // v2.3 — arming edit mode over image slides would hand editor.js a slide with
   // no template to introspect. Refuse and say why, rather than mounting an
@@ -2454,6 +2530,10 @@ function setDesign(on) {
   }
   const want = !!on && hasSlidesData();
   if (S.design === want) return;
+  // v2.7 — the page's scroll offset, read BEFORE this function shortens the
+  // document by hiding #reviewPanel below. syncEditFs() stashes this on the way
+  // into fullscreen; read any later and it is already clamped (see its note).
+  const enterY = window.scrollY || document.documentElement.scrollTop || 0;
   // v2.3, operator change 08-01 — the English view is a TAB now, so there is no
   // mutual exclusion left to run here: arming design mode hides #reviewPanel and
   // the whole tab strip with it, which takes the English tab off screen for
@@ -2472,6 +2552,11 @@ function setDesign(on) {
   if (rp) rp.hidden = want;
   if (ep) ep.hidden = !want;
   moveEditChrome(want);
+  // v2.7 — before renderViewer(): the fullscreen class changes the column the
+  // slide is measured against, and compose.js scales the live preview to that
+  // width. Flip the layout first, mount into it second. (This is also the one
+  // place the page's scroll offset is stashed and given back — see syncEditFs.)
+  syncEditFs(enterY);
   // pinning a comment is a REVIEW action — it has no place in edit mode, and
   // its armed overlay would fight the editor's for the same clicks
   const pin = $('pinBtn');
@@ -2495,7 +2580,10 @@ function moveEditChrome(on) {
   const bar = $('actionBar');
   if (!head || !bar) return;
   const movers = [histUndoBtn, histRedoBtn, saveChipEl, tplSaveBtn].filter(Boolean);
-  if (on) { head.replaceChildren(...movers); return; }
+  // v2.7 — the ✕ leads the head (inline-start = RIGHT in RTL, where a thumb
+  // reaches). It is CSS-hidden above 920px, so desktop chrome is unchanged;
+  // it belongs to the head, not to the action bar, so it never travels back.
+  if (on) { head.replaceChildren(fsExit(), ...movers); return; }
   const dup = document.getElementById('dupBtn');
   for (const n of movers) bar.insertBefore(n, dup || null);
 }

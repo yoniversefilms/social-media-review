@@ -371,11 +371,117 @@ document.documentElement.dataset.theme=(t==='dark'||t==='light')?t:
 .pv-edit__head { display: flex; align-items: center; gap: 8px; flex-wrap: wrap; min-height: 34px; }
 .pv-edit__head .hist-btn { min-width: 38px; padding: 5px 10px; font-size: 1rem; line-height: 1; }
 .pv-edit__host { display: flex; min-height: 460px; }
-/* the sidebar fills this box; its own body is the single scroller */
-.pv-edit__host .smr-sb { flex: 1; min-width: 0; max-height: calc(100vh - 96px); }
+/* The DESKTOP cap on the docked sidebar, and the ONE .smr-* rule this file is
+   allowed to carry (editor.js's injectStyles owns every other one).
+   It is media-scoped as of v2.7, and that scope is the fix for a real defect,
+   not tidiness: unscoped, `.pv-edit__host .smr-sb` (0,2,0) outshouted
+   editor.js's own `@media (max-width:920px) .smr-sb` (0,1,0 — a media query
+   adds no specificity), so the mobile sheet computed max-height 778px on an
+   874px screen instead of the 58vh it asked for. Each file now owns exactly
+   one side of the breakpoint, so the two can never compete again.
+   DO NOT unscope this, and DO NOT add a second .smr-* rule here. */
+@media (min-width: 921px) {
+  /* the sidebar fills this box; its own body is the single scroller */
+  .pv-edit__host .smr-sb { flex: 1; min-width: 0; max-height: calc(100vh - 96px); }
+}
 @media (max-width: 920px) {
   .pv-edit { position: static; }
   .pv-edit__host { min-height: 0; }
+}
+
+/* ---------------- mobile edit mode: the fullscreen stage (v2.7) ----------------
+   Operator directive 2026-08-03: the post has to stay «locked in your view».
+   Below 920px, arming design mode (post.js setDesign → body.pv-editfs) turns
+   this page into a three-row fullscreen app: the edit head, the slide, and
+   editor.js's bottom dock. The site nav, the post header and the review tools
+   are the ~360px of chrome that used to push the slide's bottom below the fold
+   before anything was even selected — in this mode they are gone, and the
+   reclaimed height is what makes «100% of the slide, in every state» possible.
+
+   CROSS-FILE CONTRACT — `--smr-panel-h`:
+     WRITER  app/js/editor.js (on document.documentElement — see its
+             "the dock: open / close state (v2.7)" block)
+     READER  this rule, and only this rule.
+   It is 0px while the dock is collapsed and the open panel's measured height
+   while a tool panel is up. This page never writes it; editor.js never reads
+   the .pv-* box it feeds. That single custom property is the entire surface
+   between the two files.
+
+   The slide is sized by WIDTH, because that is the only lever compose.js
+   answers to (it scales the live preview to its container's clientWidth and
+   re-fits through its own ResizeObserver). 0.8 = 1080/1350, the slide's ratio,
+   so capping the width caps the height to the row that is left over.
+   dvh, never vh — vh includes the space under a mobile URL bar, and that is
+   the exact amount that would hide the bottom of the artwork. */
+/* the ✕ is a mobile affordance only — on desktop the 🎨 toggle is right there */
+.pv-edit__x { display: none; min-width: 34px; padding: 5px 10px; font-size: 1rem; line-height: 1; }
+@media (max-width: 920px) {
+  /* The scroll lock has to be `position: fixed`, not just `overflow: hidden`.
+     app.css gives body `min-height: 100vh`, and body sits 80px down the page,
+     so the document stayed 954px tall against an 874px viewport and the whole
+     fullscreen stage could still be dragged 80px off the top. Taking body out
+     of flow is what makes the document exactly one viewport tall — measured
+     954→874, scrollTo(0,400) → scrollY 0. post.js stashes and restores the
+     page's scroll offset around this (see PV_SCROLL_Y), because taking body
+     out of flow zeroes it. */
+  body.pv-editfs { position: fixed; inset: 0; overflow: hidden; }
+  /* the reclaimed chrome */
+  body.pv-editfs .nav,
+  body.pv-editfs .pv-head,
+  body.pv-editfs .pv-tools,
+  body.pv-editfs .pv-count { display: none !important; }
+  body.pv-editfs .pv-wrap { padding: 0; }
+  body.pv-editfs .pv-main {
+    position: fixed; inset: 0; z-index: 80;
+    /* minmax(0,1fr), NOT 1fr. A bare `1fr` is `minmax(auto,1fr)`, and the auto
+       MINIMUM is the content's min-content size — which, for a .pv-frame whose
+       width is `min(100%, …)`, resolves the percentage against an indefinite
+       box and falls back to the calc. Measured before this line landed: a 402px
+       viewport produced a 497px viewer column and a 481px slide hanging 87px
+       off the left edge. The zero minimum is what makes `100%` definite. */
+    display: grid; grid-template-columns: minmax(0, 1fr);
+    grid-template-rows: auto 1fr auto; gap: 0;
+    /* the base rule is `align-items: start` (two review columns that must not
+       stretch to each other's height). Here the middle row IS the stage and
+       has to fill what is left, or the slide sits jammed under the head with
+       280px of dead space under it — measured before this line. */
+    align-items: stretch;
+    overflow: hidden; background: var(--bg);
+  }
+  /* :not([hidden]) so the `.pv-edit[hidden] { display: none }` invariant below
+     keeps winning no matter where this block sits in the file */
+  body.pv-editfs .pv-edit:not([hidden]) { display: contents; }
+  body.pv-editfs .pv-edit__head {
+    grid-row: 1; min-height: 44px; padding: 6px 10px; margin: 0;
+    flex-wrap: nowrap; overflow-x: auto; scrollbar-width: none;
+  }
+  body.pv-editfs .pv-edit__head::-webkit-scrollbar { display: none; }
+  body.pv-editfs .pv-viewer {
+    grid-row: 2; min-width: 0; min-height: 0; padding: 0 8px; overflow: hidden;
+    display: flex; flex-direction: column; justify-content: center;
+  }
+  /* the dock is flush to the bottom edge — no gutter under a thumb */
+  body.pv-editfs .pv-edit__host { grid-row: 3; display: block; min-height: 0; }
+  /* The stage is the SLIDE and nothing else in this mode. The prev/next
+     arrows and the dot strip are ~38px of chrome under the frame, and the
+     height budget below has no room for them: at 874×402 with a panel open
+     they cost the slide 40 of its 109px. In fullscreen edit the dock's
+     «שקפים» chip IS the slide switcher (it is on the rail for exactly this
+     reason) — outside edit mode the arrows and dots are untouched. */
+  body.pv-editfs .pv-stage {
+    grid-template-columns: minmax(0, 1fr); grid-template-areas: 'frame';
+    min-width: 0; margin-bottom: 0; row-gap: 0; column-gap: 0;
+  }
+  body.pv-editfs .pv-arrow,
+  body.pv-editfs .pv-dots { display: none; }
+  body.pv-editfs .pv-frame {
+    /* head 44 + dock rail 56 + the open panel + 24 of gaps/padding (plan §2b) */
+    --pv-chrome-h: calc(44px + 56px + var(--smr-panel-h, 0px) + 24px);
+    width: min(100%, calc((100dvh - var(--pv-chrome-h)) * 0.8));
+    max-width: none;
+  }
+  /* mobile-only way out of the mode (post.js moveEditChrome builds it) */
+  body.pv-editfs .pv-edit__x { display: inline-flex; align-items: center; justify-content: center; }
 }
 
 /* ------------- English translation TAB (v2.3) -------------

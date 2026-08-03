@@ -655,6 +655,12 @@ function pruneEl(e, key) {
 
 // ---------------------------------------------------------------- styles
 
+// v2.7 — THE breakpoint. 920px is the one every existing collapse in this file
+// and in post.html already uses; below it the sidebar is the bottom dock, above
+// it the v2.1 column. Module-level because a MediaQueryList is stateless and
+// shared — each editor instance adds and removes its OWN change listener.
+const mq = window.matchMedia('(max-width: 920px)');
+
 let stylesDone = false;
 function injectStyles() {
   if (stylesDone) return;
@@ -804,13 +810,90 @@ function injectStyles() {
 .smr-sb__pane{display:grid;gap:10px;align-content:start;min-width:0}
 .smr-sb__empty{color:var(--ink-soft,#6b5f63);line-height:1.55;font-size:.86rem}
 .smr-sb__hint{color:var(--ink-soft,#6b5f63);font-size:.78rem;line-height:1.5}
+/* v2.7 dock scaffolding, INERT above the breakpoint. ".smr-sb__tabs" is a real
+   element in the DOM at every width; "display:contents" makes it vanish from
+   the box tree on desktop, so the rail keeps the v2.1 column layout it was
+   signed off with, pixel for pixel. The quick-verb slot and the panel's ✕ are
+   mobile-only surfaces and are not rendered at all up here. */
+.smr-sb__tabs{display:contents}
+.smr-sb__qslot{display:none}
+.smr-sb__x{display:none}
 
-/* narrow: the sidebar becomes a bottom sheet so the slide stays on screen */
+/* ============ the mobile editing dock (v2.7) ============
+   Operator directive 2026-08-03: «a bar on the bottom that has all the features
+   and it opens when you tap a small button and you can scroll through them — so
+   the features are there but compact and keeps the post locked in your view.»
+
+   What this replaced: the same sidebar re-laid as a bottom SHEET, which covered
+   77% of the slide empty and 100% of it with a property panel up (measured
+   402×874, 2026-08-03); at 360×640 the empty sheet already covered everything.
+
+   Same DOM, re-laid: a 56px row of tool chips that scrolls horizontally at the
+   very bottom, with the selection's quick verbs pinned at its inline-start, and
+   the panel opening ABOVE the row at min(42dvh, 360px). The slide is 100% on
+   screen in every state — post.html's fullscreen edit stage is the other half
+   of that promise, and --smr-panel-h (below) is the wire between the two.
+   (No backticks anywhere in here: this whole block is a template literal.)
+
+   dvh, never vh: a mobile URL bar makes vh overstate the box by ~60px, which is
+   exactly the amount that would put the bottom of the slide under the dock. */
 @media (max-width:920px){
-  .smr-sb,.smr-sb--float{position:fixed;z-index:90;inset-inline:0;inset-block:auto 0;
-    width:auto;max-height:58vh;border-radius:16px 16px 0 0;border-bottom:0;
+  /* hosted (post.html): the dock is a normal-flow block in the page's edit
+     grid. Unhosted (build.html): the same dock, pinned to the viewport. */
+  .smr-sb{flex-direction:column;width:auto;max-height:none;
+    border-radius:16px 16px 0 0;border-bottom:0}
+  .smr-sb--float{position:fixed;z-index:90;inset-inline:0;inset-block:auto 0;
     box-shadow:0 -12px 40px rgba(36,29,32,.24);animation:smr-sb-up .2s ease-out}
-  .smr-sb__rail{width:64px}
+
+  /* the rail IS the dock: one pinned slot for the selection's verbs, then a
+     scroller carrying every tool chip. The sidebar already carries dir="rtl",
+     so a flex row lays the first child at the RIGHT edge and the overflow
+     scrolls leftward — browser-native, no hand-written left/right. */
+  .smr-sb__rail{order:2;width:auto;flex:none;flex-direction:row;
+    align-items:center;gap:0;padding:0 6px;
+    height:calc(56px + env(safe-area-inset-bottom,0px));
+    padding-block-end:env(safe-area-inset-bottom,0px);
+    border-inline-start:0;border-top:1px solid var(--line,rgba(36,29,32,.12))}
+  .smr-sb__qslot{display:flex;order:0;flex:none;align-items:center;min-width:0}
+  /* the divider only exists when the slot is actually carrying verbs */
+  .smr-sb__qslot:has(.smr-edqb:not([hidden])){
+    margin-inline-end:5px;padding-inline-end:5px;
+    border-inline-end:1px solid var(--line,rgba(36,29,32,.14))}
+  /* the docked bar is the SAME node the desktop floats (one node, two homes,
+     the moveEditChrome pattern) — in the slot it drops every trace of being an
+     overlay: no fixed position, no shadow, no entrance animation. */
+  .smr-sb__qslot .smr-edqb{position:static;z-index:auto;border:0;padding:0;
+    background:none;box-shadow:none;border-radius:0;animation:none}
+  .smr-sb__tabs{display:flex;order:1;flex:1;min-width:0;align-items:center;
+    gap:4px;overflow-x:auto;overflow-y:hidden;overscroll-behavior-x:contain;
+    -webkit-overflow-scrolling:touch;scrollbar-width:none}
+  .smr-sb__tabs::-webkit-scrollbar{display:none}
+  .smr-sb__rail .smr-sb__tab{flex:none;flex-direction:row;gap:5px;
+    padding:7px 11px;border-radius:999px;white-space:nowrap;
+    background:color-mix(in srgb,var(--ink,#241d20) 5%,transparent)}
+  .smr-sb__rail .smr-sb__tab.on{
+    background:color-mix(in srgb,var(--accent,#830051) 14%,transparent)}
+  .smr-sb__rail .smr-sb__tab .lb{font-size:.78rem}
+  /* a flex:1 spacer means nothing inside a scroller — it becomes the divider
+     that keeps «איפוס» from reading as a sixth tool */
+  .smr-sb__railgap{flex:none;width:1px;align-self:stretch;margin:9px 5px;
+    background:var(--line,rgba(36,29,32,.14))}
+
+  /* the panel opens ABOVE the row, never over the slide. .smr-sb__body is
+     still the one and only scroller in here (the v2.1 rule, unchanged).
+     The height is authored in dvh; the JS below MEASURES what that resolves to
+     and publishes it as --smr-panel-h, so the page can budget for it. */
+  .smr-sb__panel{order:1;flex:none;min-height:0;display:none}
+  .smr-sb.is-dockopen .smr-sb__panel{display:flex;
+    height:var(--smr-panel-h,min(42dvh,360px))}
+  .smr-sb__head{padding:9px 13px 8px}
+  /* re-tapping the lit chip closes the panel too, but nobody discovers that;
+     this is the discoverable door out. */
+  .smr-sb__x{display:inline-flex;align-items:center;justify-content:center;
+    appearance:none;border:0;background:none;cursor:pointer;font:inherit;
+    font-size:.95rem;line-height:1;width:30px;height:30px;border-radius:8px;
+    color:var(--ink-soft,#6b5f63);margin-inline-start:6px;flex:none}
+  .smr-sb__x:hover{background:rgba(131,0,81,.07);color:var(--ink,#241d20)}
 }
 @keyframes smr-sb-up{from{transform:translateY(14px);opacity:0}to{transform:none;opacity:1}}
 
@@ -1267,16 +1350,26 @@ export function initEditor(handle, slide, opts = {}) {
       safeBtn.setAttribute('aria-pressed', safeBox.hidden ? 'false' : 'true');
     },
   }, '⊞');
+  // v2.7 — mobile-only. Re-tapping the lit chip closes the panel as well, but
+  // that is not a thing anyone discovers; this is the door people can see.
+  const dockX = el('button', {
+    class: 'smr-sb__x', type: 'button', title: 'סגירת הלוח',
+    'aria-label': 'סגירת הלוח',
+    onclick: () => closeDock(),
+  }, '✕');
   const sbBody = el('div', { class: 'smr-sb__body' }, ...TABS.map((t) => t.pane));
   const sbPanel = el('div', { class: 'smr-sb__panel' },
-    el('div', { class: 'smr-sb__head' }, sbTitle, safeBtn), sbBody);
+    el('div', { class: 'smr-sb__head' }, sbTitle, safeBtn, dockX), sbBody);
   const railBtns = new Map();
-  const sbRail = el('div', { class: 'smr-sb__rail' },
+  // v2.7 — the tab buttons live in their own wrapper so the mobile dock can
+  // make it a horizontal scroller. Above 920px the wrapper is
+  // `display:contents`, so the rail's box tree is exactly what it was in v2.1.
+  const sbTabs = el('div', { class: 'smr-sb__tabs' },
     TABS.map((t) => {
       const b = el('button', {
         class: 'smr-sb__tab', type: 'button', title: t.title,
         'aria-pressed': 'false',
-        onclick: () => openTab(t.key),
+        onclick: () => tapTab(t.key),
       }, el('span', { class: 'ic' }, t.icon), el('span', { class: 'lb' }, t.label));
       railBtns.set(t.key, b);
       return b;
@@ -1288,6 +1381,11 @@ export function initEditor(handle, slide, opts = {}) {
       onclick: () => resetDialog(),
     }, el('span', { class: 'ic' }, '⟲'), el('span', { class: 'lb' }, 'איפוס')),
   );
+  // v2.7 — the rail's pinned first child: at ≤920px the quick-verb bar is
+  // re-parented in here instead of floating over the artwork (see dockQuickBar).
+  // Empty and unrendered on desktop.
+  const qslot = el('div', { class: 'smr-sb__qslot' });
+  const sbRail = el('div', { class: 'smr-sb__rail' }, qslot, sbTabs);
   const sbHost = (opts.sidebar && opts.sidebar.nodeType === 1) ? opts.sidebar : null;
   const sidebar = el('aside', {
     class: 'smr-sb' + (sbHost ? '' : ' smr-sb--float'), dir: 'rtl',
@@ -1296,6 +1394,61 @@ export function initEditor(handle, slide, opts = {}) {
   // clicks inside the sidebar must never reach the slide's deselect handler
   sidebar.addEventListener('pointerdown', (e) => e.stopPropagation());
   (sbHost || document.body).appendChild(sidebar);
+
+  // ---------------- the dock: open / close state (v2.7) ----------------
+  //
+  // CROSS-FILE CONTRACT — `--smr-panel-h` on document.documentElement.
+  // editor.js is the ONLY writer; post.html only READS it (see its
+  // `body.pv-editfs .pv-frame` rule, which subtracts it from the slide's
+  // height budget so the artwork stays 100% visible while a panel is up).
+  //   collapsed / mobile ......... "0px"
+  //   panel open ................. the panel's MEASURED px height
+  //   desktop, or after destroy .. the property is removed entirely
+  // It is measured rather than computed because the height is authored in the
+  // stylesheet as min(42dvh,360px): computing it here from innerHeight would
+  // re-introduce the vh lie the dvh unit exists to avoid. The property is
+  // cleared before measuring so the CSS expression — not the stale px we wrote
+  // last time — is what gets resolved.
+  let dockOpen = false;
+
+  function syncPanelVar() {
+    if (destroyed) return;
+    const root = document.documentElement;
+    if (!mq.matches) { root.style.removeProperty('--smr-panel-h'); return; }
+    if (!dockOpen) { root.style.setProperty('--smr-panel-h', '0px'); return; }
+    root.style.removeProperty('--smr-panel-h');
+    const h = Math.round(sbPanel.getBoundingClientRect().height);
+    root.style.setProperty('--smr-panel-h', h + 'px');
+  }
+
+  function openDock() {
+    if (!mq.matches) return;
+    dockOpen = true;
+    sidebar.classList.add('is-dockopen');
+    syncPanelVar();
+  }
+
+  function closeDock() {
+    dockOpen = false;
+    sidebar.classList.remove('is-dockopen');
+    syncPanelVar();
+  }
+
+  // a chip press. Tapping the chip that is already lit while its panel is open
+  // is the "put it away" gesture — same button, both directions.
+  function tapTab(key) {
+    if (mq.matches && dockOpen && activeTab === key) { closeDock(); return; }
+    openTab(key, { dock: true });
+  }
+
+  // one node, two homes. Below the breakpoint the quick verbs are a child of
+  // the rail's pinned slot; above it they float beside the selection, exactly
+  // as they have since v2.3.
+  function dockQuickBar() {
+    const home = mq.matches ? qslot : document.body;
+    if (quickBar.parentNode !== home) home.appendChild(quickBar);
+    if (!mq.matches) { quickBar.style.top = ''; quickBar.style.left = ''; }
+  }
 
   function openTab(key, o = {}) {
     if (!TABS.some((t) => t.key === key)) return;
@@ -1313,6 +1466,11 @@ export function initEditor(handle, slide, opts = {}) {
     if (key === 'layers') renderLayersPanel();
     if (key === 'props') syncPropsPane();
     if (!o.keepScroll) sbBody.scrollTop = 0;
+    // v2.7 — on mobile a tab is only half the story: something has to OPEN.
+    // Only deliberate tool presses pass {dock:true}; selecting a thing on the
+    // slide swings the tab but leaves the dock shut (the quick verbs cover the
+    // common cases, and «⋯» is the door to the rest).
+    if (o.dock) openDock();
   }
 
   function syncPropsPane() {
@@ -2398,7 +2556,9 @@ export function initEditor(handle, slide, opts = {}) {
   // the options live, instead of wondering what just happened.
   function qbMore() {
     return qbBtn('⋯', 'כל האפשרויות — בסרגל הצד', () => {
-      openTab('props');
+      // {dock:true}: on mobile «⋯» is the ONE thing that opens the panel from
+      // a selection, and the pulse below is what tells you where it went.
+      openTab('props', { dock: true });
       sbPanel.classList.remove('is-pulse');
       void sbPanel.offsetWidth;              // restart the animation
       sbPanel.classList.add('is-pulse');
@@ -2496,6 +2656,10 @@ export function initEditor(handle, slide, opts = {}) {
   // so they get a wider berth — otherwise the bar sits ON the handle and the
   // first thing a drag grabs is a button.
   function placeQuickBar() {
+    // v2.7 — at ≤920px there is nothing to place: the bar is a child of the
+    // dock's pinned slot and the rail's flex row positions it. Nothing floats
+    // over the artwork on mobile at all.
+    if (mq.matches) return;
     if (quickBar.hidden || !sel) return;
     const g = geomOf(sel);
     if (!g) { quickBar.hidden = true; return; }
@@ -2946,6 +3110,14 @@ export function initEditor(handle, slide, opts = {}) {
       blk.bold = !blk.bold;
       boldB.classList.toggle('on', blk.bold);
       commit();
+      // v2.7 — the mirror ran ONE WAY: the quick bar's B calls renderToolbar()
+      // and rebuilds both, but this button only ever repainted itself, so
+      // untoggling here left the bar's B lit (v2.3 defect, desktop too — the
+      // "lights up in both places or in neither" rule was half-implemented).
+      // renderQuickBar() and not renderToolbar(): re-rendering the whole panel
+      // under a live pointer would drop the sliders' and fields' state.
+      renderQuickBar();
+      requestAnimationFrame(placeQuickBar);
     });
     const italB = el('button', { class: 'smr-edtg smr-edtg--i' + (b.italic ? ' on' : ''), type: 'button', title: 'נטוי' }, 'I');
     italB.addEventListener('click', () => {
@@ -2953,6 +3125,8 @@ export function initEditor(handle, slide, opts = {}) {
       blk.italic = !blk.italic;
       italB.classList.toggle('on', blk.italic);
       commit();
+      renderQuickBar();               // same one-way mirror as B, above
+      requestAnimationFrame(placeQuickBar);
     });
 
     const resetB = el('button', { class: 'btn btn--ghost', type: 'button' }, 'איפוס');
@@ -4903,7 +5077,7 @@ export function initEditor(handle, slide, opts = {}) {
         el('div', { class: 'smr-edlyr__band' }, 'רקע'),
         el('div', {
           class: 'smr-edlyr__row', title: 'פתיחת עורך הרקע',
-          onclick: () => openTab('bg'),
+          onclick: () => openTab('bg', { dock: true }),
         },
           el('span', { class: 'smr-edlyr__grip', style: { visibility: 'hidden' } }, '⋮⋮'),
           el('span', { class: 'smr-edlyr__nm' }, bgRowSummary()),
@@ -5638,16 +5812,36 @@ export function initEditor(handle, slide, opts = {}) {
   overlay.addEventListener('dragover', onDragOver);
   overlay.addEventListener('dragleave', onDragLeave);
   overlay.addEventListener('drop', onDropEv);
+  // v2.7 — crossing the breakpoint in EITHER direction re-homes the quick bar
+  // and resets the chrome: coming down, the dock starts collapsed with the
+  // contract property at 0px; going up, the property is removed entirely and
+  // the floating bar re-places itself against the selection.
+  const onMq = () => {
+    if (destroyed) return;
+    if (!mq.matches) closeDock();
+    dockQuickBar();
+    syncPanelVar();
+    refreshUI();
+  };
+  // resize (not just a breakpoint cross) changes what min(42dvh,360px)
+  // resolves to, and post.html budgets the slide against that number.
+  const onWinResize = () => syncPanelVar();
+
   document.addEventListener('keydown', onKey);
   window.addEventListener('scroll', reposition, true);
   window.addEventListener('resize', reposition);
+  window.addEventListener('resize', onWinResize);
+  mq.addEventListener('change', onMq);
   iframe.addEventListener('load', reposition);
   const ro = new ResizeObserver(reposition);
   ro.observe(wrapper);
 
   // open on «מאפיינים» with its empty state: the first thing the sidebar says
-  // is what to do next (click something on the slide), not a wall of controls
+  // is what to do next (click something on the slide), not a wall of controls.
+  // No {dock:true}: on mobile the dock arms COLLAPSED, slide fully in view.
   openTab('props');
+  dockQuickBar();
+  syncPanelVar();
 
   // ---------------- public handle ----------------
 
@@ -5661,10 +5855,21 @@ export function initEditor(handle, slide, opts = {}) {
       overlay.remove();
       sidebar.remove(); // takes the rail, the toolbar and both panes with it
       editBar.remove();
+      // v2.7 — while docked the quick bar is INSIDE the sidebar, so this also
+      // has to survive the node already having gone with it. remove() on a
+      // detached node is a no-op, which is exactly what we want.
       quickBar.remove();
+      // v2.7 — every trace the dock left on shared surfaces goes back: the
+      // open class and the cross-file custom property. Arm→exit must leak
+      // nothing, or the next arm inherits a stale height budget.
+      dockOpen = false;
+      sidebar.classList.remove('is-dockopen');
+      document.documentElement.style.removeProperty('--smr-panel-h');
       document.removeEventListener('keydown', onKey);
       window.removeEventListener('scroll', reposition, true);
       window.removeEventListener('resize', reposition);
+      window.removeEventListener('resize', onWinResize);
+      mq.removeEventListener('change', onMq);
       iframe.removeEventListener('load', reposition);
       ro.disconnect();
     },
