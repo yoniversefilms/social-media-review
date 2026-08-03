@@ -36,7 +36,7 @@ import {
   listAssets, listPhotos, assetRowUrl, photoUrl, uploadAsset,
   GEN_DIMS, dimByKey, FAL_LONG_SIDE_CAP,
 } from './store.js';
-import { el, modal, toast, fmtDate } from './ui.js';
+import { el, modal, toast, fmtDate, uploadProgress } from './ui.js';
 // v2.6 phone-proofing. Both file inputs on this page hold their picked Files
 // across a modal and several awaits before uploading them, which is exactly
 // the pattern iOS picker Files do not survive; snapshotFiles copies the bytes
@@ -218,6 +218,14 @@ function renderRoutes() {
   }));
 }
 
+// v2.8 — the upload bar for BOTH pickers, one module-level instance.
+// It has to be a singleton mounted in the banner rather than in each picker's
+// own markup: the style-ref uploads start AFTER its modal has closed, and the
+// convert picker's input is inside a subtree render() replaces. renderBanner()
+// re-appends this same node every pass, so the element (and its state) rides
+// through every setBusy() repaint instead of being rebuilt at 0%.
+const UP_BAR = uploadProgress();
+
 // The banner states the truth about what this tab can do RIGHT NOW, in words.
 // Spec 08's honesty rule applies here too: no fake spinners, no pretending a
 // dry run made a picture.
@@ -231,6 +239,9 @@ function renderBanner() {
       S.busy,
       el('span', { class: 'gen-sub' }, ' — יצירת תמונה לוקחת בין 20 שניות לשתי דקות. אפשר לעבור טאב, העבודה נמשכת.')));
   }
+
+  // Always in the DOM, hidden unless an upload loop is running.
+  bits.push(UP_BAR.root);
 
   if (IS_LOCAL) {
     // Not an error — a fact about where this feature lives. The local board has
@@ -1350,6 +1361,9 @@ function refStyleForm() {
         // banner: a ref has to be a real public URL before the queue row can
         // carry it, and there is no other moment to do it.
         setBusy('מעלים את תמונות הרפרנס…');
+        // v2.8: setBusy's word-line stays exactly as it was (it is what
+        // disables the buttons); the bar is the picture next to it.
+        UP_BAR.start(picked.length);
         try {
           const uploaded = [];
           for (const [i, p] of picked.entries()) {
@@ -1361,7 +1375,13 @@ function refStyleForm() {
               label: `רפרנס לסגנון ${name.value.trim() || ''}`.trim(),
             });
             uploaded.push({ kind: 'image', url: up.url, asset_id: up.row.id });
+            UP_BAR.tick(i + 1, p.file.name);
           }
+          // NOT hidden here. Retiring the bar in the same synchronous block
+          // that filled it means the browser never paints «3/3» and the last
+          // thing seen is «2/3» — an upload that looks one short. The awaited
+          // queue call below is what gives the full bar its paint; the finally
+          // retires it. Same rule as the assets dock.
           setBusy('שולחים את הבקשה לתור…');
           await requestStyleFromRefs({
             kind: kindSel.value,
@@ -1380,6 +1400,7 @@ function refStyleForm() {
             ? 'תור הבקשות עוד לא הותקן בשרת — אפשר בינתיים ליצור סגנון ידנית'
             : ((e && e.message) || String(e)), 'err');
         } finally {
+          UP_BAR.hide();   // also the throw path: no bar outlives its loop
           setBusy('');
         }
         return true;
@@ -1425,23 +1446,29 @@ function renderConvert() {
     // bytes are read for the body, which is the exact window an iOS picker
     // File goes stale in.
     const tooBig = batchTooBig(file.files);
+    // Refused before anything is read: no bar for an upload that will not run.
     if (tooBig) { file.value = ''; toast(tooBig, 'err'); return; }
+    // v2.8: a 48MP phone photo spends real seconds in the snapshot and again
+    // in normalizeImage inside uploadAsset, with the picker already gone.
+    UP_BAR.phase('מכינים את התמונה…');
     const snap = await snapshotFiles(file.files);
     file.value = '';
     if (snap.failed.length) toast(summarizeFailures(snap.failed), 'err');
     const f = snap.ok[0];
-    if (!f) return;
+    if (!f) { UP_BAR.hide(); return; }
     // Upload first so the source is a real library asset with an id — that is
     // what lets the derivation chain start at the ORIGINAL rather than at
     // "something someone dragged in once".
     setBusy('מעלים את תמונת המקור…');
+    UP_BAR.start(1);
     try {
       const up = await uploadAsset({ file: f, kind: 'photo', post_id: S.postId || undefined });
+      UP_BAR.tick(1, f.name);
       S.convert.src = { id: up.row.id, url: up.url, label: up.row.label || up.row.name };
       await refreshAssets();
     } catch (e) {
       toast((e && e.message) || String(e), 'err');
-    } finally { setBusy(''); }
+    } finally { UP_BAR.hide(); setBusy(''); }
   });
 
   const candidates = [

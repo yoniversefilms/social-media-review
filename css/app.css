@@ -1310,3 +1310,70 @@ hr, .rule {
 @media (max-width: 919px) {
   .tour-fab, .tour-fab-menu { display: none; }
 }
+
+/* ===== v2.8 upload progress bar (ui.js uploadProgress) ===== */
+/* One component behind three surfaces: the assets dock, the post page's
+   תמונות tab, and both generate pickers. Batch-level by design — the fill
+   moves once per FILE, not per byte. */
+.upbar {
+  margin-block-start: 8px;
+  display: grid;
+  gap: 6px;
+  text-align: start;
+}
+/* `[hidden] {display:none}` is a USER-AGENT rule and the `display: grid`
+   above beats it — without this line `root.hidden = true` hides nothing at
+   all and the bar sits there forever. Same trap post.html spells out. */
+.upbar[hidden] { display: none; }
+
+.upbar__line {
+  font-size: .84rem;
+  color: var(--ink);
+  direction: rtl;
+  unicode-bidi: isolate;
+}
+/* Filenames are Latin inside an RTL line: isolate them or «IMG_1023.jpg»
+   trades places with the counter. */
+.upbar__file {
+  color: var(--ink-soft);
+  direction: ltr;
+  unicode-bidi: isolate;
+}
+
+/* The track is a FLEX row and the fill is its first child, so the fill is
+   laid out from the inline start — the RIGHT edge under `dir=rtl` — without
+   one direction-aware declaration. Verified in the browser, not by reading
+   this comment. */
+.upbar__track {
+  display: flex;
+  align-items: stretch;
+  height: 8px;
+  border: 1px solid var(--line);
+  border-radius: 999px;
+  background: var(--wash-2);
+  overflow: hidden;
+}
+.upbar__fill {
+  flex: 0 0 auto;
+  width: 0%;
+  min-width: 0;
+  border-radius: inherit;
+  background: var(--accent);
+  transition: width .22s ease;
+}
+/* Pulse only while there is work left; the final tick sits still so a paused
+   bar never looks like a running one. */
+.upbar.is-active .upbar__fill { animation: upbar-pulse 1.4s ease-in-out infinite; }
+
+@keyframes upbar-pulse {
+  0%, 100% { opacity: 1; }
+  50%      { opacity: .58; }
+}
+
+/* The blanket reduce rule earlier in this file already kills both of these.
+   Restated next to the animation so a future narrowing of that rule cannot
+   silently bring the pulse back. */
+@media (prefers-reduced-motion: reduce) {
+  .upbar__fill { transition: none; }
+  .upbar.is-active .upbar__fill { animation: none; }
+}

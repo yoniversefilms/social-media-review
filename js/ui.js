@@ -18,6 +18,8 @@
 //                                    carries the name chip AND the v2.3 role chip
 //   ROLE_LABELS                      {marketing, therapist} Hebrew chip labels
 //   injectFonts(assetUrlFn)          runtime @font-face for Assistant
+//   uploadProgress()                 v2.8 shared upload bar ->
+//                                    {root, start, tick, phase, hide}
 
 // ---------------------------------------------------------------- el
 
@@ -456,4 +458,73 @@ export function zoomControl({ getEl, key = 'smr:pvzoom' } = {}) {
   try { saved = parseFloat(localStorage.getItem(key)) || 1; } catch { /* ok */ }
   set(saved);
   return root;
+}
+
+// ------------------------------------------------------ uploadProgress (v2.8)
+
+/* ONE upload bar for every surface that uploads files: the assets dock, the
+   post page's תמונות tab, and both generate pickers. Deliberately BATCH-level
+   — the fill moves once per FILE, never per byte. Byte-level XHR progress was
+   considered and rejected: it means a second upload driver inside store.js
+   (whose literal-NUL composite keys are not worth the risk) for a bar that is
+   already honest at per-file granularity, because uploads here are sequential.
+
+   API: start(total) shows it at 0; tick(done, label) advances it and names the
+   file; phase(text) swaps the text line for a non-countable step (the byte
+   snapshot before an upload even begins); hide() retires and resets it.
+
+   RTL: the fill is the track's FIRST FLEX CHILD, so flex lays it out from the
+   inline start — the RIGHT edge in this Hebrew UI — with no direction-aware
+   CSS anywhere. An absolutely-positioned fill with `left: 0` would have grown
+   from the wrong side and read as an upload running backwards. */
+export function uploadProgress() {
+  const line = el('div', { class: 'upbar__line' });
+  const fill = el('div', { class: 'upbar__fill' });
+  const track = el('div', { class: 'upbar__track', role: 'presentation' }, fill);
+  const root = el('div', { class: 'upbar', hidden: true }, line, track);
+  let total = 0;
+
+  const clamp = (n, hi) => Math.max(0, Math.min(hi, Number(n) || 0));
+
+  function paint(done) {
+    const pct = total > 0 ? (done / total) * 100 : 0;
+    fill.style.width = pct.toFixed(1) + '%';
+    // the pulse only runs while there is work left; the last tick sits still
+    root.classList.toggle('is-active', total > 0 && done < total);
+  }
+
+  function start(n) {
+    total = clamp(n, Number.MAX_SAFE_INTEGER);
+    root.hidden = false;
+    line.textContent = `0/${total} הועלו`;
+    paint(0);
+  }
+
+  function tick(done, label) {
+    const d = clamp(done, total);
+    line.replaceChildren(
+      `${d}/${total} הועלו`,
+      ...(label ? [' · ', el('span', { class: 'upbar__file' }, String(label))] : []),
+    );
+    root.hidden = false;
+    paint(d);
+  }
+
+  // A named step with no count of its own — «מכינים את הקבצים…» while the
+  // bytes are being snapshotted, which on a phone batch is the slow part.
+  function phase(text) {
+    root.hidden = false;
+    line.textContent = String(text || '');
+    root.classList.add('is-active');
+  }
+
+  function hide() {
+    root.hidden = true;
+    root.classList.remove('is-active');
+    line.textContent = '';
+    fill.style.width = '0%';
+    total = 0;
+  }
+
+  return { root, start, tick, phase, hide };
 }

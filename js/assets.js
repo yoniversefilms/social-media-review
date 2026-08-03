@@ -50,7 +50,7 @@ import {
   initStore, assetUrl, listAssets, uploadAsset, updateAsset,
   reconcileStudioAssets, assetRowUrl, listPosts, subscribe, GEN_DIMS, dimByKey,
 } from './store.js';
-import { el, modal, toast, fmtDate, navBar } from './ui.js';
+import { el, modal, toast, fmtDate, navBar, uploadProgress } from './ui.js';
 import { zipStore } from './zip.js';
 // v2.5.2 version stacks — shared verbatim with editor.js's «ספריית נכסים»
 // picker. It lives in its own dependency-free module rather than here because
@@ -695,7 +695,10 @@ function uploadDock() {
   const dir = el('input', {
     type: 'file', multiple: true, webkitdirectory: true, style: { display: 'none' },
   });
-  const prog = el('div', { class: 'a-prog', hidden: true });
+  // v2.8: the text-only «12/68 הועלו» line is now the shared bar from ui.js —
+  // same copy, same paint-honesty rules, plus a track that says how far in a
+  // 68-file folder actually is. Still batch-level: one tick per file.
+  const prog = uploadProgress();
   const pickDir = el('button', { class: 'btn btn--ghost', type: 'button' }, '📁 תיקייה שלמה');
 
   const dock = el('div', { class: 'a-drop' },
@@ -707,7 +710,7 @@ function uploadDock() {
       el('span', { class: 'ltr' }, `עד ${MAX_DROP_FILES}`), ' קבצים · ',
       el('span', { class: 'ltr' }, '400MB'), ' לגרירה'),
     el('div', { class: 'a-dockctl' }, kindSel, folderSel, pickDir),
-    prog,
+    prog.root,
   );
   // both controls sit inside the click target: don't let using them open the
   // plain file dialog underneath
@@ -763,6 +766,14 @@ function uploadDock() {
     // it on the next line would hang the tab on the one drop that was always
     // going to be rejected.
     if (overCap(live)) return;
+    // The bar appears only AFTER the cap has been cleared, so the refusal
+    // modal never opens over a progress bar for an upload that will not
+    // happen. Snapshotting a phone folder is seconds of copying with nothing
+    // on screen otherwise — that is what phase() is for.
+    // …unless a batch is already running: its bar belongs to IT, and a second
+    // drop that send() is about to refuse must not repaint someone else's
+    // progress.
+    if (!S.busy) prog.phase('מכינים את הקבצים…');
     const snap = await snapshotItems(live);
     await send(snap.ok, snap.failed);
   }
@@ -794,24 +805,27 @@ function uploadDock() {
     return out;
   }
 
-  function setProgress(text) {
-    prog.hidden = !text;
-    prog.textContent = text || '';
-  }
-
   // `preFailed` carries whatever snapshotItems() could not read, so those
   // names reach the SAME end-of-batch modal as an upload that failed later.
   async function send(items, preFailed) {
+    // NOT prog.hide() here: the bar on screen belongs to the batch that is
+    // still running, and this call is the one being turned away.
     if (S.busy) { toast('העלאה כבר רצה, רגע', 'err'); return; }
     const live = items.filter((it) => !isJunk(it.path));
     if (!live.length) {
+      prog.hide();
       if (preFailed && preFailed.length) reportFailures(0, preFailed.length, preFailed);
       else toast('לא נמצאו קבצים להעלאה', 'err');
       return;
     }
 
     // Second line of defence: intake() already refused an over-cap batch
-    // before snapshotting it, but send() is also reachable directly.
+    // before snapshotting it, but send() is also reachable directly. The bar
+    // comes down BEFORE overCap() can open its modal — a refusal uploads
+    // nothing and must never be framed by a progress bar. The reset is free
+    // for the passing case: start() runs further down the SAME synchronous
+    // block, so the browser never paints the gap.
+    prog.hide();
     if (overCap(live)) return;
 
     S.busy = true;
@@ -819,7 +833,7 @@ function uploadDock() {
     const failed = [...(preFailed || [])];   // {name, reason} — shown in full at the end
     let ok = 0;
     const total = live.length + failed.length;
-    setProgress(`0/${total} הועלו`);
+    prog.start(total);
 
     // The dock's chosen folder prefixes the WHOLE batch. A loose file lands
     // directly in it; an OS folder keeps its own structure UNDER it, so
@@ -866,7 +880,7 @@ function uploadDock() {
       } catch (err) {
         failed.push({ name, reason: (err && err.message) || String(err) });
       }
-      setProgress(`${ok + failed.length}/${total} הועלו`);
+      prog.tick(ok + failed.length, name);
     }
 
     S.busy = false;
@@ -877,11 +891,13 @@ function uploadDock() {
     // reads as an upload that stopped one short. refresh() rebuilds the whole
     // toolbar — and awaits, so the paint happens — which retires the line
     // honestly. Only the nothing-uploaded path has to clear it by hand.
+    // v2.8 keeps that contract exactly: the full bar is what stays on screen,
+    // pulse already stopped (tick's last call sets done === total).
     if (ok) {
       toast(ok === 1 ? 'הנכס נוסף לספרייה' : `${ok} נכסים נוספו לספרייה`, 'ok');
       await refresh();
     } else {
-      setProgress('');
+      prog.hide();
     }
     // A failure is NEVER silent and never aborts the rest of the folder: the
     // whole list is shown by name at the end, so the reviewer can re-drop
