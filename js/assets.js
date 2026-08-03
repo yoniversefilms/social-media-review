@@ -31,6 +31,20 @@
 //     client-side (canvas resample → toBlob); nothing leaves the browser and
 //     no request row is created. Slide export is a different object with a
 //     different answer (spec 10 §D-2, factory-side) and is NOT here.
+//
+// v2.6 turns the `folder:` tag v2.5.1 already wrote into a FOLDER SYSTEM, and
+// makes the dock survive a phone.
+//   FOLDERS — no schema change, no new store call. A folder IS the tag; the
+//     rail, the counts, the dock's select and the move dialog are all
+//     derivations over the rows already in memory (folderIndex()). That is
+//     what makes a folder free to create, free to rename by moving, and gone
+//     the moment its last file leaves. The rail composes with the kind chips
+//     and the search box because it is one more AND inside visible(), not a
+//     mode of its own.
+//   PHONE UPLOADS — every picker/drop handler snapshots the picked Files'
+//     bytes (imgprep.js) BEFORE anything else, and store.js re-encodes what
+//     the bucket would refuse. See the note on the change handlers below for
+//     the bug that cost a reviewer eight of nine photos with no error.
 
 import {
   initStore, assetUrl, listAssets, uploadAsset, updateAsset,
@@ -44,6 +58,10 @@ import { zipStore } from './zip.js';
 import {
   groupStacks, isStacked, currentOf, cycleStack, setStackIndex, stackBadge,
 } from './stacks.js';
+// v2.6 phone-proofing. The dock's job is to get the BYTES out of the picker
+// before anything else happens; imgprep.js owns that, and store.js owns the
+// re-encode. Dependency-free, same reasoning as stacks.js above.
+import { snapshotItems, normalizeWillDecode, isAcceptedImageType } from './imgprep.js';
 
 const $ = (id) => document.getElementById(id);
 
@@ -73,6 +91,18 @@ const UPLOAD_KINDS = ['photo', 'logo', 'illustration', 'brand', 'other'];
 const MAX_DROP_FILES = 200;
 const MAX_DROP_BYTES = 400 * 1024 * 1024;
 
+// v2.6 folders. A folder is not a table — it is the `folder:<path>` tag this
+// page has written since spec 10 §A. Names are validated at the ONE door that
+// creates them (the dock's «+ תיקייה חדשה…» and the move dialog) rather than
+// filtered at read time, because a tag that already exists on a row will show
+// up in the rail no matter what any reader thinks of it.
+const MAX_FOLDER_NAME = 40;
+const FOLDER_ALL = null;   // «הכל»
+const FOLDER_NONE = '';    // «ללא תיקייה» — rows with no folder: tag at all
+// Sentinel for the «+ תיקייה חדשה…» option. A validated name can never contain a
+// slash, so this can never collide with a real folder.
+const NEW_FOLDER = '//new//';
+
 const S = {
   board: null,
   assets: [],
@@ -81,6 +111,12 @@ const S = {
   kind: 'all',
   q: '',
   onlyUploads: false,
+  // v2.6: FOLDER_ALL | FOLDER_NONE | 'shoot' | 'shoot/day1'
+  folder: FOLDER_ALL,
+  // the dock's chosen upload folder ('' = none). Module state, not dock state:
+  // refresh() rebuilds the whole toolbar after every batch, and a reviewer
+  // filing a shoot in three drags must not have to re-pick the folder twice.
+  uploadFolder: '',
   // v2.5.1
   busy: false,          // an upload is running — background refreshes must not
                         // rebuild the dock out from under its progress line
@@ -195,6 +231,10 @@ function visible() {
   const q = S.q;
   const list = S.assets.filter((a) => {
     if (!kindMatch(a)) return false;
+    // v2.6: the folder is one more AND, not a mode. «תמונות» + «shoot» +
+    // a search term all compose, which is the whole reason it lives here and
+    // not in a separate render path.
+    if (!inFolder(a, S.folder)) return false;
     if (S.onlyUploads && a.source === 'studio') return false;
     if (!q) return true;
     const hay = [a.name, a.label, ...(Array.isArray(a.tags) ? a.tags : [])]
@@ -246,10 +286,52 @@ function renderToolbar() {
     uploadDock(),
     el('div', { class: 'a-row' }, search, el('span', { class: 'a-count', id: 'count' })),
     chips,
+    folderRail(),
     el('div', { class: 'a-row', id: 'selbar' }),
   );
   updateCount();
   updateSelBar();
+}
+
+// The folder rail: «הכל» · «ללא תיקייה» · one chip per TOP-LEVEL folder with a
+// count, and — only when the active folder has subfolders — a second row for
+// its immediate children. Two levels on screen at a time is deliberate: the
+// tag model nests arbitrarily, but a rail that grew a row per level would
+// push the grid off the first screen on the exact boards that need it most.
+// Anything deeper is reachable through search, which already matches tags.
+function folderRail() {
+  const idx = folderIndex();
+  const tops = topLevel(idx.all);
+  // Nothing filed anywhere yet: no rail at all rather than a row holding one
+  // dead «הכל» chip.
+  if (!tops.length) return null;
+
+  const chip = (label, value, count) => el('button', {
+    class: 'chip' + (S.folder === value ? ' chip--on' : ''), type: 'button',
+    onclick: () => { S.folder = value; renderToolbar(); renderGrid(); },
+  }, el('bdi', null, label),
+    count === null ? null : el('span', { class: 'a-fcount ltr' }, String(count)));
+
+  const row = el('div', { class: 'a-row a-folders' },
+    el('span', { class: 'a-flabel' }, '📁 תיקיות'),
+    chip('הכל', FOLDER_ALL, S.assets.length),
+    idx.none ? chip('ללא תיקייה', FOLDER_NONE, idx.none) : null,
+    tops.map((p) => chip(p, p, idx.counts.get(p) || 0)),
+  );
+
+  // The active branch, so a subfolder chip stays visible while its own
+  // contents are showing (otherwise picking 'shoot/day1' hides the row that
+  // offered it and there is no way back up except «הכל»).
+  const active = (S.folder === FOLDER_ALL || S.folder === FOLDER_NONE) ? '' : S.folder;
+  const parent = active.includes('/') ? active.slice(0, active.lastIndexOf('/')) : active;
+  const kids = parent ? childrenOf(idx.all, parent) : [];
+  if (!kids.length) return row;
+
+  return el('div', null, row, el('div', { class: 'a-row a-folders a-folders--sub' },
+    el('span', { class: 'a-flabel' }, '↳'),
+    chip('הכל ב־' + parent, parent, idx.counts.get(parent) || 0),
+    kids.map((p) => chip(p.slice(parent.length + 1), p, idx.counts.get(p) || 0)),
+  ));
 }
 
 // The multi-select bar. Rebuilt in place (not through renderToolbar) so
@@ -265,6 +347,10 @@ function updateSelBar() {
       class: 'btn btn--primary', type: 'button',
       onclick: () => exportDialog(rows),
     }, '⬇︎ ייצוא'),
+    el('button', {
+      class: 'btn btn--ghost', type: 'button',
+      onclick: () => moveDialog(rows),
+    }, '📁 העברה לתיקייה'),
     el('button', {
       class: 'btn btn--ghost', type: 'button',
       onclick: () => { S.sel.clear(); renderGrid(); updateSelBar(); },
@@ -322,16 +408,167 @@ async function walkEntry(entry, prefix, out) {
   for (const child of await readDir(entry.createReader())) await walkEntry(child, dir, out);
 }
 
-// 'shoot/day1/a.jpg' → tags ['folder:shoot', 'folder:shoot/day1'], top 'shoot'.
+// 'shoot/day1' → ['folder:shoot', 'folder:shoot/day1'].
 // BOTH levels are tagged, not just the deepest: a shoot dropped with mixed
 // depths would otherwise scatter across as many tags as it has subfolders and
-// stop being one findable group, which is the whole point of the tag.
+// stop being one findable group, which is the whole point of the tag. It is
+// also what makes the rail's «shoot» chip find files that live two levels
+// down, with no tree walk and no query.
+function pathTags(dir) {
+  // Every segment goes through the shared normalizer, and one that cleans away
+  // to nothing is SKIPPED rather than tagged — the file simply files under its
+  // parent. A dropped directory is a name nobody vetted: it can be
+  // «folder:evil», «ארכיון » with a trailing space, or pure RTL marks.
+  const parts = String(dir || '').split('/')
+    .map(normalizeFolderSegment)
+    .filter(Boolean);
+  const tags = [];
+  for (let i = 1; i <= parts.length; i++) tags.push(FOLDER_PREFIX + parts.slice(0, i).join('/'));
+  return tags;
+}
+
+// 'shoot/day1/a.jpg' → tags ['folder:shoot', 'folder:shoot/day1'], top 'shoot'.
 function folderTags(path) {
   const parts = String(path || '').split('/').filter(Boolean);
   parts.pop();                                   // the filename itself
-  const tags = [];
-  for (let i = 1; i <= parts.length; i++) tags.push('folder:' + parts.slice(0, i).join('/'));
-  return { tags, top: parts[0] || '' };
+  const tags = pathTags(parts.join('/'));
+  // `top` labels the card, so it must be the CLEANED first segment — the one
+  // that is actually in the tags — not the raw directory name.
+  const top = tags.length ? tags[0].slice(FOLDER_PREFIX.length) : '';
+  return { tags, top };
+}
+
+/* ── the folder model (v2.6) ──
+   No schema change and no new store call: a folder IS the `folder:` tag above.
+   Everything below is derivation over the rows already in memory. */
+
+const FOLDER_PREFIX = 'folder:';
+
+function tagsOf(a) {
+  return Array.isArray(a && a.tags) ? a.tags : [];
+}
+
+// The DEEPEST folder a row is filed under, '' when it is filed nowhere.
+// Deepest, because both levels are tagged and 'shoot/day1' is the answer a
+// reviewer looking at the card expects to see.
+function folderOf(a) {
+  let best = '';
+  for (const t of tagsOf(a)) {
+    const s = String(t);
+    if (!s.startsWith(FOLDER_PREFIX)) continue;
+    const p = s.slice(FOLDER_PREFIX.length);
+    if (p.length > best.length) best = p;
+  }
+  return best;
+}
+
+function inFolder(a, folder) {
+  if (folder === FOLDER_ALL) return true;
+  if (folder === FOLDER_NONE) return !folderOf(a);
+  return tagsOf(a).some((t) => String(t) === FOLDER_PREFIX + folder);
+}
+
+// Every folder path that exists on the board, sorted, plus how many rows each
+// holds. Derived from the LIVE rows on every render — a folder that loses its
+// last file stops existing, which is the honest behaviour for a tag.
+function folderIndex() {
+  const counts = new Map();
+  let none = 0;
+  for (const a of S.assets) {
+    let any = false;
+    for (const t of tagsOf(a)) {
+      const s = String(t);
+      if (!s.startsWith(FOLDER_PREFIX)) continue;
+      const p = s.slice(FOLDER_PREFIX.length);
+      if (!p) continue;
+      any = true;
+      counts.set(p, (counts.get(p) || 0) + 1);
+    }
+    if (!any) none++;
+  }
+  const all = [...counts.keys()].sort((x, y) => x.localeCompare(y, 'he', { numeric: true }));
+  return { counts, none, all };
+}
+
+/* ── stacks and the move (v2.6) ──
+   A stacked card SHOWS one version and STANDS FOR all of them. Every action
+   that writes to the row behind it has to decide which meaning it wants, and
+   «move to folder» wants the stack: three tries at the same drawing are one
+   thing to a reviewer, so filing one of them elsewhere splits a group that the
+   «2/3» badge still claims is whole — and the versions the card is not
+   currently showing end up in a folder nobody chose. (Contrast «שם ותגיות»,
+   which edits the ONE version on screen and is right to.) */
+
+const STACK_PREFIX = 'stack:';
+
+function stackTagOf(a) {
+  return tagsOf(a).map(String).find((t) => t.startsWith(STACK_PREFIX)) || '';
+}
+
+// Rows → the same rows with every stack completed. Order and identity are
+// preserved (first occurrence wins), so the caller's selection order survives
+// and a row can never appear twice.
+function expandStacks(rows) {
+  const out = [];
+  const seen = new Set();
+  const push = (a) => { if (a && !seen.has(a.id)) { seen.add(a.id); out.push(a); } };
+  for (const r of rows || []) {
+    const tag = stackTagOf(r);
+    if (!tag) { push(r); continue; }
+    for (const a of S.assets) if (stackTagOf(a) === tag) push(a);
+  }
+  return out;
+}
+
+const topLevel = (paths) => paths.filter((p) => !p.includes('/'));
+const childrenOf = (paths, parent) => paths.filter(
+  (p) => p.startsWith(parent + '/') && !p.slice(parent.length + 1).includes('/'));
+
+/* ── folder names: TWO doors, ONE normalizer ──
+   A folder name reaches the data two ways, and only one of them has a human
+   at it. The new-folder dialog is typed and can be argued with. A DROPPED
+   directory name is whatever the filesystem held — it never passed a
+   validator, and it produced `folder:folder:evil` from a directory called
+   `folder:evil`, a second pixel-identical chip from «ארכיון » with a trailing
+   space, and an invisible chip from a name made only of RTL marks.
+   normalizeFolderSegment is what both doors share; the dialog additionally
+   REFUSES with a reason, because someone typing deserves one, while the drop
+   path silently cleans and files under the parent when nothing is left. */
+
+// U+200B..U+200F zero-width + LRM/RLM, U+202A..U+202E embedding/override,
+// U+2066..U+2069 isolates, U+FEFF BOM. All invisible, all able to make two
+// different strings paint identically.
+const INVISIBLES = /[\u200B-\u200F\u202A-\u202E\u2066-\u2069\uFEFF]/g;
+
+function normalizeFolderSegment(raw) {
+  let s = String(raw == null ? '' : raw);
+  // NFC first: «ארכיון» typed on macOS is decomposed and would otherwise be a
+  // different string from the same word pasted from anywhere else.
+  if (s.normalize) s = s.normalize('NFC');
+  s = s.replace(INVISIBLES, '');
+  s = s.replace(/\s+/g, ' ').trim();
+  // Repeated, not once: stripping a single prefix turns `folder:folder:evil`
+  // into `folder:evil`, which re-creates the exact tag this is here to stop.
+  while (/^folder:/i.test(s)) s = s.slice(7).replace(/\s+/g, ' ').trim();
+  if (s.length > MAX_FOLDER_NAME) s = s.slice(0, MAX_FOLDER_NAME).trim();
+  return s;
+}
+
+// The TYPED door. Returns '' when the name is good, otherwise the Hebrew
+// reason. Checks run against the invisible-stripped string so a name padded
+// with RTL marks cannot smuggle a slash or a `folder:` prefix past them, but
+// the length and prefix rules still REFUSE rather than silently truncate —
+// the reviewer is standing right there.
+function folderNameError(raw) {
+  const seen = String(raw == null ? '' : raw).replace(INVISIBLES, '').trim();
+  if (!seen) return 'צריך שם לתיקייה';
+  if (seen.includes('/')) return 'שם תיקייה בלי לוכסן. תת־תיקיות נוצרות בגרירת תיקייה מהמחשב';
+  if (/^folder:/i.test(seen)) return 'שם תיקייה לא יכול להתחיל ב־folder:';
+  if (/^\.+$/.test(seen)) return 'צריך שם אמיתי לתיקייה';
+  if (seen.length > MAX_FOLDER_NAME) return `שם תיקייה עד ${MAX_FOLDER_NAME} תווים`;
+  // Nothing left once the invisibles are gone (a name of pure bidi marks).
+  if (!normalizeFolderSegment(raw)) return 'צריך שם אמיתי לתיקייה';
+  return '';
 }
 
 // The MIME test store.js applies is by extension, so a JPEG whose bytes are
@@ -340,7 +577,28 @@ function folderTags(path) {
 // library as a permanently broken thumbnail nobody can explain. Decoding it
 // here is the only place the truth is available.
 async function decodable(file) {
-  if (/svg/i.test(file.type || '')) return true;   // parsed + sanitized in store.js
+  // SVG is markup, so "decodable" means PARSEABLE. Waving it through meant an
+  // SVG that no parser accepts still earned a library row: it landed with
+  // width/height null, drew nothing, and appeared in no failures list, so the
+  // reviewer had a permanently blank card and no idea why. store.js sanitizes
+  // (and drops the DOCTYPE); this decides whether the thing is an SVG at all.
+  if (/svg/i.test(file.type || '')) {
+    try {
+      const text = await file.text();
+      // The DOCTYPE goes before the parser sees it, exactly as store.js does
+      // to the bytes it stores. An internal <!ENTITY> subset is a
+      // billion-laughs bomb, and handing one to DOMParser would expand it in
+      // THIS tab. Stripping first means the parse runs on what will actually
+      // be stored, which is also the honest thing to validate.
+      const safe = text.replace(/<!DOCTYPE[^>[]*(\[[\s\S]*?\])?[^>]*>/gi, '');
+      const doc = new DOMParser().parseFromString(safe, 'image/svg+xml');
+      if (doc.getElementsByTagName('parsererror').length) return false;
+      const root = doc.documentElement;
+      return !!root && String(root.localName || '').toLowerCase() === 'svg';
+    } catch {
+      return false;
+    }
+  }
   try {
     const bmp = await createImageBitmap(file);
     if (bmp && bmp.close) bmp.close();
@@ -350,10 +608,84 @@ async function decodable(file) {
   }
 }
 
+// The folder picker shared by the dock and the move dialog: every folder that
+// exists, «ללא תיקייה», and a door to a new one. Built from the same
+// folderIndex() the rail draws, so the two can never disagree about what
+// exists.
+function folderSelect({ value = '', onNew, noneLabel }) {
+  const idx = folderIndex();
+  // A folder just created but not yet uploaded into has NO rows, so
+  // folderIndex() cannot know about it. Without this line the toolbar's next
+  // rebuild (a kind chip, a search keystroke) silently resets the reviewer's
+  // choice back to «ללא תיקייה» and the batch files itself nowhere.
+  const paths = (value && !idx.all.includes(value)) ? [value, ...idx.all] : idx.all;
+  const sel = el('select', { title: 'התיקייה שהקבצים ייכנסו אליה' },
+    el('option', { value: '' }, noneLabel || '(ללא תיקייה)'),
+    paths.map((p) => el('option', { value: p }, p)),
+    el('option', { value: NEW_FOLDER }, '+ תיקייה חדשה…'));
+  sel.value = paths.includes(value) ? value : '';
+  let cur = sel.value;   // the last REAL choice, so a cancelled dialog restores it
+  sel.addEventListener('change', () => {
+    if (sel.value !== NEW_FOLDER) { cur = sel.value; if (onNew) onNew(cur); return; }
+    // Back to the previous choice FIRST: if the reviewer cancels the dialog,
+    // the select must not be left showing «+ תיקייה חדשה…» as though that
+    // were a folder.
+    sel.value = cur;
+    newFolderDialog((name) => {
+      // The option does not exist in this select yet (the folder has no rows
+      // until something is uploaded into it), so it is added by hand.
+      if (![...sel.options].some((o) => o.value === name)) {
+        sel.insertBefore(el('option', { value: name }, name), sel.options[sel.options.length - 1]);
+      }
+      cur = name;
+      sel.value = name;
+      if (onNew) onNew(name);
+    });
+  });
+  return sel;
+}
+
+// Inline name prompt. A modal rather than window.prompt(): prompt() is
+// unstyled, untranslatable, blocked outright in some embedded contexts, and
+// gives nowhere to put the reason a name was refused.
+function newFolderDialog(done) {
+  const input = el('input', {
+    class: 'field__input', type: 'text', maxlength: String(MAX_FOLDER_NAME + 1),
+    placeholder: 'למשל: צילומים מהמרכז',
+  });
+  const err = el('div', { class: 'a-ferr', hidden: true });
+  const submit = (close) => {
+    const bad = folderNameError(input.value);
+    if (bad) {
+      err.textContent = bad;
+      err.hidden = false;
+      input.focus();
+      return false;
+    }
+    // The name that leaves this dialog is the NORMALIZED one, so a typed name
+    // and a dropped directory that look the same really are the same folder.
+    done(normalizeFolderSegment(input.value));
+    if (close) close();
+    return true;
+  };
+  const m = modal('תיקייה חדשה', el('div', null,
+    el('div', { class: 'field' }, el('label', { class: 'field__label' }, 'שם התיקייה'), input),
+    err,
+    el('div', { class: 'pv-note' },
+      `עד ${MAX_FOLDER_NAME} תווים, בלי לוכסן. התיקייה נוצרת ברגע שעולה אליה הקובץ הראשון.`),
+  ), { actions: [{ label: 'ביטול' }, { label: 'יצירה', primary: true, onClick: (c) => submit(c) }] });
+  input.addEventListener('keydown', (e) => { if (e.key === 'Enter') submit(m.close); });
+  setTimeout(() => input.focus(), 60);
+}
+
 function uploadDock() {
   const kindSel = el('select', { title: 'איך לתייק את הקבצים החדשים' },
     el('option', { value: '' }, 'סיווג אוטומטי (לפי סוג הקובץ)'),
     UPLOAD_KINDS.map((k) => el('option', { value: k }, KIND_LABEL[k])));
+  const folderSel = folderSelect({
+    value: S.uploadFolder,
+    onNew: (v) => { S.uploadFolder = v; },
+  });
   const file = el('input', {
     type: 'file', multiple: true, style: { display: 'none' },
     accept: 'image/png,image/jpeg,image/webp,image/svg+xml',
@@ -374,12 +706,13 @@ function uploadDock() {
       'תיקייה נסרקת על תת־התיקיות שלה, וכל קובץ מתויג לפי מיקומו. ',
       el('span', { class: 'ltr' }, `עד ${MAX_DROP_FILES}`), ' קבצים · ',
       el('span', { class: 'ltr' }, '400MB'), ' לגרירה'),
-    el('div', { style: { marginTop: '8px' } }, kindSel, ' ', pickDir),
+    el('div', { class: 'a-dockctl' }, kindSel, folderSel, pickDir),
     prog,
   );
   // both controls sit inside the click target: don't let using them open the
   // plain file dialog underneath
   kindSel.addEventListener('click', (e) => e.stopPropagation());
+  folderSel.addEventListener('click', (e) => e.stopPropagation());
   pickDir.addEventListener('click', (e) => { e.stopPropagation(); dir.click(); });
   dock.addEventListener('click', () => file.click());
   dock.addEventListener('dragover', (e) => { e.preventDefault(); dock.classList.add('over'); });
@@ -395,17 +728,64 @@ function uploadDock() {
       .map((it) => (it.webkitGetAsEntry ? it.webkitGetAsEntry() : null))
       .filter(Boolean);
     const loose = [...(e.dataTransfer.files || [])];
-    collect(entries, loose).then(send);
+    collect(entries, loose).then(intake);
   });
-  file.addEventListener('change', () => {
-    send([...file.files].map((f) => ({ file: f, path: f.name })));
-    file.value = '';
+  // v2.6 — THE PHONE BUG, and why these three handlers look the way they do.
+  // A File from the iOS picker is a promise of a transcode, not bytes; the old
+  // code handed the raw list to send() and cleared `input.value` in the SAME
+  // synchronous block, then read each File three more times over the following
+  // minutes. Every read after the first came back empty, so a multi-select
+  // uploaded exactly one photo and said nothing about the rest. intake() takes
+  // a byte-for-byte snapshot FIRST and only then lets go of the input.
+  file.addEventListener('change', async () => {
+    if (S.busy) { toast('העלאה כבר רצה, רגע', 'err'); return; }
+    const picked = [...file.files].map((f) => ({ file: f, path: f.name }));
+    await intake(picked);
+    file.value = '';   // AFTER the snapshot, never before
   });
-  dir.addEventListener('change', () => {
+  dir.addEventListener('change', async () => {
+    if (S.busy) { toast('העלאה כבר רצה, רגע', 'err'); return; }
     // webkitRelativePath is the picker's version of the drop path.
-    send([...dir.files].map((f) => ({ file: f, path: f.webkitRelativePath || f.name })));
+    const picked = [...dir.files].map((f) => ({ file: f, path: f.webkitRelativePath || f.name }));
+    await intake(picked);
     dir.value = '';
   });
+
+  // Snapshot, then upload. A file whose bytes could not be read is NOT
+  // dropped: it rides into send() as a pre-failure and shows up by name in the
+  // same modal as every other failure, because "eight of nine uploaded" is
+  // only useful if the ninth has a name.
+  async function intake(items) {
+    const live = items.filter((it) => !isJunk(it.path));
+    if (!live.length) { toast('לא נמצאו קבצים להעלאה', 'err'); return; }
+    // The cap is checked BEFORE the snapshot, not only inside send(): the
+    // snapshot pulls every byte into memory, and copying 500MB just to refuse
+    // it on the next line would hang the tab on the one drop that was always
+    // going to be rejected.
+    if (overCap(live)) return;
+    const snap = await snapshotItems(live);
+    await send(snap.ok, snap.failed);
+  }
+
+  // The cap, refused LOUDLY (a toast alone is missable on a big drop).
+  function overCap(live) {
+    const bytes = live.reduce((n, it) => n + ((it.file && it.file.size) || 0), 0);
+    if (live.length <= MAX_DROP_FILES && bytes <= MAX_DROP_BYTES) return false;
+    const mb = Math.round(bytes / (1024 * 1024));
+    modal('הגרירה גדולה מדי', el('div', null,
+      el('p', null, 'בגרירה אחת אפשר להעלות עד ',
+        el('b', null, el('span', { class: 'ltr' }, String(MAX_DROP_FILES))), ' קבצים ועד ',
+        el('b', null, el('span', { class: 'ltr' }, '400MB')), '.'),
+      el('p', null, 'כאן היו ', el('b', null, el('span', { class: 'ltr' }, String(live.length))),
+        ' קבצים בנפח ', el('b', null, el('span', { class: 'ltr' }, mb + 'MB')),
+        ', ולא הועלה כלום.'),
+      el('p', { class: 'pv-note' },
+        'מפצלים לתיקיות קטנות יותר, או שולחים את הארכיון המלא דרך גיבוי הענן ' +
+        '(scripts/archive-sync.mjs). הספרייה כאן היא שכבת ההגשה, לא הארכיון.'),
+    ));
+    toast('הגרירה חורגת מהמגבלה, לא הועלה כלום', 'err');
+    return true;
+  }
 
   async function collect(entries, loose) {
     if (!entries.length) return loose.map((f) => ({ file: f, path: f.name }));
@@ -419,53 +799,68 @@ function uploadDock() {
     prog.textContent = text || '';
   }
 
-  async function send(items) {
-    if (S.busy) { toast('העלאה כבר רצה — רגע', 'err'); return; }
+  // `preFailed` carries whatever snapshotItems() could not read, so those
+  // names reach the SAME end-of-batch modal as an upload that failed later.
+  async function send(items, preFailed) {
+    if (S.busy) { toast('העלאה כבר רצה, רגע', 'err'); return; }
     const live = items.filter((it) => !isJunk(it.path));
-    if (!live.length) { toast('לא נמצאו קבצים להעלאה', 'err'); return; }
-
-    // ---- the cap, refused LOUDLY (a toast alone is missable on a big drop)
-    const bytes = live.reduce((n, it) => n + ((it.file && it.file.size) || 0), 0);
-    if (live.length > MAX_DROP_FILES || bytes > MAX_DROP_BYTES) {
-      const mb = Math.round(bytes / (1024 * 1024));
-      modal('הגרירה גדולה מדי', el('div', null,
-        el('p', null, 'בגרירה אחת אפשר להעלות עד ',
-          el('b', null, el('span', { class: 'ltr' }, String(MAX_DROP_FILES))), ' קבצים ועד ',
-          el('b', null, el('span', { class: 'ltr' }, '400MB')), '.'),
-        el('p', null, 'כאן היו ', el('b', null, el('span', { class: 'ltr' }, String(live.length))),
-          ' קבצים בנפח ', el('b', null, el('span', { class: 'ltr' }, mb + 'MB')),
-          ' — לא הועלה כלום.'),
-        el('p', { class: 'pv-note' },
-          'מפצלים לתיקיות קטנות יותר, או שולחים את הארכיון המלא דרך גיבוי הענן ' +
-          '(scripts/archive-sync.mjs) — הספרייה כאן היא שכבת ההגשה, לא הארכיון.'),
-      ));
-      toast('הגרירה חורגת מהמגבלה — לא הועלה כלום', 'err');
+    if (!live.length) {
+      if (preFailed && preFailed.length) reportFailures(0, preFailed.length, preFailed);
+      else toast('לא נמצאו קבצים להעלאה', 'err');
       return;
     }
 
+    // Second line of defence: intake() already refused an over-cap batch
+    // before snapshotting it, but send() is also reachable directly.
+    if (overCap(live)) return;
+
     S.busy = true;
     dock.classList.add('over');
-    const failed = [];   // {name, reason} — shown in full at the end
+    const failed = [...(preFailed || [])];   // {name, reason} — shown in full at the end
     let ok = 0;
-    const total = live.length;
+    const total = live.length + failed.length;
     setProgress(`0/${total} הועלו`);
 
+    // The dock's chosen folder prefixes the WHOLE batch. A loose file lands
+    // directly in it; an OS folder keeps its own structure UNDER it, so
+    // dropping `day1/` into «צילומים» gives folder:צילומים and
+    // folder:צילומים/day1 — the shoot stays one group and the chosen folder
+    // stays the thing the rail lists. No choice = exactly the old behaviour,
+    // byte for byte.
+    const chosen = S.uploadFolder || '';
     for (const it of live) {
       const name = it.path;
       try {
         if (!it.file) throw new Error(it.error || 'לא ניתן לקרוא את הקובץ');
         if (!/^image\//.test(it.file.type || '')) throw new Error('סוג קובץ לא נתמך');
-        if (!await decodable(it.file)) throw new Error('הקובץ פגום או אינו תמונה תקינה');
+        // Skip the probe when normalizeImage is about to decode this file
+        // anyway (over the upload cap, or HEIC): the probe is a SECOND full
+        // decode, and on a 54MB phone JPEG that is a visible freeze for a
+        // verdict arriving moments later either way. The threshold is
+        // imgprep's own, asked rather than copied.
+        if (!normalizeWillDecode(it.file) && !await decodable(it.file)) {
+          // WHICH refusal, by the same rule imgprep uses. The probe runs
+          // BEFORE normalizeImage, so without this a .tiff that Chrome cannot
+          // decode was called corrupt here and never reached the message that
+          // would have told its owner the format was simply never accepted.
+          throw new Error(isAcceptedImageType(it.file)
+            ? 'הקובץ פגום או אינו תמונה תקינה'
+            : 'אפשר להעלות רק SVG, PNG, JPG או WEBP');
+        }
         const { tags, top } = folderTags(it.path);
         const base = it.file.name.replace(/\.[^.]+$/, '');
+        const finalTags = chosen
+          ? pathTags(chosen).concat(tags.map((t) => FOLDER_PREFIX + chosen + '/' + t.slice(FOLDER_PREFIX.length)))
+          : tags;
+        const labelTop = top || chosen;
         await uploadAsset({
           // no post_id: an upload made HERE belongs to the board, not to a post
           file: it.file,
           kind: kindSel.value || undefined,
           // the first path segment pre-fills the label, so a shoot reads as a
           // shoot in the grid instead of forty filenames
-          label: top ? `${top} · ${base}` : '',
-          tags,
+          label: labelTop ? `${labelTop} · ${base}` : '',
+          tags: finalTags,
         });
         ok++;
       } catch (err) {
@@ -631,15 +1026,22 @@ function cardBody(a, item, repaint) {
     el('div', { class: 'a-meta' },
       el('div', { class: 'a-name' }, a.label || a.name || '(ללא שם)'),
       el('div', { class: 'a-sub' }, meta),
-      (Array.isArray(a.tags) && a.tags.length)
-        ? el('div', { class: 'a-tags' }, a.tags.map((t) => el('span', { class: 'tag' }, t)))
-        : null,
+      // v2.6: the folder gets its own clickable chip, and the `folder:` tags
+      // it stands for drop out of the tag row. Showing both would list
+      // «folder:shoot», «folder:shoot/day1» AND the chip for one fact, and on
+      // a nested shoot the tag row was already longer than the card.
+      folderRow(a),
+      (() => {
+        const rest = tagsOf(a).filter((t) => !String(t).startsWith(FOLDER_PREFIX));
+        return rest.length ? el('div', { class: 'a-tags' }, rest.map((t) => el('span', { class: 'tag' }, t))) : null;
+      })(),
       el('div', { class: 'a-used' }, used.length
         ? el('span', null, 'בשימוש ב־', el('b', null, String(used.length)),
             used.length === 1 ? ' פוסט' : ' פוסטים')
         : 'לא בשימוש עדיין'),
       el('div', { class: 'a-acts' },
         el('button', { class: 'btn btn--ghost', type: 'button', onclick: () => editAsset(a) }, 'שם ותגיות'),
+        el('button', { class: 'btn btn--ghost', type: 'button', onclick: () => moveDialog([a]) }, '📁 העברה'),
         el('button', { class: 'btn btn--ghost', type: 'button', onclick: () => exportDialog([a]) }, '⬇︎ ייצוא'),
         el('button', { class: 'btn btn--ghost', type: 'button', onclick: () => copyLink(url) }, 'העתקת קישור'),
         // The thumb now cycles, so «הגדלה» needs a door of its own — without
@@ -657,6 +1059,84 @@ function cardBody(a, item, repaint) {
       ),
     ),
   );
+}
+
+// The card's folder chip. Clicking it filters the grid to that folder, which
+// is the shortest path from «I can see this belongs to the shoot» to «show me
+// the shoot» — the reason the folder is on the card at all.
+function folderRow(a) {
+  const f = folderOf(a);
+  if (!f) return null;
+  return el('div', { class: 'a-fold' }, el('button', {
+    class: 'a-fold__b', type: 'button', title: 'סינון לפי התיקייה הזאת',
+    onclick: () => { S.folder = f; renderToolbar(); renderGrid(); window.scrollTo({ top: 0, behavior: 'smooth' }); },
+  }, '📁 ', el('bdi', null, f)));
+}
+
+// Move one asset or a whole selection into a folder (or out of every folder).
+// `tags` is a writable column, which is exactly why this works for ANY source:
+// a studio SVG and a reviewer upload are filed the same way, even though only
+// one of them has bytes this tool ever wrote.
+function moveDialog(picked) {
+  // ONE place, so the per-card button and the bulk bar cannot disagree: a
+  // stacked card moves as a UNIT. S.sel holds only the id of the version a
+  // stacked card happens to be displaying, so the bulk path had the same hole.
+  const rows = expandStacks(picked);
+  if (!rows.length) return;
+  const hidden = rows.length - (picked || []).length;
+  let dest = rows.length === 1 ? folderOf(rows[0]) : '';
+  const sel = folderSelect({
+    value: dest,
+    noneLabel: 'ללא תיקייה (הסרה מהתיקייה)',
+    onNew: (v) => { dest = v; },
+  });
+  const status = el('div', { class: 'pv-note', style: { marginTop: '8px' } });
+
+  const run = async (close) => {
+    status.textContent = 'מעבירים…';
+    const failed = [];
+    let moved = 0;
+    for (const a of rows) {
+      // Only the folder: tags are replaced. Everything else a reviewer or a
+      // producer wrote — style:, stack:, style-ref — is left exactly as it
+      // was, because a move is a move and not a re-tag.
+      const keep = tagsOf(a).filter((t) => !String(t).startsWith(FOLDER_PREFIX));
+      const next = dest ? keep.concat(pathTags(dest)) : keep;
+      try {
+        await updateAsset(a.id, { tags: next });
+        a.tags = next;   // keep the in-memory row honest without a full refetch
+        moved++;
+      } catch (e) {
+        failed.push({ name: a.name || a.id, reason: (e && e.message) || String(e) });
+      }
+      status.textContent = `${moved + failed.length}/${rows.length} הועברו`;
+    }
+    if (close) close();
+    renderToolbar();
+    renderGrid();
+    // The count is what ACTUALLY moved, which on a stacked card is every
+    // version and not the one the card was showing.
+    if (moved) {
+      toast(dest
+        ? (moved === 1 ? `הנכס הועבר אל ${dest}` : `${moved} נכסים הועברו אל ${dest}`)
+        : (moved === 1 ? 'הנכס הוצא מהתיקייה' : `${moved} נכסים הוצאו מהתיקייה`), 'ok');
+    }
+    if (failed.length) reportFailures(moved, rows.length, failed);
+    return true;
+  };
+
+  modal(rows.length === 1 ? 'העברה לתיקייה' : `העברת ${rows.length} נכסים לתיקייה`, el('div', null,
+    el('div', { class: 'field' }, el('label', { class: 'field__label' }, 'תיקייה'), sel),
+    el('div', { class: 'pv-note' },
+      'התיקייה היא תגית, אז ההעברה משנה רק אותה. שאר התגיות של הנכס נשארות כמו שהן.'),
+    // Said out loud, because the grid shows ONE card and this is about to
+    // write to several rows.
+    hidden > 0
+      ? el('div', { class: 'pv-note' },
+          `הבחירה כוללת גרסאות נוספות של אותו איור, וכולן עוברות יחד. סך הכול ${rows.length} נכסים.`)
+      : null,
+    status,
+  ), { actions: [{ label: 'ביטול' }, { label: 'העברה', primary: true, onClick: (c) => { run(c); return false; } }] });
 }
 
 /* ── actions ── */

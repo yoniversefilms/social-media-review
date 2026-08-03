@@ -47,6 +47,48 @@ document.documentElement.dataset.theme=(t==='dark'||t==='light')?t:
   .a-prog[hidden] { display: none; }
   .a-drop .btn { min-height: 36px; padding: 4px 12px; font-size: .9rem; }
 
+  /* v2.6 — the dock's control row. flex + wrap rather than inline text nodes:
+     with two <select>s and a button the old `kindSel + ' ' + pickDir` line
+     broke mid-control on a narrow window, and the gap between an RTL <select>
+     and the next control was a bidi-neutral space that moved with the text. */
+  .a-dockctl {
+    margin-top: 8px; display: flex; flex-wrap: wrap; gap: 8px;
+    align-items: center; justify-content: center;
+  }
+  .a-dockctl select { max-width: 100%; }
+
+  /* v2.6 — the folder rail. The label anchors the row so a board with one
+     folder still reads as "folders", not as a stray chip. */
+  .a-folders { gap: 6px; }
+  .a-flabel { color: var(--ink-soft); font-size: .82rem; margin-inline-end: 2px; }
+  .a-folders--sub { padding-inline-start: 14px; }
+  /* The count is a Latin run inside a Hebrew chip: without isolation "3" and
+     the folder name swap sides on a name that starts with a Latin letter. */
+  .a-fcount {
+    margin-inline-start: 6px; opacity: .7; font-size: .78rem;
+    unicode-bidi: isolate; direction: ltr;
+  }
+  .a-ferr { color: var(--no); font-size: .85rem; margin: 6px 0 0; }
+  .a-ferr[hidden] { display: none; }
+
+  /* the folder chip on a card */
+  .a-fold { display: flex; }
+  .a-fold__b {
+    font: inherit; font-size: .7rem; cursor: pointer;
+    background: var(--bg); color: var(--ink-soft);
+    border: 1px solid var(--line); border-radius: 999px;
+    padding: 2px 8px; max-width: 100%;
+    overflow: hidden; text-overflow: ellipsis; white-space: nowrap;
+  }
+  .a-fold__b:hover { border-color: var(--accent); color: var(--accent); }
+  /* A folder PATH is a mixed-script run: «קמפיין/shoot/day1» in an RTL context
+     lays out visually as «shoot/day1/קמפיין», which names the wrong parent.
+     Measured, not guessed. Same treatment the meta line already gives its Latin
+     runs (.a-sub .ltr): isolate the run and give it an LTR base, so the segments
+     stay in path order. A wholly-Hebrew folder name is a single run and renders
+     identically either way. */
+  .a-fold__b bdi { unicode-bidi: isolate; direction: ltr; }
+
   .a-grid {
     display: grid; gap: 14px;
     grid-template-columns: repeat(auto-fill, minmax(150px, 1fr));

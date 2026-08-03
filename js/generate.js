@@ -37,6 +37,11 @@ import {
   GEN_DIMS, dimByKey, FAL_LONG_SIDE_CAP,
 } from './store.js';
 import { el, modal, toast, fmtDate } from './ui.js';
+// v2.6 phone-proofing. Both file inputs on this page hold their picked Files
+// across a modal and several awaits before uploading them, which is exactly
+// the pattern iOS picker Files do not survive; snapshotFiles copies the bytes
+// at selection. store.js still owns the re-encode.
+import { snapshotFiles, normalizeImage, batchTooBig, summarizeFailures } from './imgprep.js';
 
 /* ================================================================== twins */
 
@@ -1267,24 +1272,44 @@ function refStyleForm() {
       : []));
   };
 
-  fileInput.addEventListener('change', () => {
-    const chosen = Array.from(fileInput.files || []);
+  fileInput.addEventListener('change', async () => {
+    // v2.6: snapshot BEFORE clearing the input, and before the modal keeps
+    // these Files alive across the whole style-request flow — the refs are not
+    // uploaded until the reviewer submits, which can be minutes later.
+    // The cap is checked first so the snapshot never copies an absurd pick.
+    const tooBig = batchTooBig(fileInput.files);
+    if (tooBig) { fileInput.value = ''; toast(tooBig, 'err'); return; }
+    const snap = await snapshotFiles(fileInput.files);
     fileInput.value = '';   // so re-picking the same file fires 'change' again
-    for (const f of chosen) {
-      if (picked.length >= STYLE_REF_MAX_FILES) {
-        toast(`אפשר לצרף עד ${STYLE_REF_MAX_FILES} תמונות`, 'err');
-        break;
+    // ONE toast for the whole pick. Six rejections used to be six toasts
+    // stacked over the modal the reviewer was still filling in.
+    const rejected = [...snap.failed];
+    let full = false;
+    for (const raw of snap.ok) {
+      if (picked.length >= STYLE_REF_MAX_FILES) { full = true; break; }
+      // Normalize BEFORE the gates, same ordering as uploadAsset: a phone
+      // photo is routinely over 8MB and a share-sheet HEIC is not in
+      // STYLE_REF_MIME at all, and both were refused here even though the
+      // upload they were headed for would have taken them fine.
+      let f;
+      try {
+        f = await normalizeImage(raw);
+      } catch (e) {
+        rejected.push({ name: raw.name, reason: (e && e.message) || String(e) });
+        continue;
       }
       if (!STYLE_REF_MIME.test(f.type || '')) {
-        toast(`«${f.name}» אינו PNG / JPG / WEBP`, 'err');
+        rejected.push({ name: f.name, reason: 'אינו PNG / JPG / WEBP' });
         continue;
       }
       if (f.size > STYLE_REF_MAX_BYTES) {
-        toast(`«${f.name}» גדול מ-${STYLE_REF_MAX_BYTES / 1024 / 1024}MB`, 'err');
+        rejected.push({ name: f.name, reason: `גדול מ-${STYLE_REF_MAX_BYTES / 1024 / 1024}MB` });
         continue;
       }
       picked.push({ file: f, url: URL.createObjectURL(f) });
     }
+    if (full) toast(`אפשר לצרף עד ${STYLE_REF_MAX_FILES} תמונות`, 'err');
+    if (rejected.length) toast(summarizeFailures(rejected), 'err');
     drawThumbs();
   });
 
@@ -1395,8 +1420,16 @@ function renderConvert() {
     type: 'file', accept: 'image/png,image/jpeg,image/webp', style: { display: 'none' },
   });
   file.addEventListener('change', async () => {
-    const f = file.files && file.files[0];
+    // v2.6: same snapshot-first rule as the style-ref picker above. This one
+    // then awaits ensureName(), a network upload and a refresh before the
+    // bytes are read for the body, which is the exact window an iOS picker
+    // File goes stale in.
+    const tooBig = batchTooBig(file.files);
+    if (tooBig) { file.value = ''; toast(tooBig, 'err'); return; }
+    const snap = await snapshotFiles(file.files);
     file.value = '';
+    if (snap.failed.length) toast(summarizeFailures(snap.failed), 'err');
+    const f = snap.ok[0];
     if (!f) return;
     // Upload first so the source is a real library asset with an id — that is
     // what lets the derivation chain start at the ORIGINAL rather than at

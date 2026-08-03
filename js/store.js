@@ -5,6 +5,12 @@
 // All functions are async and throw Error(message) on failure.
 
 import { el, modal, toast, injectFonts } from './ui.js';
+// v2.6 phone-proofing. normalizeImage runs at the two exported upload entry
+// points below, so EVERY caller — the assets dock, the post page's תמונות tab,
+// the editor's picker, the generate page — gets a bucket-safe file without
+// having to remember to ask. imgprep.js imports nothing, so this adds no edge
+// to the module graph.
+import { normalizeImage } from './imgprep.js';
 
 const LS = {
   board: 'smr:board', name: 'smr:name', aid: 'smr:aid', bname: 'smr:bname',
@@ -1175,6 +1181,12 @@ export async function setCaption(post_id, caption) {
 // deliberately non-fatal: a library row is bookkeeping, and losing it must
 // never cost a reviewer the upload they just made.
 export async function uploadPhoto({ post_id, pin_id, file, note }) {
+  // v2.6: a phone photo is 3024×4032 and often past the bucket's 8MB, so it
+  // failed here before it ever reached the board. Normalizing at the ENTRY
+  // point (not inside a driver) means both drivers, and the sm_assets mirror
+  // below, see the SAME bytes — the width/height/bytes columns describe the
+  // file that was actually stored rather than the one that was picked.
+  file = await normalizeImage(file);
   const me = await ensureName();
   const res = await need().uploadPhoto({ post_id, pin_id, file, note }, me);
   try {
@@ -1626,6 +1638,14 @@ export async function listAllApprovals() {
 const VERSION_IMAGE_MIME = /^image\/(png|jpeg|jpg|webp)$/i;
 const MAX_VERSION_BYTES = 8 * 1024 * 1024;   // the sm-photos bucket cap
 
+// v2.6, STATED SO NOBODY "FIXES" IT LATER: uploadRenderVersion does NOT call
+// normalizeImage, and must not. Every other upload path is a source file the
+// tool will re-render; a render version is FINISHED PIXELS — the exact frames
+// the studio produced and the reviewer signed off on. Resampling them to 2560
+// or re-encoding a PNG as JPEG would quietly change the deliverable after
+// approval. The 8MB refusal below therefore stays a REFUSAL, loud and by name,
+// rather than becoming a silent downscale.
+
 // Natural order, so slide-2.png comes before slide-10.png. A plain sort puts
 // 10 first and silently reorders somebody's carousel.
 function naturalByName(a, b) {
@@ -1713,9 +1733,20 @@ const IMAGE_MIME = /^image\/(png|jpeg|jpg|webp|gif|svg\+xml)$/i;
 // if this missed something.
 function sanitizeSvg(text) {
   let out = String(text);
+  // The DOCTYPE and its internal subset go FIRST. An <!ENTITY> chain is a
+  // billion-laughs bomb: ten nested ten-fold entities expand to gigabytes in
+  // whatever parses the file next, and we were storing the subset verbatim.
+  // Nothing this tool draws needs a DTD, so the whole declaration is dropped
+  // rather than filtered — an SVG that only renders via entity expansion is
+  // not an asset, it is a payload. (assets.js decodable() rejects the result
+  // before it ever gets here, but bytes must not depend on that door.)
+  out = out.replace(/<!DOCTYPE[^>[]*(\[[\s\S]*?\])?[^>]*>/gi, '');
   out = out.replace(/<\s*(script|foreignObject)\b[\s\S]*?<\s*\/\s*\1\s*>/gi, '');
   out = out.replace(/<\s*(script|foreignObject)\b[^>]*\/\s*>/gi, '');
-  out = out.replace(/\son[a-z]+\s*=\s*("[^"]*"|'[^']*'|[^\s>]+)/gi, '');
+  // Any attribute whose LOCAL name starts with `on`, whatever the prefix.
+  // `\son[a-z]+=` missed `foo:onload=` — a namespaced handler that several
+  // parsers still run — and missed hyphenated names outright.
+  out = out.replace(/\s(?:[a-z0-9_.\-]+:)?on[a-z\-]+\s*=\s*("[^"]*"|'[^']*'|[^\s>]+)/gi, '');
   out = out.replace(/(href|xlink:href)\s*=\s*("|')\s*javascript:[^"']*\2/gi, '');
   return out;
 }
@@ -1752,6 +1783,19 @@ export async function listAssets() {
 // Returns {url, row} like uploadPhoto, so callers are interchangeable.
 export async function uploadAsset({ file, kind, label, tags, post_id }) {
   if (!file) throw new Error('לא נבחר קובץ');
+  // v2.6: BEFORE the MIME gate, deliberately. iOS normally transcodes to JPEG
+  // at the picker (which is why `accept` excludes HEIC), but a share sheet or
+  // a file-manager drop can still hand over a raw HEIC — that used to be
+  // refused here as "not an image". normalizeImage turns it into a JPEG the
+  // gate accepts.
+  //
+  // A PDF or a video never reaches its decoder at all (it hands non-raster
+  // types straight back) and fails on the next line with the gate message.
+  // TIFF/BMP/AVIF are the in-between case: normalizeImage DOES try to decode
+  // them, because a browser that can will turn them into a JPEG this bucket
+  // takes — and when the decode fails it throws THIS same gate sentence
+  // rather than calling the file corrupt. One wording, whichever door refuses.
+  file = await normalizeImage(file);
   if (!IMAGE_MIME.test(file.type || '')) {
     throw new Error('אפשר להעלות רק SVG, PNG, JPG או WEBP');
   }

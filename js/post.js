@@ -45,6 +45,10 @@ import { initEditor, canonicalJSON, designSummary, PHOTO_DRAG_MIME } from './edi
 // persistent root so an in-flight generation survives a tab switch. This file
 // must not learn what a fal model is.
 import { generateTab } from './generate.js';
+// v2.6 phone-proofing: the תמונות tab is the single most likely place a
+// therapist uploads straight off a phone, so it snapshots picked Files before
+// anything reads them. Re-encoding for the bucket happens in store.js.
+import { snapshotFiles, batchTooBig, summarizeFailures } from './imgprep.js';
 
 const $ = (id) => document.getElementById(id);
 
@@ -3403,20 +3407,47 @@ function renderPhotosTab() {
   drop.addEventListener('dragleave', () => drop.classList.remove('over'));
   drop.addEventListener('drop', (e) => {
     e.preventDefault(); drop.classList.remove('over');
-    uploadFiles([...(e.dataTransfer.files || [])].filter((f) => /^image\//.test(f.type)), note.value.trim());
+    intake([...(e.dataTransfer.files || [])].filter((f) => /^image\//.test(f.type)), note.value.trim());
   });
-  file.addEventListener('change', () => uploadFiles([...file.files], note.value.trim()));
+  // v2.6: the snapshot happens FIRST and the input is released only after it.
+  // These Files are lazily-materialized transcode temps on iOS; the old code
+  // held the list and read each one minutes later, by which time every file
+  // after the first was gone. Nothing is dropped silently — every failure is
+  // named, but in ONE line: a per-file toast meant a phone selection that went
+  // stale produced 138 stacked toasts and buried the page.
+  file.addEventListener('change', async () => {
+    const picked = [...file.files];
+    const noteText = note.value.trim();
+    await intake(picked, noteText);
+    file.value = '';
+  });
+
+  async function intake(files, noteText) {
+    if (!files.length) return;
+    // Refused BEFORE the snapshot, or a 200-photo selection copies 1.6GB into
+    // the tab on the way to being rejected. This path had no cap at all; the
+    // numbers are imgprep's, shared with the generate pickers.
+    const tooBig = batchTooBig(files);
+    if (tooBig) { toast(tooBig, 'err'); return; }
+    const snap = await snapshotFiles(files);
+    if (snap.failed.length) toast(summarizeFailures(snap.failed), 'err');
+    await uploadFiles(snap.ok, noteText);
+  }
 
   async function uploadFiles(files, noteText) {
     if (!files.length) return;
+    const failed = [];
+    let ok = 0;
     for (const f of files) {
       try {
         await uploadPhoto({ post_id: S.post.id, pin_id: null, file: f, note: noteText });
-        toast('התמונה עלתה', 'ok');
+        ok++;
       } catch (e) {
-        toast(`ההעלאה של ${f.name} נכשלה: ${e.message}`, 'err');
+        failed.push({ name: f.name, reason: (e && e.message) || String(e) });
       }
     }
+    if (ok) toast(ok === 1 ? 'התמונה עלתה' : `${ok} תמונות עלו`, 'ok');
+    if (failed.length) toast(summarizeFailures(failed), 'err');
     note.value = '';
     await refreshAll();
     renderActiveTab(true); // own action: show the new photo even if an input still has focus
