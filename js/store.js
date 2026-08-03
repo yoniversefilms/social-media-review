@@ -2166,6 +2166,31 @@ export async function callGenerator({ mode = 'plan', operator_key = '', ...paylo
   return body;
 }
 
+/**
+ * Cut the background out of ONE photo (v2.9, spec 12). A thin, named wrapper
+ * over callGenerator so the design editor's host has exactly one thing to pass
+ * in — the editor itself never talks to this module, and giving it a raw
+ * callGenerator would hand it the whole generation surface to reach a single
+ * mode.
+ *
+ * Returns {url} — the PUBLIC url of the cut-out, already stored and already
+ * filed as a derived sm_assets row by the function. Deliberately NOT run
+ * through imgprep's normalizeImage(): that re-encodes to JPEG, and the alpha
+ * channel it would flatten is the entire point of this call.
+ *
+ * Cloud only. In local mode callGenerator throws its own Hebrew sentence.
+ */
+export async function removeBackground(url, { post_id = null, label = '' } = {}) {
+  const res = await callGenerator({ mode: 'bg-remove', url, post_id, label });
+  // The function answers 200 with a status field for the failures it can
+  // describe better than an HTTP code can (a too-large PNG, a refused URL, fal
+  // returning nothing). Those must not read as success.
+  if (!res || !res.url) {
+    throw new Error((res && (res.error || res.reason)) || 'הסרת הרקע לא החזירה תמונה');
+  }
+  return { url: res.url, asset: (res.saved && res.saved[0]) || null };
+}
+
 /* ---- styles (sm_styles, migration 025) ---- */
 
 // Oldest FIRST: the seeded house style should sit at the top of the dropdown,

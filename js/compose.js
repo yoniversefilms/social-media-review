@@ -320,6 +320,24 @@ function designBorderSpec(b, bare) {
 function designPhotoStyled(s) {
   if (s == null || typeof s !== 'object') return false;
   if (s.overlay != null || s.ratio != null) return true;
+  // v2.9: adjust/shadow/texture all need the nested-box frame — the grade rides
+  // the <img>, the texture is a layer beside it, the shadow needs a box that is
+  // not the clipped one.
+  //
+  // Tested by EFFECT, never by presence, and the difference is not academic.
+  // `adjust:{exposure:0}` is not "a photo with a grade", it is a photo with
+  // nothing; keyed on `s.adjust != null` it would jump onto the framed path,
+  // emit no filter at all, and arrive wearing the paper ring and an extra
+  // wrapper div that the same design without the key does not have. A neutral
+  // value would have REPAINTED the picture. Same for a zero-opacity shadow, a
+  // zero-opacity texture, an unknown texture name and a non-token shadow
+  // colour — each of which renders nothing and must therefore change nothing.
+  // The sanitizer prunes all five, so the UI cannot produce them; imported and
+  // hand-edited JSON reaches this function unpruned, which is exactly the input
+  // the legacy law has to survive. (scripts/legacy-markup-check.mjs gate 3.)
+  if (designAdjustFilter(s.adjust) !== '') return true;
+  if (designShadowFilter(s.shadow) !== '') return true;
+  if (designTextureHtml(s.texture) !== '') return true;
   if (s.border != null && typeof s.border === 'object') return true;
   return s.shape != null && s.shape !== 'organic';
 }
@@ -366,7 +384,57 @@ function designPhotoFrame(s, cover) {
   const innerMask = s.shape != null ? mask : 'border-radius:inherit;clip-path:inherit;';
   const inner = innerMask + 'position:relative;overflow:hidden;' +
     (fill ? 'width:100%;height:100%;' : 'display:block;width:100%;');
-  return { outer, inner, cover: fill };
+  // ---- v2.9 shadow, and the box it is allowed to live on --------------------
+  // MEASURED, not assumed (headless Chrome, 2026-08-03): `clip-path` on an
+  // element clips that element's OWN filter output, so a drop-shadow written
+  // beside a polygon clip is erased — the shape draws, the shadow silently does
+  // not. `border-radius` does NOT clip filter output; a rounded box keeps its
+  // shadow. That asymmetry is the whole design of what follows.
+  //
+  // So when a shape is NAMED we SPLIT: an unclipped host box carries the
+  // drop-shadow (and the pinned aspect, so a slot's height still comes from the
+  // element the template laid out), and a new child repeats the v2.4 frame —
+  // mask, ring, padding. The shadow then follows the child's composited
+  // silhouette, painted ring included, for radius and polygon shapes alike.
+  //
+  // When NO shape is named we must NOT split: the mask then lives in CSS this
+  // engine cannot read (the template's .photo class), and the inner box reaches
+  // it only by inheriting from the element that carries it — v2.4 trap #1.
+  // Resetting the host to hang a shadow on it would throw that mask away and
+  // square off the picture, which is a worse lie than a missing shadow. So the
+  // filter goes straight onto today's outer box, where it follows the
+  // template's own silhouette. The residue: a template that masks .photo with
+  // `clip-path:url(#…-cut)` clips this shadow away. designPhotoProblems cannot
+  // see class CSS to warn about it; the EDITOR can, and does (it reads the
+  // computed clip-path off the live slot and says so in the panel).
+  const shadow = designShadowFilter(s.shadow);
+  const split = !!(shadow && s.shape != null);
+  const arStyle = ar ? 'aspect-ratio:' + ar + ';height:auto;' : '';
+  const ring = bd
+    ? 'background:var(--' + bd.color + ');padding:' + bd.width + 'px;box-sizing:border-box;'
+    : 'background:transparent;padding:0;';
+  // With no shadow at all this is `outer` unchanged, character for character —
+  // which is exactly what the legacy gate checks.
+  const host = split
+    ? arStyle + 'border-radius:0;clip-path:none;background:transparent;padding:0;' +
+      'overflow:visible;filter:' + shadow + ';'
+    : outer + (shadow ? 'filter:' + shadow + ';' : '');
+  // Same three pieces in the same order as `outer`, plus the definite size the
+  // frame needs once it is one level further down.
+  //
+  // `width:100%` is NOT decoration — it is the whole reason the split works on
+  // a slot. tokens.css makes `.photo` a FLEX container (display:flex;
+  // align-items:center, so an unfilled slot can centre its label), and until
+  // now the only child of that flex box was the inner box, which has always
+  // carried width:100%. The split inserts a new direct child, and a flex item
+  // with width:auto shrink-to-fits: the frame collapsed to a few px and the
+  // chevron clipped to a vertical gold SPIKE — geometry that measured 1064px
+  // wide in the DOM while painting 14px, and that both engines agreed on
+  // perfectly. Parity was 0 differing pixels on a picture that was destroyed.
+  const frame = split
+    ? mask + arStyle + ring + 'width:100%;' + (fill ? 'height:100%;' : '')
+    : '';
+  return { outer, inner, cover: fill, host, frame, split };
 }
 
 // The colour wash over a photo — same {color, opacity} shape as design.bg's
@@ -378,6 +446,122 @@ function designPhotoOverlay(ov) {
   const op = dclamp(dnum(ov.opacity) ?? 0.35, 0, 0.9);
   return '<div data-photo="overlay" style="position:absolute;inset:0;background:var(--' +
     ov.color + ');opacity:' + dround(op) + ';pointer-events:none"></div>';
+}
+
+// ---- photo editing (v2.9) --------------------------------------------------
+// Lighting, colour, texture and shadow. The editor stores SEMANTIC numbers
+// (temperature: 40, never a CSS string); every curve lives here, in ONE helper
+// per concern, so preview and PNG cannot drift and a later move to
+// feColorMatrix changes no design already on disk.
+
+// `adjust` -> a CSS filter list for the <img> INSIDE the mask. On the frame it
+// would tint the painted ring and the overlay wash too.
+//
+// Neutral is silence: a zero (or absent) value emits nothing, so a photo whose
+// adjust object is all zeroes produces the empty string and no `filter:` at all.
+//
+// Temperature is the only non-obvious one. There is no CSS "white balance", so
+// warmth is a sepia+saturate composite; COOLING is the same composite applied
+// in hue-INVERTED space (rotate 180°, warm it, rotate back), which lands the
+// tint on blue instead of amber. Doing it as a plain positive hue-rotate
+// instead would swing every hue in the picture, not just the cast.
+function designAdjustFilter(a) {
+  if (!a || typeof a !== 'object') return '';
+  const parts = [];
+  const ex = dclamp(dnum(a.exposure) ?? 0, -100, 100);
+  if (ex) parts.push('brightness(' + dround(1 + ex / 200) + ')');
+  const co = dclamp(dnum(a.contrast) ?? 0, -100, 100);
+  if (co) parts.push('contrast(' + dround(1 + co / 200) + ')');
+  const sa = dclamp(dnum(a.saturation) ?? 0, -100, 100);
+  if (sa) parts.push('saturate(' + dround(1 + sa / 100) + ')');
+  const te = dclamp(dnum(a.temperature) ?? 0, -100, 100);
+  if (te) {
+    const k = Math.abs(te) / 100;
+    const core = 'sepia(' + dround(0.6 * k) + ') saturate(' + dround(1 + 0.5 * k) + ')';
+    parts.push(te > 0
+      ? core + ' hue-rotate(' + dround(-12 * k) + 'deg)'
+      : 'hue-rotate(180deg) ' + core + ' hue-rotate(-180deg)');
+  }
+  // blur LAST, so it softens the graded picture rather than being graded itself
+  const bl = dclamp(dnum(a.blur) ?? 0, 0, 20);
+  if (bl > 0) parts.push('blur(' + dround(bl) + 'px)');
+  return parts.join(' ');
+}
+// The declaration, or nothing at all — «nothing» is what holds the legacy gate.
+const designAdjustStyle = (s) => {
+  const f = designAdjustFilter(s && s.adjust);
+  return f ? 'filter:' + f + ';' : '';
+};
+
+// Engine-owned texture set, drawn INSIDE the mask between the photo and the
+// colour wash (the wash stays the top statement). Data-URI SVGs: no network
+// fetch, nothing to mirror into the studio, and deterministic — the two noise
+// textures pin an feTurbulence `seed`, and both engines rasterise in the same
+// Chrome binary, so the speckle is byte-reproducible across preview and PNG.
+// Every character illegal in an UNQUOTED css url() is percent-encoded (parens
+// included — a raw `url(#t)` inside would end the url token early), so these
+// need no quoting in CSS and no escaping in the HTML style attribute.
+const DESIGN_TEXTURES = {
+  grain: 'data:image/svg+xml,%3Csvg%20xmlns=%27http://www.w3.org/2000/svg%27%20width=%27120%27%20height=%27120%27%3E%3Cfilter%20id=%27t%27%20x=%270%27%20y=%270%27%20width=%27100%25%27%20height=%27100%25%27%3E%3CfeTurbulence%20type=%27fractalNoise%27%20baseFrequency=%270.9%27%20numOctaves=%274%27%20seed=%277%27%20stitchTiles=%27stitch%27/%3E%3CfeColorMatrix%20type=%27saturate%27%20values=%270%27/%3E%3C/filter%3E%3Crect%20width=%27120%27%20height=%27120%27%20filter=%27url%28%23t%29%27/%3E%3C/svg%3E',
+  paper: 'data:image/svg+xml,%3Csvg%20xmlns=%27http://www.w3.org/2000/svg%27%20width=%27160%27%20height=%27160%27%3E%3Cfilter%20id=%27t%27%20x=%270%27%20y=%270%27%20width=%27100%25%27%20height=%27100%25%27%3E%3CfeTurbulence%20type=%27fractalNoise%27%20baseFrequency=%270.035%200.7%27%20numOctaves=%275%27%20seed=%273%27%20stitchTiles=%27stitch%27/%3E%3CfeColorMatrix%20type=%27saturate%27%20values=%270%27/%3E%3C/filter%3E%3Crect%20width=%27160%27%20height=%27160%27%20filter=%27url%28%23t%29%27/%3E%3C/svg%3E',
+  canvas: 'data:image/svg+xml,%3Csvg%20xmlns=%27http://www.w3.org/2000/svg%27%20width=%278%27%20height=%278%27%3E%3Cpath%20d=%27M0%200V8M4%200V8%27%20stroke=%27%23000%27%20stroke-opacity=%27.45%27%20stroke-width=%271%27/%3E%3Cpath%20d=%27M0%200H8M0%204H8%27%20stroke=%27%23fff%27%20stroke-opacity=%27.45%27%20stroke-width=%271%27/%3E%3C/svg%3E',
+  dots: 'data:image/svg+xml,%3Csvg%20xmlns=%27http://www.w3.org/2000/svg%27%20width=%2710%27%20height=%2710%27%3E%3Ccircle%20cx=%272.5%27%20cy=%272.5%27%20r=%271.2%27%20fill=%27%23000%27%20fill-opacity=%27.5%27/%3E%3Ccircle%20cx=%277.5%27%20cy=%277.5%27%20r=%271.2%27%20fill=%27%23000%27%20fill-opacity=%27.5%27/%3E%3C/svg%3E',
+  lines: 'data:image/svg+xml,%3Csvg%20xmlns=%27http://www.w3.org/2000/svg%27%20width=%278%27%20height=%278%27%3E%3Cpath%20d=%27M-2%202L2%20-2M0%208L8%200M6%2010L10%206%27%20stroke=%27%23000%27%20stroke-opacity=%27.45%27%20stroke-width=%271%27/%3E%3C/svg%3E',
+};
+const designTexture = (n) =>
+  Object.prototype.hasOwnProperty.call(DESIGN_TEXTURES, n) ? DESIGN_TEXTURES[n] : undefined;
+
+// The texture layer. Sits between the <img> and designPhotoOverlay's wash, so
+// the stack inside the mask reads photo · texture · colour. An unknown name
+// draws nothing (the caller reports it — a silent fallback would leave the
+// reviewer looking for a texture that was never in the set).
+function designTextureHtml(tx) {
+  if (!tx || typeof tx !== 'object') return '';
+  const uri = designTexture(String(tx.name));
+  if (uri === undefined) return '';
+  const op = dclamp(dnum(tx.opacity) ?? 0.5, 0, 1);
+  if (!(op > 0)) return '';
+  return '<div data-photo="texture" style="position:absolute;inset:0;background-image:url(' +
+    uri + ');background-repeat:repeat;opacity:' + dround(op) + ';pointer-events:none"></div>';
+}
+
+// `shadow` -> one drop-shadow(). Palette tokens ONLY, same law as border and
+// overlay; opacity is applied at render through color-mix() so the stored value
+// stays a token plus a number rather than a resolved colour. A zero opacity or
+// a non-token colour means no shadow at all (the caller reports the colour).
+function designShadow(sh) {
+  if (!sh || typeof sh !== 'object') return null;
+  if (!(sh.color && RE_TOKEN.test(String(sh.color)))) return null;
+  const op = dclamp(dnum(sh.opacity) ?? 0.35, 0, 0.9);
+  if (!(op > 0)) return null;
+  return {
+    color: String(sh.color),
+    dx: dround(dclamp(dnum(sh.dx) ?? 0, -40, 40)),
+    dy: dround(dclamp(dnum(sh.dy) ?? 0, -40, 40)),
+    blur: dround(dclamp(dnum(sh.blur) ?? 0, 0, 80)),
+    opacity: dround(op),
+  };
+}
+const designShadowFilter = (sh) => {
+  const s = designShadow(sh);
+  return s ? 'drop-shadow(' + s.dx + 'px ' + s.dy + 'px ' + s.blur + 'px color-mix(in srgb,var(--' +
+    s.color + ') ' + dround(s.opacity * 100) + '%,transparent))' : '';
+};
+
+// The lone `blur` key that ill/brand extras and design.els entries carry (they
+// are currentColor drawings — no adjust, no texture, nothing to grade), plus
+// the drop-shadow extras also get. Absent keys emit nothing, which is what
+// keeps every pre-v2.9 element byte-identical.
+function designFxStyle(e, withShadow) {
+  if (!e || typeof e !== 'object') return '';
+  const parts = [];
+  const b = dclamp(dnum(e.blur) ?? 0, 0, 20);
+  if (b > 0) parts.push('blur(' + dround(b) + 'px)');
+  if (withShadow) {
+    const sh = designShadowFilter(e.shadow);
+    if (sh) parts.push(sh);
+  }
+  return parts.length ? 'filter:' + parts.join(' ') + ';' : '';
 }
 
 // One rule, injected once per slide when any slot is filled: the pending
@@ -448,11 +632,15 @@ function applySlots(html, slots, hiddenSlots) {
       // still renders exactly the v1.2 markup.
       if (designPhotoStyled(s)) {
         const f = designPhotoFrame(s, true);
+        // v2.9: the grade rides the <img> itself, inside the mask — on the frame
+        // it would tint the painted ring and the wash with it.
         const simg = '<img data-slot-img="' + i + '" src="' + dattr(s.url) + '" alt="" ' +
-          'style="' + designCropStyle(s, f.cover) + '">';
+          'style="' + designCropStyle(s, f.cover) + designAdjustStyle(s) + '">';
+        const guts = '<div style="' + f.inner + '">' + simg + designTextureHtml(s.texture) +
+          designPhotoOverlay(s.overlay) + '</div>';
         return '<' + tag + ' ' + pre + 'class="' + cls + ' photo--none" data-slot="' + i +
-          '" data-slot-filled="" style="' + frame + f.outer + '"' + post + '>' +
-          '<div style="' + f.inner + '">' + simg + designPhotoOverlay(s.overlay) + '</div>';
+          '" data-slot-filled="" style="' + frame + f.host + '"' + post + '>' +
+          (f.split ? '<div style="' + f.frame + '">' + guts + '</div>' : guts);
       }
       const img = '<img data-slot-img="' + i + '" src="' + dattr(s.url) + '" alt="" ' +
         'style="' + designCropStyle(s, true) + '">';
@@ -551,6 +739,11 @@ function designElStyle(e, paint) {
   }
   const op = dnum(e.opacity);           // v2.2
   if (op !== null) s += 'opacity:' + dround(dclamp(op, 0, 1)) + ';';
+  // v2.9 «blur to all elements». Blur only — an els entry is a piece of the
+  // TEMPLATE, and a drop-shadow on template furniture is a per-template design
+  // decision the engine has no business making from a slider. Absent key emits
+  // nothing, so every els entry written before this version is untouched.
+  s += designFxStyle(e, false);
   return s;
 }
 
@@ -728,7 +921,12 @@ function designExtraHtml(ex, i, svg) {
   if (ex.type === 'ill' || ex.type === 'brand') {
     const color = ex.color && RE_TOKEN.test(String(ex.color))
       ? 'color:var(--' + ex.color + ');' : '';
-    return '<div class="ill" data-extra="' + i + '" style="' + pos + color + '">' + svg + '</div>';
+    // v2.9: blur + drop-shadow on the drawing itself. No adjust and no texture
+    // here — these are currentColor line drawings, and the palette swatch above
+    // already owns their colour. The wrapper carries no mask, so the shadow has
+    // nothing to be clipped by and needs none of the frame's box gymnastics.
+    return '<div class="ill" data-extra="' + i + '" style="' + pos + color +
+      designFxStyle(ex, true) + '">' + svg + '</div>';
   }
   if (ex.type === 'photo') {
     // v2.4 keys (a named shape · a painted border · an overlay · a pinned
@@ -739,10 +937,11 @@ function designExtraHtml(ex, i, svg) {
     if (designPhotoStyled(ex)) {
       const f = designPhotoFrame(ex, false);
       const fimg = '<img src="' + dattr(ex.url) + '" alt="" style="' +
-        designCropStyle(ex, f.cover) + '">';
-      return '<div data-extra="' + i + '" style="' + pos + f.outer + '">' +
-        '<div style="' + f.inner + '">' + fimg + designPhotoOverlay(ex.overlay) +
-        '</div></div>';
+        designCropStyle(ex, f.cover) + designAdjustStyle(ex) + '">';
+      const guts = '<div style="' + f.inner + '">' + fimg + designTextureHtml(ex.texture) +
+        designPhotoOverlay(ex.overlay) + '</div>';
+      return '<div data-extra="' + i + '" style="' + pos + f.host + '">' +
+        (f.split ? '<div style="' + f.frame + '">' + guts + '</div>' : guts) + '</div>';
     }
     // pos/zoom/border engage the crop-frame path: the img keeps its natural
     // aspect (the frame's height follows it — transforms don't affect
@@ -769,6 +968,19 @@ function injectBeforeSlideEnd(html, extraStr) {
   return i < 0 ? html + extraStr : html.slice(0, i) + extraStr + html.slice(i);
 }
 /* ==== END PARITY BLOCK ==================================================== */
+
+// v2.9. The editor previews a filter slider LIVE by writing an inline style on
+// the composed element while the hand is still moving, and it uses THESE
+// functions to do it rather than a second copy of the curves. That is the whole
+// point of PLAN §"values are semantic, engines own the mapping": one helper, so
+// the live drag, the re-composed preview and the PNG cannot disagree — and a
+// later swap to feColorMatrix moves all three at once.
+//
+// Deliberately declared OUT here rather than by marking the definitions
+// `export` inside the block: the block must stay textually identical to
+// render.mjs, which imports nothing from anybody, and scripts/ slices it out as
+// a module with its own export list appended.
+export { designAdjustFilter, designShadowFilter };
 
 // One validator for everything a photo can carry (v2.4), so a slot and an extra
 // report the same wrong value the same way. Deliberately OUTSIDE the parity
@@ -805,6 +1017,22 @@ function designPhotoProblems(s, where, problems) {
       !(typeof s.overlay === 'object' && s.overlay.color &&
         RE_TOKEN.test(String(s.overlay.color)))) {
     problems.push('שכבת צבע לא חוקית ב' + where + ' (לא צוירה)');
+  }
+  // v2.9. The sanitizer DROPS an unknown texture name and a non-token shadow
+  // colour; this is what stops that from being silent. Both are fallbacks the
+  // reviewer did not ask for — the texture simply is not drawn, the shadow
+  // simply is not cast — and a control that answers with nothing reads as
+  // broken unless something says why.
+  if (s.texture != null) {
+    if (typeof s.texture !== 'object' || designTexture(String(s.texture.name)) === undefined) {
+      problems.push('מרקם לא מוכר ב' + where + ': ”' +
+        String(s.texture && s.texture.name) + '“ (לא צויר)');
+    }
+  }
+  if (s.shadow != null &&
+      !(typeof s.shadow === 'object' && s.shadow.color &&
+        RE_TOKEN.test(String(s.shadow.color)))) {
+    problems.push('צבע צל לא חוקי ב' + where + ' (הצל לא צויר)');
   }
 }
 

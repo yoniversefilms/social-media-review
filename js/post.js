@@ -24,6 +24,9 @@ import {
   // v2.5.1 slide export (spec 10 §D-2) — the download modal's «גודל» beyond
   // 1080 is a REQUEST on the same queue, fulfilled by scripts/fulfill.mjs.
   createGenRequest, getGenRequest, GEN_DIMS, GEN_STATUS_LABELS,
+  // v2.9 photo editing (spec 12) — «הסרת רקע» in the design editor. The editor
+  // never talks to store.js, so the host passes this in as opts.removeBackground.
+  removeBackground,
 } from './store.js';
 // v2.5: the ONE renderer for the transparency block, shared with
 // create-ai.html. Importing that module here is safe by construction — its
@@ -45,6 +48,13 @@ import { initEditor, canonicalJSON, designSummary, PHOTO_DRAG_MIME } from './edi
 // persistent root so an in-flight generation survives a tab switch. This file
 // must not learn what a fal model is.
 import { generateTab } from './generate.js';
+
+// v2.9 (spec 12): «הסרת רקע» runs in the generate Edge Function, which is the
+// only thing holding FAL_KEY — there is no local equivalent. Read straight off
+// the URL, the same signal initStore() itself reads and the same way
+// generate.js decides (IS_LOCAL there); this file only needs it to withhold a
+// button that could not work rather than let someone press it.
+const IS_LOCAL_BOARD = new URLSearchParams(location.search).get('local') === '1';
 // v2.6 phone-proofing: the תמונות tab is the single most likely place a
 // therapist uploads straight off a phone, so it snapshots picked Files before
 // anything reads them. Re-encoding for the bucket happens in store.js.
@@ -1491,6 +1501,13 @@ async function mountDesign() {
       // post-scoped upload — it lands in that post's תמונות tab AND in the
       // board-wide library, exactly like a drop on the slide.
       uploadAsset: uploadFromEditor,
+      // v2.9 «הסרת רקע» (spec 12). Cloud only — the Edge Function is what holds
+      // FAL_KEY — so in local mode we pass NOTHING and the editor renders the
+      // button disabled with a reason, the same posture the generation tab
+      // takes. Handing it a function that always throws would read as a bug.
+      removeBackground: IS_LOCAL_BOARD
+        ? null
+        : (url) => removeBackground(url, { post_id: S.post.id }),
       // v2.1: every editing control lives in the editor's own sidebar, docked
       // into the panel column while edit mode is armed (see setDesign). Drop
       // this and the sidebar still works — it falls back to a fixed drawer —

@@ -10,8 +10,15 @@ import {
   saveDraft, deleteDraft, listDrafts,
   listTemplates, deleteTemplate, whoAmI,
   listAssets, assetRowUrl,
+  // v2.9 photo editing (spec 12) — «הסרת רקע» in the design editor.
+  removeBackground,
 } from './store.js';
 import { el as h, navBar, toast, modal, zoomControl } from './ui.js';
+
+// v2.9 (spec 12): «הסרת רקע» is cloud-only — the generate Edge Function holds
+// FAL_KEY and the local board has no such thing. Same URL signal generate.js
+// and post.js read; used only to withhold a button that could not work.
+const IS_LOCAL_BOARD = new URLSearchParams(location.search).get('local') === '1';
 import { initCompose, mountSlide, manifest } from './compose.js';
 import { initEditor } from './editor.js';
 
@@ -665,6 +672,11 @@ function armEditor() {
       photosEmptyText: 'עוד אין נכסים בלוח — אפשר להעלות קובץ כאן, או לגרור תמונה מהמחשב ישירות אל השקף.',
       uploadFile: uploadToDraft,
       uploadAsset: uploadToDraft,
+      // v2.9 «הסרת רקע» (spec 12) — null in local mode, so the editor shows the
+      // button disabled with a reason instead of one that always throws.
+      removeBackground: IS_LOCAL_BOARD
+        ? null
+        : (url) => removeBackground(url, { post_id: draftId }),
       // v2.2: ⌘Z / ⌘⇧Z reach the builder's own deck history
       onUndo: () => applyHist(undoStack, redoStack),
       onRedo: () => applyHist(redoStack, undoStack),

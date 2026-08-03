@@ -30,6 +30,16 @@
 // caller). Nothing overlays the artwork but the selection box, the handles,
 // the snap guides, the slot hints and the in-place text ✓/✗.
 //
+// PHOTO EDITING (v2.9) — grading, texture, shadow and background removal, all
+// in the «עריכת תמונה» group of the מאפיינים tab. Everything except the last is
+// pure CSS the engines own: this file stores SEMANTIC numbers (temperature: 40)
+// and imports designAdjustFilter/designShadowFilter from compose.js for the
+// live drag, so the drag, the re-composed preview and the PNG share one
+// mapping. opts.removeBackground(url) -> Promise<{url}> is the one seam that
+// leaves the browser; the HOST supplies it (post.js/build.js wire it to
+// store.removeBackground, and pass null in local mode so the button can say
+// why it is off). The editor still never talks to store.js.
+//
 // opts.sidebar (optional): a host element that RECEIVES the sidebar, so the
 // page can dock it as a real column (post.html puts it where the review panel
 // sits). Without it the sidebar mounts to <body> as a fixed drawer on the
@@ -38,7 +48,8 @@
 //
 //   initEditor(handle, slide, {onChange, manifest, photos, assets, postId,
 //                              assetUrl, photosEmptyText, uploadFile,
-//                              uploadAsset, onTextChange, sidebar})
+//                              uploadAsset, onTextChange, sidebar,
+//                              removeBackground})
 //     -> {destroy, refresh, setPhotos, setAssets, getDesign, addPhotoExtra,
 //         dropFiles, startTextEdit, openTab}
 //
@@ -164,6 +175,12 @@ import { el, modal, toast } from './ui.js';
 import {
   groupStacks, isStacked, currentOf, cycleStack, stackBadge,
 } from './stacks.js';
+// v2.9 live preview. The ENGINE's own semantic->CSS mapping, imported rather
+// than re-implemented: a slider drag styles the composed element inline with
+// the exact string designAdjustFilter/designShadowFilter will emit on the next
+// re-compose, so the live drag, the preview and the PNG cannot drift. Every
+// host that mounts this editor already imports compose.js for the slide handle.
+import { designAdjustFilter, designShadowFilter } from './compose.js';
 
 // dataTransfer MIME for photo drags that originate inside the app (grid
 // thumbnails → slide). Carrying the public URL means no re-upload on drop.
@@ -407,6 +424,50 @@ const PHOTO_RATIOS = [
 ];
 const PHOTO_RATIO_KEYS = new Set(PHOTO_RATIOS.map(([k]) => k));
 
+// ---- photo editing (v2.9) --------------------------------------------------
+// The `adjust` schema, as the sliders read it: key · label · range · step.
+// Values are SEMANTIC — the editor stores `temperature: 40` and never a CSS
+// string; designAdjustFilter in the twin PARITY BLOCK owns every curve. Keep
+// the bounds in step with it: a value this file lets through and the engine
+// clamps is a slider whose last few pixels do nothing.
+const PHOTO_ADJUSTS = [
+  { key: 'exposure', label: 'חשיפה', min: -100, max: 100, step: 1 },
+  { key: 'contrast', label: 'ניגודיות', min: -100, max: 100, step: 1 },
+  { key: 'saturation', label: 'רוויה', min: -100, max: 100, step: 1 },
+  { key: 'temperature', label: 'טמפרטורה', min: -100, max: 100, step: 1 },
+  { key: 'blur', label: 'טשטוש', min: 0, max: 20, step: 0.5 },
+];
+
+// One-click looks. PURE UI SUGAR: every chip writes ordinary `adjust` numbers
+// and adds NO schema key, so a preset is indistinguishable from the same values
+// dialled by hand — which is the point. Nudging a slider afterwards does not
+// «break» a preset, because there was never a preset stored to break.
+const PHOTO_PRESETS = [
+  ['מקורי', null],
+  ['שחור-לבן', { saturation: -100, contrast: 8 }],
+  ['חמים', { temperature: 38, saturation: 10 }],
+  ['קריר', { temperature: -38, saturation: 6 }],
+  ['דהוי', { saturation: -35, contrast: -18, exposure: 10 }],
+  ['חי', { saturation: 32, contrast: 14 }],
+];
+
+// The engine-owned texture set (DESIGN_TEXTURES in the PARITY BLOCK). The
+// editor only ever stores a NAME — the SVGs live in the engines, exactly as the
+// shape polygons do, so the picker cannot drift from the render.
+const PHOTO_TEXTURES = [
+  ['grain', 'גרעין'], ['paper', 'נייר'], ['canvas', 'בד'],
+  ['dots', 'נקודות'], ['lines', 'קווים'],
+];
+const PHOTO_TEXTURE_KEYS = new Set(PHOTO_TEXTURES.map(([k]) => k));
+const TEXTURE_DEFAULT_OPACITY = 0.5;
+
+// Shadow bounds, mirroring designShadow in both engines.
+const SHADOW_DEFAULT = { dx: 8, dy: 10, blur: 18, opacity: 0.35 };
+// «הילה» (highlight/glow) is a PRESET, not a schema concept: a light token
+// centred with no offset. Nothing downstream knows the word.
+const SHADOW_GLOW = { dx: 0, dy: 0, blur: 26, opacity: 0.55 };
+const BLUR_MAX = 20;
+
 // Palette tokens only — the same law as blocks.color, and the same grammar the
 // engines enforce at render (RE_TOKEN, in the PARITY BLOCK). Enforcing it HERE
 // as well matters because the engines fall back SILENTLY: a stray "#ff0000"
@@ -524,8 +585,127 @@ function pruneCropInto(o, src) {
       };
     }
   }
+  pruneAdjustInto(o, src);    // v2.9 lighting/colour/blur
+  pruneShadowInto(o, src);    // v2.9 drop shadow (palette token only)
+  pruneTextureInto(o, src);   // v2.9 texture inside the mask
   pruneOpacityInto(o, src);   // slots fade on the frame, exactly as extras do
   return o;
+}
+
+// v2.9 sanitizers. All three obey the same law as everything above them:
+// NEUTRAL IS SILENCE. A zero exposure, an explicitly zero-opacity shadow, a
+// texture at 0% are all the absence of the effect, so they are pruned away
+// entirely rather than stored as a zero — which is what lets designPhotoStyled
+// keep every pre-v2.9 design on the legacy render path, byte for byte.
+//
+// TWIN SEMANTICS — READ BEFORE EDITING ANY OF THE FOUR BELOW.
+// These four functions must agree with the ENGINES on every possible input.
+// The engine side lives in the twin PARITY BLOCK (compose.js / render.mjs):
+//   adjust  -> designAdjustFilter()    shadow -> designShadow()
+//   texture -> designTextureHtml()     blur   -> designFxStyle()
+// The engines parse with `dnum()` — a STRICT finite-number check that returns
+// null for anything that is not already a number — and then apply their own
+// defaults with `?? 0.35` (shadow) and `?? 0.5` (texture). Two rules follow,
+// and both were shipped wrong once:
+//
+//   1. ABSENT IS NOT ZERO. `Number(undefined)` is NaN, and NaN is not nullish,
+//      so a `Number(x) ?? default` idiom silently evaluates to NaN and prunes.
+//      A shadow written `{color:'ink',dx:8,dy:10,blur:18}` with no opacity is a
+//      shadow the ENGINES DRAW at 0.35 — pruning it here made a visible shadow
+//      vanish on the reviewer's next commit of any unrelated control, with
+//      nothing on screen to explain it. Absent opacity stays ABSENT in the
+//      stored JSON (the engines own the default; storing 0.35 explicitly would
+//      freeze today's default into every design on disk). Only an EXPLICIT zero
+//      means "no shadow".
+//   2. STRINGS ARE COERCED HERE, NOT THERE. The engines reject `"40"`, so an
+//      imported design carrying string numbers renders neutral. The sanitizer
+//      is the layer that normalises: it accepts a finite numeric string, clamps
+//      it, and stores a real NUMBER, so the committed design and the render
+//      agree from then on. Widening `dnum` instead would let unvalidated wire
+//      data reach the render path, which is the wrong direction.
+//
+// Reached by network, not just by the UI: post.js parses sm_edits.new_text into
+// slide.design and renders it UNPRUNED, so every shape above arrives here from
+// another reviewer's proposal, not only from these sliders.
+
+// The sanitizer's number parser: `dnum` widened by exactly one case (finite
+// numeric strings). Anything else — NaN, Infinity, null, booleans, objects,
+// empty or non-numeric strings — is null, i.e. "the key is not there".
+function numOrNull(v) {
+  if (typeof v === 'number') return Number.isFinite(v) ? v : null;
+  if (typeof v === 'string' && v.trim() !== '') {
+    const n = Number(v);
+    return Number.isFinite(n) ? n : null;
+  }
+  return null;
+}
+const round2 = (v) => Math.round(v * 100) / 100;
+
+// `adjust` — five semantic numbers, each clamped and rounded to the engine's
+// own bounds, each dropped at its neutral value. The whole object disappears
+// when nothing is left, so «I moved a slider and put it back» stores nothing.
+function pruneAdjustInto(o, src) {
+  const a = src.adjust;
+  if (!a || typeof a !== 'object' || Array.isArray(a)) return;
+  const out = {};
+  for (const spec of PHOTO_ADJUSTS) {
+    const v = numOrNull(a[spec.key]);
+    if (v === null) continue;
+    const n = round2(clamp(v, spec.min, spec.max));
+    if (n !== 0) out[spec.key] = n;
+  }
+  if (Object.keys(out).length) o.adjust = out;
+}
+
+// `shadow` — PALETTE TOKENS ONLY, enforced here as well as at render, for the
+// same reason border and overlay are: the engines fall back SILENTLY (a bad
+// colour casts no shadow at all), so a sanitizer that let "#ff0000" through
+// would hand a reviewer a control that answers with nothing and no explanation.
+// A shadow with no legal colour, or at an EXPLICIT zero opacity, is not a
+// shadow — it is pruned, not stored as an invisible one. Absent opacity is left
+// absent: designShadow() defaults it to 0.35 and draws.
+function pruneShadowInto(o, src) {
+  const s = src.shadow;
+  if (!s || typeof s !== 'object' || Array.isArray(s)) return;
+  const c = paletteToken(s.color);
+  if (!c) return;
+  const raw = numOrNull(s.opacity);
+  const op = raw === null ? null : round2(clamp(raw, 0, 0.9));
+  if (op === 0) return;                       // explicit zero = no shadow
+  const out = {
+    color: c,
+    dx: Math.round(clamp(numOrNull(s.dx) ?? 0, -40, 40)),
+    dy: Math.round(clamp(numOrNull(s.dy) ?? 0, -40, 40)),
+    blur: Math.round(clamp(numOrNull(s.blur) ?? 0, 0, 80)),
+  };
+  if (op !== null) out.opacity = op;
+  o.shadow = out;
+}
+
+// `texture` — an engine-owned NAME plus an opacity. An unknown name is dropped
+// here AND named by designPhotoProblems/warnPhotoStyling, which is the pairing
+// the spec asks for: the bad value never reaches the render, and the reviewer
+// is told why their texture is missing instead of hunting for it. Absent
+// opacity is left absent: designTextureHtml() defaults it to 0.5 and draws.
+function pruneTextureInto(o, src) {
+  const t = src.texture;
+  if (!t || typeof t !== 'object' || Array.isArray(t)) return;
+  const n = String(t.name || '');
+  if (!PHOTO_TEXTURE_KEYS.has(n)) return;
+  const raw = numOrNull(t.opacity);
+  const op = raw === null ? null : round2(clamp(raw, 0, 1));
+  if (op === 0) return;                       // explicit zero = no texture
+  o.texture = op === null ? { name: n } : { name: n, opacity: op };
+}
+
+// The lone `blur` key — ill/brand extras and design.els entries. Same neutral
+// rule: 0 is «no blur» and is stored as nothing. No engine-side default to
+// mirror here (designFxStyle reads `?? 0`, i.e. absent already means none).
+function pruneBlurInto(o, src) {
+  const v = numOrNull(src.blur);
+  if (v === null) return;
+  const n = round2(clamp(v, 0, BLUR_MAX));
+  if (n > 0) o.blur = n;
 }
 
 function pruneSlotSpec(s) {
@@ -610,8 +790,14 @@ function pruneOpacityInto(o, src) {
 function pruneExtra(e) {
   const o = { type: e.type, x: round1(e.x || 0), y: round1(e.y || 0), w: round1(e.w || 20) };
   // brand marks (v1.6) carry a name like ills — and never crop/border keys
-  if (e.type === 'ill' || e.type === 'brand') o.name = e.name;
-  else {
+  if (e.type === 'ill' || e.type === 'brand') {
+    o.name = e.name;
+    // v2.9: a drawing takes blur and a drop shadow and nothing else. No adjust
+    // and no texture — these are currentColor line drawings, and the palette
+    // swatch already owns their colour.
+    pruneBlurInto(o, e);
+    pruneShadowInto(o, e);
+  } else {
     o.url = e.url;
     // shape is pruned by pruneCropInto (v2.4) against the shape table. The old
     // unguarded `if (e.shape) o.shape = e.shape` that used to sit here let an
@@ -650,6 +836,7 @@ function pruneEl(e, key) {
   }
   if (e.color && key !== 'lockup') o.color = e.color;
   pruneOpacityInto(o, e);               // v2.2
+  pruneBlurInto(o, e);                  // v2.9 «blur to all elements»
   return Object.keys(o).length ? o : null;
 }
 
@@ -1134,6 +1321,25 @@ function injectStyles() {
 .smr-edpick--br .nm{direction:rtl;text-align:center;font-size:.75rem;
   color:var(--ink,#241d20)}
 .smr-edtb .is-off{opacity:.45;cursor:not-allowed}
+/* collapsible property group (v2.9) — «עריכת תמונה» holds five sliders, a
+   texture row and a whole shadow block, which is more than the panel can show
+   at once without pushing shape/ratio/border off the top. The head is a real
+   <button> with aria-expanded so it answers the keyboard, and the caret is a
+   plain glyph rotated by CSS (the brand's Hebrew faces have no arrow glyphs —
+   they render as tofu, which is why the shape picker draws shapes instead of
+   naming them). PHYSICAL rotation, and the caret sits first in the flow, so
+   RTL puts it on the right where the text starts. */
+.smr-edgrp{border:1px solid var(--line,rgba(36,29,32,.14));border-radius:10px;
+  overflow:hidden}
+.smr-edgrp__head{appearance:none;width:100%;display:flex;align-items:center;gap:6px;
+  background:rgba(131,0,81,.04);border:0;cursor:pointer;font:inherit;font-weight:700;
+  font-size:.82rem;color:var(--ink,#241d20);padding:7px 10px;text-align:start}
+.smr-edgrp__head:hover{background:rgba(131,0,81,.08)}
+.smr-edgrp__cx{display:inline-block;transition:transform 120ms ease;
+  transform:rotate(-90deg);color:var(--ink-soft,#6b5f63);font-size:.7rem}
+.smr-edgrp__head.on .smr-edgrp__cx{transform:none}
+.smr-edgrp__body{display:grid;gap:9px;padding:9px 10px 10px}
+.smr-edgrp__body[hidden]{display:none}
 `;
   document.head.appendChild(s);
 }
@@ -2688,9 +2894,26 @@ export function initEditor(handle, slide, opts = {}) {
     range.addEventListener('input', () => {
       o.set(Number(range.value));
       val.textContent = o.fmt(Number(range.value));
-      commit({ defer: 140 });
+      // v2.9: LIVE preview during the drag, the same pure-drag pattern the
+      // move/crop gestures use — the composed element is styled inline right
+      // now, and the debounced commit re-composes once the hand stops. Without
+      // it a filter slider only answers every 140ms, which feels like lag
+      // rather than like grading a picture.
+      if (o.live) o.live(Number(range.value));
+      commit({ defer: o.defer || 140 });
     });
     range.addEventListener('change', () => commit());
+    // v2.9: double-click a slider to put it back. Cheap, discoverable enough
+    // beside the ↺ button, and the only way to hit an exact neutral on a
+    // -100..100 track without nudging with the arrow keys.
+    if (o.reset) {
+      range.title = 'לחיצה כפולה מחזירה לברירת המחדל';
+      range.addEventListener('dblclick', () => {
+        o.reset();
+        commit();
+        renderToolbar();
+      });
+    }
     const row = el('div', { class: 'smr-edtb__row' }, el('span', null, label), range, val);
     if (o.reset) {
       const r = el('button', {
@@ -2978,21 +3201,351 @@ export function initEditor(handle, slide, opts = {}) {
     return rows;
   }
 
+  // ---------------- photo editing (v2.9) ----------------
+
+  // A collapsible section, so «עריכת תמונה» can hold five sliders, a texture
+  // row and a whole shadow block without burying shape/ratio/border above it.
+  // Open state is remembered per SECTION NAME, not per selection: the reviewer
+  // who opened the grading rows wants them open on the next photo too, and the
+  // panel is rebuilt from scratch on every commit.
+  const groupOpen = Object.create(null);
+  function groupRow(name, label, kids) {
+    const body = el('div', { class: 'smr-edgrp__body' }, kids);
+    const open = groupOpen[name] !== false;
+    body.hidden = !open;
+    const head = el('button', {
+      class: 'smr-edgrp__head' + (open ? ' on' : ''), type: 'button',
+      onclick: () => {
+        groupOpen[name] = body.hidden;
+        body.hidden = !body.hidden;
+        head.classList.toggle('on', !body.hidden);
+        head.setAttribute('aria-expanded', String(!body.hidden));
+      },
+      'aria-expanded': String(open),
+    }, el('span', { class: 'smr-edgrp__cx' }, '▾'), label);
+    return el('div', { class: 'smr-edgrp' }, head, body);
+  }
+
+  // The composed nodes a live drag writes to. The frame is where a shadow
+  // lives, the <img> is where the grade lives — the same split the engines make
+  // (PARITY BLOCK designPhotoFrame), because getting the layer wrong here would
+  // preview a tint on the ring that the PNG puts only on the picture.
+  function photoNodes(t) {
+    if (!t) return {};
+    if (t.kind === 'slot') {
+      const frame = slotEl(t.n);
+      return { frame, img: slotImgEl(t.n) };
+    }
+    const frame = extraEl(t.index);
+    return { frame, img: frame ? frame.querySelector('img') : null };
+  }
+
+  // Live grade: the engine's own filter string, on the engine's own element.
+  function liveAdjust(t, obj) {
+    const { img } = photoNodes(t);
+    if (img) img.style.filter = designAdjustFilter(obj && obj.adjust);
+  }
+  // Live shadow. NOT always the same node the commit will use: once a shape is
+  // named the engine splits the frame in two and hangs the shadow on the outer
+  // host, and here the frame IS that host — so this previews on the right box
+  // in both cases. It deliberately overwrites nothing else: a photo frame
+  // carries no other filter.
+  function liveShadow(t, obj) {
+    const { frame } = photoNodes(t);
+    if (!frame) return;
+    // A drawing extra carries BOTH a lone blur and a shadow on this one node
+    // (designFxStyle emits them into one filter list), so previewing the shadow
+    // alone here would wipe the blur off the screen until the next re-compose.
+    // A photo frame has no `blur` key — its blur lives in adjust, on the <img> —
+    // so this collapses to the shadow for the photo surfaces.
+    const b = Number(obj && obj.blur) || 0;
+    frame.style.filter = [
+      b > 0 ? 'blur(' + b + 'px)' : '',
+      designShadowFilter(obj && obj.shadow),
+    ].filter(Boolean).join(' ');
+  }
+
+  // The `adjust` object, created on demand. Re-resolved through getObj on every
+  // event for the reason every v2.4 row is: commit()'s prune REPLACES the
+  // stored objects, so a captured reference is an orphan after the first change.
+  function adjustOf(getObj) {
+    const o = getObj();
+    if (!o) return null;
+    if (!o.adjust || typeof o.adjust !== 'object') o.adjust = {};
+    return o.adjust;
+  }
+
+  function adjustRows(getObj, target) {
+    const cur = () => (getObj() || {}).adjust || {};
+    // Presets write plain adjust numbers and store no preset key, so a chip is
+    // «on» when the values match it — not because anything remembered a choice.
+    const matches = (vals) => {
+      const a = cur();
+      const keys = new Set([...Object.keys(a), ...Object.keys(vals || {})]);
+      for (const k of keys) if ((a[k] || 0) !== ((vals || {})[k] || 0)) return false;
+      return true;
+    };
+    const chips = el('div', { class: 'smr-edtb__row' },
+      el('span', null, 'סגנון'),
+      PHOTO_PRESETS.map(([lab, vals]) => el('button', {
+        class: 'smr-edtg smr-edtg--w' + (matches(vals) ? ' on' : ''), type: 'button',
+        title: vals ? 'החלת הסגנון על התמונה' : 'ביטול כל התיקונים',
+        onclick: () => {
+          const o = getObj();
+          if (!o) return;
+          if (!vals) delete o.adjust;
+          else o.adjust = { ...vals };
+          liveAdjust(target, o);
+          commit();
+          renderToolbar();
+        },
+      }, lab)));
+    const sliders = PHOTO_ADJUSTS.map((spec) => sliderRow(spec.label, {
+      min: spec.min, max: spec.max, step: spec.step,
+      get: () => Number(cur()[spec.key]) || 0,
+      set: (v) => {
+        const a = adjustOf(getObj);
+        if (!a) return;
+        if (Math.abs(v) < 0.001) delete a[spec.key]; else a[spec.key] = v;
+      },
+      live: () => liveAdjust(target, getObj()),
+      fmt: (v) => (spec.key === 'blur'
+        ? (v > 0 ? v + 'px' : 'בלי')
+        : (v > 0 ? '+' : '') + Math.round(v)),
+      reset: () => {
+        const o = getObj();
+        if (o && o.adjust) delete o.adjust[spec.key];
+      },
+    }));
+    return [chips, ...sliders];
+  }
+
+  // Textures — engine-owned set, drawn INSIDE the mask between the picture and
+  // the colour wash. Clicking the active one clears it, the way every colour
+  // control here toggles.
+  function textureRows(getObj) {
+    const tx = () => (getObj() || {}).texture || null;
+    const row = el('div', { class: 'smr-edtb__row' },
+      el('span', null, 'מרקם'),
+      PHOTO_TEXTURES.map(([key, lab]) => el('button', {
+        class: 'smr-edtg smr-edtg--w' + ((tx() || {}).name === key ? ' on' : ''),
+        type: 'button', title: lab,
+        onclick: () => {
+          const o = getObj();
+          if (!o) return;
+          if (o.texture && o.texture.name === key) delete o.texture;
+          else o.texture = { name: key, opacity: (o.texture || {}).opacity ?? TEXTURE_DEFAULT_OPACITY };
+          commit();
+          renderToolbar();
+        },
+      }, lab)));
+    const rows = [row];
+    if (tx()) {
+      rows.push(sliderRow('עוצמת המרקם', {
+        min: 0.05, max: 1, step: 0.05,
+        get: () => (tx() || {}).opacity ?? TEXTURE_DEFAULT_OPACITY,
+        set: (v) => {
+          const o = getObj();
+          if (o && o.texture) o.texture.opacity = Math.round(v * 100) / 100;
+        },
+        fmt: (v) => Math.round(v * 100) + '%',
+      }));
+    }
+    return rows;
+  }
+
+  // Drop shadow / highlight. `withGlow` offers the «הילה» preset (dx=dy=0 on a
+  // light token) — a UI word for a centred shadow, never a stored concept.
+  //
+  // The hint at the bottom is the one thing only the EDITOR can know. The
+  // engines cannot read class CSS, so when a photo names no shape and its mask
+  // comes from the template's own `.photo` rule, nothing server-side can tell
+  // whether that mask is a border-radius (shadow fine) or a `clip-path:url(#…)`
+  // cut (shadow clipped away — measured, see designPhotoFrame). Here the
+  // composed node is in the DOM, so we simply ASK it, and say so rather than
+  // letting the control answer with nothing.
+  function shadowRows(getObj, target, withGlow) {
+    const sh = () => (getObj() || {}).shadow || null;
+    const write = (patch) => {
+      const o = getObj();
+      if (!o) return;
+      o.shadow = Object.assign(
+        { color: 'ink', ...SHADOW_DEFAULT }, sh() || {}, patch);
+    };
+    const colors = el('div', { class: 'smr-edtb__row' },
+      el('span', null, 'צל'),
+      palette.map((p) => el('button', {
+        class: 'smr-edsw' + ((sh() || {}).color === p.name ? ' on' : ''),
+        type: 'button', title: p.name,
+        style: { background: p.css },
+        onclick: () => {
+          const o = getObj();
+          if (!o) return;
+          if (o.shadow && o.shadow.color === p.name) delete o.shadow;
+          else write({ color: p.name });
+          liveShadow(target, o);
+          commit();
+          renderToolbar();
+        },
+      })));
+    const rows = [colors];
+    if (!sh()) return rows;
+    if (withGlow) {
+      rows.push(el('div', { class: 'smr-edtb__row' },
+        el('span', null, 'סוג'),
+        [['צל', SHADOW_DEFAULT], ['הילה', SHADOW_GLOW]].map(([lab, vals]) =>
+          el('button', {
+            class: 'smr-edtg smr-edtg--w' +
+              ((sh() || {}).dx === vals.dx && (sh() || {}).dy === vals.dy ? ' on' : ''),
+            type: 'button',
+            title: lab === 'הילה'
+              ? 'זוהר סימטרי סביב התמונה — בלי הסטה' : 'צל מוסט',
+            onclick: () => { write({ ...vals }); commit(); renderToolbar(); },
+          }, lab))));
+    }
+    const num = (label, key, min, max, step, fmt) => sliderRow(label, {
+      min, max, step,
+      get: () => Number((sh() || {})[key]) || 0,
+      set: (v) => write({ [key]: v }),
+      live: () => liveShadow(target, getObj()),
+      fmt,
+    });
+    rows.push(num('הסטה אופקית', 'dx', -40, 40, 1, (v) => Math.round(v) + 'px'));
+    rows.push(num('הסטה אנכית', 'dy', -40, 40, 1, (v) => Math.round(v) + 'px'));
+    rows.push(num('ריכוך', 'blur', 0, 80, 1, (v) => Math.round(v) + 'px'));
+    rows.push(sliderRow('עוצמת הצל', {
+      min: 0.05, max: 0.9, step: 0.05,
+      get: () => (sh() || {}).opacity ?? SHADOW_DEFAULT.opacity,
+      set: (v) => write({ opacity: Math.round(v * 100) / 100 }),
+      live: () => liveShadow(target, getObj()),
+      fmt: (v) => Math.round(v * 100) + '%',
+    }));
+    const warn = shadowClipWarning(getObj, target);
+    if (warn) rows.push(el('div', { class: 'smr-edtb__row smr-edtb__hint' }, warn));
+    return rows;
+  }
+
+  // «the shadow will not show here, and here is why» — read off the LIVE node,
+  // never guessed. Only fires for the exact combination that loses it: no shape
+  // named (so the mask is the template's, which the engine cannot reset without
+  // throwing the mask away) AND that template mask is a clip-path.
+  function shadowClipWarning(getObj, target) {
+    const o = getObj();
+    if (!o || !o.shadow || o.shape != null) return null;
+    // Only a SLOT can inherit a mask nobody here chose — an extra's frame is
+    // built entirely by the engine, and a drawing extra wears no mask at all.
+    if (!target || target.kind !== 'slot') return null;
+    const { frame } = photoNodes(target);
+    if (!frame || !frame.ownerDocument || !frame.ownerDocument.defaultView) return null;
+    let cp = '';
+    try {
+      cp = frame.ownerDocument.defaultView.getComputedStyle(frame).clipPath || '';
+    } catch { return null; }
+    if (!cp || cp === 'none') return null;
+    return 'התבנית חותכת את המשבצת הזו, וחיתוך כזה מסתיר את הצל. ' +
+      'בחרו צורה למעלה כדי שהצל ייראה.';
+  }
+
+  // «הסרת רקע» — the one control here that is not CSS. The editor never talks
+  // to the network: the HOST hands in opts.removeBackground(url) and this only
+  // knows a promise. Without one (local mode, or an unwired host) the button
+  // says so plainly instead of being absent, because a missing button reads as
+  // «this app cannot do that» rather than «not from here».
+  function bgRemoveRow(getObj, target) {
+    const fn = typeof opts.removeBackground === 'function' ? opts.removeBackground : null;
+    const btn = el('button', {
+      class: 'btn btn--ghost' + (fn ? '' : ' is-off'), type: 'button',
+      ...(fn ? {} : { 'aria-disabled': 'true' }),
+      title: fn
+        ? 'הסרת הרקע מהתמונה — נשמרת כתמונה חדשה בספרייה, והעיצוב נשמר'
+        : 'הסרת רקע רצה בענן בלבד',
+    }, '✂️ הסרת רקע');
+    btn.addEventListener('click', async () => {
+      if (!fn) {
+        toast('הסרת רקע זמינה רק בענן — לא במצב מקומי', 'err');
+        return;
+      }
+      const o = getObj();
+      if (!o || !o.url) return;
+      btn.disabled = true;
+      const label = btn.textContent;
+      btn.textContent = 'מסיר רקע…';
+      // busyEl is the shared upload banner and says «מעלים תמונה…»; nothing is
+      // being uploaded here, so it borrows the button's own words and hands
+      // them back in the finally below.
+      const busyWas = busyEl.textContent;
+      busyEl.textContent = 'מסיר רקע…';
+      busyEl.hidden = false;
+      try {
+        const res = await fn(o.url);
+        const url = res && res.url;
+        if (!url) throw new Error('לא התקבלה תמונה');
+        // rembg preserves the pixel dimensions, so this is NOT «החלפה»: the
+        // picture still lines up and pos/zoom still mean what they meant. Every
+        // styling key AND the crop survive — only the bytes change.
+        const cur = getObj();
+        if (cur) cur.url = url;
+        commit();
+        renderToolbar();
+        toast('הרקע הוסר — התמונה החדשה נשמרה בספרייה');
+      } catch (err) {
+        toast('הסרת הרקע נכשלה: ' + ((err && err.message) || err), 'err');
+      } finally {
+        btn.disabled = false;
+        btn.textContent = label;
+        busyEl.hidden = true;
+        busyEl.textContent = busyWas;
+      }
+    });
+    return el('div', { class: 'smr-edtb__row' }, btn);
+  }
+
+  // Everything v2.9 added, in one collapsible group under the v2.4 rows.
+  function photoEditRows(getObj, target) {
+    return groupRow('photoEdit', 'עריכת תמונה', [
+      ...adjustRows(getObj, target),
+      ...textureRows(getObj),
+      ...shadowRows(getObj, target, true),
+      bgRemoveRow(getObj, target),
+    ].flat().filter(Boolean));
+  }
+
   // Every photo control, in one place, for both surfaces that own a photo — a
   // template slot and a free extra. v1.2 hid crop, border and the rest behind
   // the ✂️ toggle, which is most of why the panel read as «not many options»:
   // the shape and the border have nothing to do with cropping and are always on
   // show now. Only the pan/zoom pair still belongs to crop mode.
   function photoRows(getObj, opts) {
+    const target = (opts && opts.target) || null;
     return [
       shapeRow(getObj),
       ratioRow(getObj),
-      (opts && opts.target) ? resetCropRow(getObj, opts.target) : null,
+      target ? resetCropRow(getObj, target) : null,
       borderRows(getObj),
       overlayRows(getObj),
       opacityRow(getObj),
       (opts && opts.zoom) || null,
+      // v2.9 — grading, texture, shadow and background removal, collapsed into
+      // one group so the rows that were always here keep their place.
+      photoEditRows(getObj, target),
     ].flat().filter(Boolean);
+  }
+
+  // The one blur slider decorative elements and drawing extras get (v2.9).
+  // No adjust, no texture: these are currentColor drawings, not photographs.
+  function blurRow(getObj, liveFn) {
+    return sliderRow('טשטוש', {
+      min: 0, max: BLUR_MAX, step: 0.5,
+      get: () => Number((getObj() || {}).blur) || 0,
+      set: (v) => {
+        const o = getObj();
+        if (!o) return;
+        if (v > 0) o.blur = v; else delete o.blur;
+      },
+      live: liveFn || null,
+      fmt: (v) => (v > 0 ? v + 'px' : 'בלי'),
+      reset: () => { const o = getObj(); if (o) delete o.blur; },
+    });
   }
 
   // Edge offsets (operator directive): a drag hard-stops at the slide frame,
@@ -3340,6 +3893,14 @@ export function initEditor(handle, slide, opts = {}) {
           })
         : null,
       opacityRow(() => elOf(key)),
+      // v2.9 «blur to all elements» — the operator's ask, on every kind the
+      // engine tags. Previewed live on the tagged node itself, which is the
+      // same element designElStyle writes the filter onto.
+      blurRow(() => elOf(key), () => {
+        const node = elEl(key);
+        const cur = (design.els || {})[key] || {};
+        if (node) node.style.filter = Number(cur.blur) > 0 ? 'blur(' + cur.blur + 'px)' : '';
+      }),
       dragHint(),
     ].filter(Boolean));
   }
@@ -3409,6 +3970,16 @@ export function initEditor(handle, slide, opts = {}) {
             commit();
             renderToolbar();
           })
+        : null,
+      // v2.9: a drawing extra takes blur AND a drop shadow — its wrapper wears
+      // no mask, so the shadow has nothing to be clipped by. No adjust and no
+      // texture: the palette swatch above already owns its colour.
+      ex.type === 'ill' || ex.type === 'brand'
+        ? [
+            blurRow(() => design.extras[i],
+              () => liveShadow({ kind: 'extra', index: i }, design.extras[i])),
+            ...shadowRows(() => design.extras[i], { kind: 'extra', index: i }, true),
+          ]
         : null,
       // v2.4: shape · ratio · border · wash · fade are always on show for a
       // photo. Only the zoom slider is crop-mode work, because only IT competes
