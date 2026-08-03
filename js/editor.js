@@ -49,7 +49,24 @@
 // the three old ones; opts.postId powers its «בפוסט הזה» filter and
 // opts.uploadAsset(file) its upload tile. Without opts.assets the picker
 // falls back to manifest illustrations + brand assets + opts.photos, so an
-// unwired host still works exactly as it did.
+// unwired host still works exactly as it did. (v2.5.2 adds two optional
+// fields to that row shape — `derived` and `created_at` — used only to order
+// version stacks; see below.)
+//
+// VERSION STACKS (v2.5.2) — fal makes several tries at the same input line and
+// every sliced tile files as its own library row, so the picker grew by 3× per
+// sheet with three near-identical tiles per drawing. Rows sharing a
+// `stack:<sheet8>-l<line>` tag now render as ONE tile (stacks.js does the
+// grouping; it imports nothing, which is how the editor keeps its distance
+// from store.js). Operator directive: «clicking the illustration rotates
+// through its versions; you drag the version currently showing onto the
+// slide.» So in the sidebar a stacked tile's CLICK cycles — it places nothing
+// and closes nothing — and the dragstart listener reads the current version
+// through a closure, so the wire cannot carry a version other than the one on
+// screen. In the pick-and-return MODAL there is no drag to fall back on, so a
+// click there still resolves the pick and the ↻ glyph is the cycle control.
+// Nothing about placement or the drop handler changed: only WHICH row the
+// drag hands over.
 //
 // Drag & drop: while armed, the overlay accepts (a) desktop image-file drops —
 // uploaded through the host's opts.uploadFile(file) -> {url}, then placed as a
@@ -140,6 +157,13 @@
 // that frees the magnets — and every draggable selection's toolbar says so.
 
 import { el, modal, toast } from './ui.js';
+// v2.5.2 version stacks. stacks.js imports NOTHING — that is deliberate, and
+// it is why the shared helper is not simply exported from assets.js: reaching
+// into assets.js would pull store.js and zip.js into every editor host and
+// break this module's "never talks to store.js" promise. See stacks.js §WHY.
+import {
+  groupStacks, isStacked, currentOf, cycleStack, stackBadge,
+} from './stacks.js';
 
 // dataTransfer MIME for photo drags that originate inside the app (grid
 // thumbnails → slide). Carrying the public URL means no re-upload on drop.
@@ -3250,44 +3274,109 @@ export function initEditor(handle, slide, opts = {}) {
       (!onlyPost || (postId && a.post_id === postId)) &&
       assetMatches(a, q));
 
-    function card(a) {
-      const isVec = a.source === 'studio';
-      const holder = isVec ? el('span', { class: 'bsvg' }) : null;
-      if (isVec) {
-        // brand marks preview as inline SVG so currentColor picks up the
-        // accent ink; illustrations are fine (and cheaper) as <img>.
-        if (a.kind === 'brand') {
-          brandSvgText(a.name).then((svg) => { if (svg && !destroyed) holder.innerHTML = svg; });
-        } else {
-          holder.appendChild(el('img', { src: a.url, alt: a.name, loading: 'lazy' }));
-        }
-      }
+    // VERSION STACKS (v2.5.2). fal makes several tries at the same input line
+    // and every tile files as its own row; grouped by their shared `stack:`
+    // tag they render as ONE card that rotates. Operator directive: «variants
+    // of one drawing appear STACKED as a single item; clicking the
+    // illustration rotates through its versions; you drag the version
+    // currently showing onto the slide.»
+    //
+    // The card is therefore built around a MUTABLE `cur` and a paint() that
+    // redraws its children from it. The dragstart listener is attached ONCE
+    // and reads `cur` through the closure — that is what "re-arms the drag
+    // payload" means here: nothing to rebind, so the wire can never carry a
+    // version other than the one on screen. Rebinding a listener per cycle
+    // would be the version of this that eventually drifts.
+    function card(item) {
+      const stacked = isStacked(item);
+      let cur = currentOf(item);
+
+      const holder = el('span', { class: 'bsvg' });
+      const img = el('img', { alt: '', loading: 'lazy' });
+      const nm = el('span', { class: 'nm' });
+      const vbadge = stacked ? el('span', { class: 'smr-edvbadge' }) : null;
+      // Not a nested <button> — that is invalid inside a <button> and browsers
+      // flatten it. It is an affordance that says "there is more than one of
+      // these"; in the sidebar the whole card already cycles, and in the
+      // pick-and-return modal (where the card must PICK, since there is no
+      // drag there) this span is the cycle control.
+      const rot = stacked
+        ? el('span', { class: 'smr-edvrot', 'aria-hidden': 'true', title: 'גרסה הבאה',
+            onclick: (e) => { e.preventDefault(); e.stopPropagation(); cycle(); } }, '↻')
+        : null;
+
       const btn = el('button', {
-        type: 'button', title: a.name || a.label || '',
+        type: 'button',
+        class: stacked ? 'is-stack' : null,
         draggable: onPick ? 'false' : 'true',
         onclick: () => {
+          // A stack's card in the sidebar is a ROTATOR, not a placer: it must
+          // not place and must not close the pane. In the modal there is no
+          // drag to fall back on, so a click still resolves the pick.
+          if (stacked && !onPick) { cycle(); return; }
           dismiss();
-          if (onPick) onPick(a.url);
-          else placeAsset(a);
+          if (onPick) onPick(cur.url);
+          else placeAsset(cur);
         },
-      },
-        isVec ? holder : el('img', { src: a.url, alt: assetTitle(a), loading: 'lazy' }),
-        el('span', { class: 'nm' }, assetTitle(a)),
-        a.post_id && postId && a.post_id === postId
-          ? el('span', { class: 'smr-edbadge' }, 'בפוסט הזה') : null,
-      );
+      });
+
+      function paint() {
+        const isVec = cur.source === 'studio';
+        if (isVec) {
+          holder.replaceChildren();
+          // brand marks preview as inline SVG so currentColor picks up the
+          // accent ink; illustrations are fine (and cheaper) as <img>.
+          if (cur.kind === 'brand') {
+            const want = cur.name;
+            brandSvgText(want).then((svg) => {
+              if (svg && !destroyed && cur.name === want) holder.innerHTML = svg;
+            });
+          } else {
+            holder.appendChild(el('img', { src: cur.url, alt: cur.name, loading: 'lazy' }));
+          }
+        } else {
+          img.src = cur.url;
+          img.alt = assetTitle(cur);
+        }
+        nm.textContent = assetTitle(cur);
+        if (vbadge) vbadge.textContent = stackBadge(item);
+        btn.title = stacked
+          ? `${assetTitle(cur)} · ${stackBadge(item)} — לחיצה מחליפה גרסה, גרירה מוסיפה לשקף`
+          : (cur.name || cur.label || '');
+        // .filter(Boolean) is load-bearing: replaceChildren is a NATIVE DOM
+        // call, and unlike ui.js's el() it does not skip nulls — it stringifies
+        // them, so an absent badge rendered the literal text «null» under the
+        // asset's name. Caught in a browser, invisible in the DOM shape.
+        btn.replaceChildren(...[
+          isVec ? holder : img,
+          nm,
+          cur.post_id && postId && cur.post_id === postId
+            ? el('span', { class: 'smr-edbadge' }, 'בפוסט הזה') : null,
+          vbadge, rot,
+        ].filter(Boolean));
+      }
+
+      function cycle() {
+        cur = cycleStack(item) || cur;
+        paint();
+      }
+
+      paint();
       // uploads stay draggable straight onto the slide (no re-upload). In the
       // modal, hide it a tick after dragstart — removing the source
       // synchronously aborts the drag. In the sidebar there is nothing in the
       // way, so the drag just runs and the pane stays put.
-      if (!onPick && a.source !== 'studio') {
+      // NOTE the guard reads the CURRENT version, and a stack is homogeneous
+      // (same kind, same source, one sheet) — so it cannot flip draggability
+      // mid-cycle.
+      if (!onPick && cur.source !== 'studio') {
         btn.addEventListener('dragstart', (e) => {
-          e.dataTransfer.setData(PHOTO_DRAG_MIME, a.url);
+          e.dataTransfer.setData(PHOTO_DRAG_MIME, cur.url);
           // the library knows this asset's kind; the drop handler will not, so
           // the answer travels WITH the drag. Without it, dragging an uploaded
           // illustration onto the slide made a photo out of it while CLICKING
           // the same tile placed it correctly — the same asset, two behaviours.
-          if (isArtAsset(a)) e.dataTransfer.setData(ART_DRAG_MIME, '1');
+          if (isArtAsset(cur)) e.dataTransfer.setData(ART_DRAG_MIME, '1');
           e.dataTransfer.effectAllowed = 'copy';
           setTimeout(hideHost, 0);
         });
@@ -3298,12 +3387,21 @@ export function initEditor(handle, slide, opts = {}) {
 
     function draw() {
       const list = visible();
-      count.textContent = list.length ? `${list.length} נכסים` : '';
+      // The grid renders ITEMS, so the count names items — otherwise a library
+      // of three sheets reads as «27 נכסים» over nine cards. The row total is
+      // still worth saying when the two differ, because that is the number the
+      // assets page and the DB agree on.
+      const items = groupStacks(list);
+      count.textContent = items.length
+        ? (items.length === list.length
+            ? `${items.length} נכסים`
+            : `${items.length} נכסים · ${list.length} גרסאות`)
+        : '';
       const empty = library().length
         ? 'אין נכס שמתאים לסינון הזה. אפשר להעלות קובץ חדש למעלה.'
         : photosEmptyText;
-      grid.replaceChildren(...(list.length
-        ? list.map(card)
+      grid.replaceChildren(...(items.length
+        ? items.map(card)
         : [el('p', { class: 'pv-note' }, empty)]));
     }
 
@@ -3401,7 +3499,8 @@ export function initEditor(handle, slide, opts = {}) {
       libUI = buildLibrary({ inline: true });
       libPane.replaceChildren(
         el('p', { class: 'smr-sb__hint' },
-          'לחיצה מוסיפה לשקף · אפשר גם לגרור נכס ישירות למקום שרוצים.'),
+          'לחיצה מוסיפה לשקף · אפשר גם לגרור נכס ישירות למקום שרוצים. ' +
+          'בכרטיס עם ↻ הלחיצה מחליפה גרסה — גוררים את הגרסה שמוצגת.'),
         libUI.root,
       );
     } else {

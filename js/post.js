@@ -1358,6 +1358,13 @@ function designAssets() {
     tags: Array.isArray(a.tags) ? a.tags : [],
     post_id: a.post_id || null,
     url: assetRowUrl(a),
+    // v2.5.2: the picker folds generated variants into version STACKS off the
+    // `stack:` tag and orders them by derived.variant. This shim is the ONLY
+    // thing between a store row and the editor, so a field it does not copy
+    // does not exist over there — the stacks would still form (the tag
+    // survives) but «1/3» would number them in DB insertion order.
+    derived: a.derived || null,
+    created_at: a.created_at || null,
   })).filter((a) => a.url);
 }
 

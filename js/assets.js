@@ -16,6 +16,17 @@
 //     type sniff, the same sm_assets row. The only new information is each
 //     file's RELATIVE PATH, kept as `folder:` tags so the shoot stays findable
 //     as one group.
+// v2.5.2 adds VERSION STACKS to the «AI Generated» tab. fal makes several
+// tries at the same input line; every sliced tile files as its own row and
+// they share a `stack:<sheet8>-l<line>` tag. Inside each style group those
+// rows collapse into ONE card carrying a «2/3» badge — clicking the thumb
+// rotates through the versions (operator directive), so the detail view moves
+// to its own «גרסאות · N» button, where the same stack lists every version as
+// a thumb. The current index is per-session module state in stacks.js, shared
+// with the editor's picker: no persistence, no schema change, no new store
+// call. Scoped to this tab deliberately — «כל הנכסים» stays a literal
+// one-card-per-row inventory of what the board actually holds.
+//
 //   EXPORT — «⬇︎ ייצוא» per card, or a multi-selection zipped. Entirely
 //     client-side (canvas resample → toBlob); nothing leaves the browser and
 //     no request row is created. Slide export is a different object with a
@@ -27,6 +38,12 @@ import {
 } from './store.js';
 import { el, modal, toast, fmtDate, navBar } from './ui.js';
 import { zipStore } from './zip.js';
+// v2.5.2 version stacks — shared verbatim with editor.js's «ספריית נכסים»
+// picker. It lives in its own dependency-free module rather than here because
+// editor.js must not be able to reach store.js; see stacks.js §WHY.
+import {
+  groupStacks, isStacked, currentOf, cycleStack, setStackIndex, stackBadge,
+} from './stacks.js';
 
 const $ = (id) => document.getElementById(id);
 
@@ -507,24 +524,62 @@ function renderGrid() {
       if (!groups.has(s)) groups.set(s, []);
       groups.get(s).push(a);
     }
-    $('grid').replaceChildren(...[...groups.entries()].map(([name, items]) =>
-      el('section', { class: 'a-group' },
+    // v2.5.2: inside each style group, fal's several tries at the same input
+    // line collapse into ONE stacked card. Scoped to this tab on purpose — it
+    // is the only view where a `stack:` tag is ever present in quantity, and
+    // «כל הנכסים» stays a literal, one-card-per-row inventory of the board.
+    $('grid').replaceChildren(...[...groups.entries()].map(([name, items]) => {
+      const stacks = groupStacks(items);
+      return el('section', { class: 'a-group' },
         el('h3', { class: 'a-group__head' },
           el('bdi', null, name),
-          el('span', { class: 'a-group__n' }, String(items.length))),
-        el('div', { class: 'a-grid' }, items.map(card)))));
+          el('span', { class: 'a-group__n' }, stacks.length === items.length
+            ? String(items.length)
+            : `${stacks.length} · ${items.length} גרסאות`)),
+        el('div', { class: 'a-grid' },
+          stacks.map((it) => card(currentOf(it), it))));
+    }));
     return;
   }
   $('grid').replaceChildren(el('div', { class: 'a-grid' }, list.map(card)));
 }
 
-function card(a) {
+// A grid cell. `item` is the stack item this card stands for (v2.5.2); it is
+// optional so every non-«AI Generated» caller keeps passing a bare row.
+//
+// A stacked card is a card that REPAINTS: the outer <div> is stable (the grid
+// holds it) and paint() rebuilds its children from whichever version the stack
+// is currently showing. That is what makes the cycle cheap and, more to the
+// point, what lets the detail modal switch a version and have the card behind
+// it agree — both go through the same stacks.js item.
+function card(a, item) {
+  const stacked = isStacked(item);
+  if (!stacked) return cardBody(a, null, () => {});
+  const root = el('div', { class: 'a-card a-card--stack' });
+  const paint = () => {
+    const inner = cardBody(currentOf(item), item, paint);
+    root.className = inner.className + ' a-card--stack';
+    root.replaceChildren(...inner.childNodes);
+  };
+  paint();
+  return root;
+}
+
+function cardBody(a, item, repaint) {
   const url = assetRowUrl(a);
+  const stacked = isStacked(item);
   const isVec = /svg/i.test(a.mime || '') || a.source === 'studio';
   const thumb = el('div', {
     class: 'a-thumb' + (isVec ? ' a-thumb--vec' : ' a-thumb--cover'),
-    title: 'הגדלה',
-    onclick: () => openAsset(a, url),
+    // Operator directive: «clicking the illustration rotates through its
+    // versions». On this page there is no slide to drag onto, so the click is
+    // the whole interaction and the detail view moves to its own button below
+    // — a thumb that both cycles AND zooms would do neither predictably.
+    title: stacked ? 'לחיצה מחליפה גרסה' : 'הגדלה',
+    onclick: () => {
+      if (stacked) { cycleStack(item); repaint(); return; }
+      openAsset(a, url);
+    },
   }, isVec
     // Monochrome vectors paint as a mask so they take the brand colour (see the
     // .a-thumb--vec note in assets.html). role/aria-label keep it announced, since
@@ -536,6 +591,10 @@ function card(a) {
       })
     : el('img', { src: url, alt: a.label || a.name || 'נכס', loading: 'lazy' }));
   if (a.post_id) thumb.appendChild(el('span', { class: 'a-badge' }, 'מפוסט'));
+  if (stacked) {
+    thumb.appendChild(el('span', { class: 'a-vbadge' }, stackBadge(item)));
+    thumb.appendChild(el('span', { class: 'a-vrot', 'aria-hidden': 'true' }, '↻'));
+  }
   if (S.selMode) {
     const box = el('input', {
       type: 'checkbox', checked: S.sel.has(a.id),
@@ -577,6 +636,15 @@ function card(a) {
         el('button', { class: 'btn btn--ghost', type: 'button', onclick: () => editAsset(a) }, 'שם ותגיות'),
         el('button', { class: 'btn btn--ghost', type: 'button', onclick: () => exportDialog([a]) }, '⬇︎ ייצוא'),
         el('button', { class: 'btn btn--ghost', type: 'button', onclick: () => copyLink(url) }, 'העתקת קישור'),
+        // The thumb now cycles, so «הגדלה» needs a door of its own — without
+        // it the detail view (and with it the version strip) is unreachable on
+        // a stacked card. It doubles as the honest count: «גרסאות · 3».
+        stacked
+          ? el('button', {
+              class: 'btn btn--ghost', type: 'button',
+              onclick: () => openAsset(currentOf(item), assetRowUrl(currentOf(item)), item, repaint),
+            }, 'גרסאות · ' + item.versions.length)
+          : null,
         used.length
           ? el('button', { class: 'btn btn--ghost', type: 'button', onclick: () => showUsage(a, used) }, 'איפה בשימוש')
           : null,
@@ -587,18 +655,49 @@ function card(a) {
 
 /* ── actions ── */
 
-function openAsset(a, url) {
-  modal(a.label || a.name || 'נכס', el('div', null,
-    el('img', {
-      src: url, alt: a.label || a.name || '',
-      style: { maxWidth: '100%', maxHeight: '68vh', display: 'block', margin: '0 auto' },
-    }),
-    el('div', { class: 'pv-note', style: { marginTop: '10px' } },
-      [a.author ? `העלה: ${a.author}` : '', a.created_at ? fmtDate(a.created_at) : '',
-       a.source === 'studio' ? 'נכס סטודיו' : ''].filter(Boolean).join(' · ')),
-    el('div', { class: 'a-sub', style: { marginTop: '4px' } },
-      el('span', { class: 'ltr' }, url)),
-  ));
+// The detail view. `item`/`onSwitch` are the v2.5.2 stack extras: when the
+// asset belongs to a stack the modal grows a strip of every version, and
+// picking one switches BOTH the modal and — through the shared stacks.js item
+// plus the card's own repaint — the grid card that opened it. One current
+// index, two surfaces; anything else and closing the modal would silently undo
+// the choice just made in it.
+function openAsset(a, url, item, onSwitch) {
+  const stacked = isStacked(item);
+  const img = el('img', {
+    src: url, alt: a.label || a.name || '',
+    style: { maxWidth: '100%', maxHeight: stacked ? '56vh' : '68vh', display: 'block', margin: '0 auto' },
+  });
+  const note = el('div', { class: 'pv-note', style: { marginTop: '10px' } });
+  const link = el('div', { class: 'a-sub', style: { marginTop: '4px' } });
+  const strip = stacked ? el('div', { class: 'a-vstrip' }) : null;
+
+  const show = (row) => {
+    const u = assetRowUrl(row);
+    img.src = u;
+    img.alt = row.label || row.name || '';
+    note.textContent = [
+      stacked ? `גרסה ${stackBadge(item)}` : '',
+      row.author ? `העלה: ${row.author}` : '',
+      row.created_at ? fmtDate(row.created_at) : '',
+      row.source === 'studio' ? 'נכס סטודיו' : '',
+    ].filter(Boolean).join(' · ');
+    link.replaceChildren(el('span', { class: 'ltr' }, u));
+    if (strip) {
+      strip.replaceChildren(...item.versions.map((v, i) => el('button', {
+        type: 'button',
+        class: 'a-vstrip__b' + (i === item.current ? ' is-on' : ''),
+        title: 'גרסה ' + (i + 1),
+        'aria-pressed': i === item.current ? 'true' : 'false',
+        onclick: () => {
+          show(setStackIndex(item, i));
+          if (typeof onSwitch === 'function') onSwitch();
+        },
+      }, el('img', { src: assetRowUrl(v), alt: 'גרסה ' + (i + 1), loading: 'lazy' }))));
+    }
+  };
+  show(a);
+
+  modal(a.label || a.name || 'נכס', el('div', null, img, strip, note, link));
 }
 
 // label + tags are the only editable fields — matching the column-scoped

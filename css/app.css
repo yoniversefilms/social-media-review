@@ -1021,3 +1021,124 @@ hr, .rule {
    says so in bold, and the boxes type LTR because their content is English. */
 .gen-lines--en { text-align: left; }
 .gen-lines--en::placeholder { font-weight: 700; opacity: 1; color: var(--ink-soft, #55484d); }
+/* ===== v2.5.2 stacked versions =====
+
+   fal makes several tries at the same input line and every sliced tile files
+   as its own sm_assets row, tagged `stack:<sheet8>-l<line>`. Operator
+   directive: «variants of one drawing appear STACKED as a single item;
+   clicking the illustration rotates through its versions; you drag the version
+   currently showing onto the slide.» Two surfaces render that — the assets
+   page's «AI Generated» tab (.a-*) and the editor's «ספריית נכסים» picker
+   (.smr-edv*) — and this is the only place either is styled.
+
+   Everything here is token-only. The dark-mode pass owns --wash/--wash-2/
+   --line-strong/--solid-ink, so a literal #fff or rgba(0,0,0,…) added below
+   would be a light-mode-only rule that reads as a bug at night.
+
+   The whole visual language of a stack is ONE idea: the card looks like there
+   is paper behind it. That is drawn with layered BOX-SHADOWS, not pseudo-
+   element leaves, and the reason is worth writing down because the pretty
+   version silently renders nothing:
+     · `.a-card { overflow: hidden }` (assets.html) clips any ::before that
+       pokes outside the card — the leaves would simply not exist;
+     · a `z-index: -1` pseudo paints BEHIND its parent's own background, and
+       both the card and the picker tile have `background: var(--paper)`, so
+       even unclipped it would be invisible;
+     · `.smr-edpick { overflow-y: auto }` clips the picker tile's the same way.
+   An element's OWN box-shadow is subject to none of those — overflow clips
+   descendants, not the box's shadow. Offsetting straight down (no inline
+   offset) also keeps the effect direction-neutral, which matters because
+   box-shadow offsets are physical and this UI is RTL. Everything else here
+   uses inset-inline-* and flips properly. */
+
+/* ---- assets page: the stacked card ---- */
+/* paper sliver, then its hairline, twice — earlier shadows paint on top. */
+.a-card--stack {
+  box-shadow:
+    0 3px 0 0 var(--paper), 0 3px 0 1px var(--line),
+    0 8px 0 0 var(--paper), 0 8px 0 1px var(--line),
+    var(--shadow);
+}
+.a-card--stack .a-thumb { cursor: pointer; }
+
+/* «2/3». Opposite corner from .a-badge («מפוסט», top inline-start) and from
+   .a-pick (the multi-select tick, top inline-end), so all three can coexist on
+   one thumb without a single overlap. */
+.a-vbadge {
+  position: absolute; inset-block-end: 6px; inset-inline-end: 6px;
+  background: var(--accent); color: var(--solid-ink);
+  border-radius: 999px; font-size: .68rem; line-height: 1;
+  font-weight: 700; padding: 4px 8px; letter-spacing: .02em;
+  font-variant-numeric: tabular-nums;
+}
+/* ↻ — the affordance, not a control here (the whole thumb cycles). */
+.a-vrot {
+  position: absolute; inset-block-end: 6px; inset-inline-start: 6px;
+  width: 22px; height: 22px; border-radius: 999px;
+  display: flex; align-items: center; justify-content: center;
+  background: var(--paper); border: 1px solid var(--line);
+  color: var(--ink-soft); font-size: .8rem; line-height: 1;
+  transition: transform .18s ease, color .18s ease, border-color .18s ease;
+}
+.a-card--stack .a-thumb:hover .a-vrot {
+  color: var(--accent); border-color: var(--line-strong); transform: rotate(140deg);
+}
+
+/* ---- assets page: the version strip in the detail modal ---- */
+.a-vstrip {
+  display: flex; gap: 8px; flex-wrap: wrap; justify-content: center;
+  margin-top: 12px; padding-top: 12px; border-top: 1px solid var(--line);
+}
+.a-vstrip__b {
+  appearance: none; cursor: pointer; padding: 0; line-height: 0;
+  width: 64px; height: 64px; overflow: hidden;
+  background: var(--art-bg); border: 1px solid var(--line);
+  border-radius: 10px; transition: border-color .14s ease, box-shadow .14s ease;
+}
+.a-vstrip__b img { width: 100%; height: 100%; object-fit: contain; }
+.a-vstrip__b:hover { border-color: var(--line-strong); }
+.a-vstrip__b.is-on {
+  border-color: var(--accent); box-shadow: 0 0 0 2px var(--accent) inset;
+}
+
+/* ---- editor picker: the stacked tile ----
+
+   editor.js injects its own <style> into document.head at runtime, i.e. AFTER
+   this file's <link>, so its rules win every specificity tie. These class
+   names are new and appear nowhere in that block — no tie to lose. */
+.smr-edpick--lib > button.is-stack {
+  position: relative;
+  box-shadow:
+    0 3px 0 0 var(--paper, #fffdf9), 0 3px 0 1px var(--line, rgba(28, 21, 24, .18)),
+    0 7px 0 0 var(--paper, #fffdf9), 0 7px 0 1px var(--line, rgba(28, 21, 24, .18));
+}
+/* The picker grid is a scroller with 2px of padding; give the bottom row's
+   shadow somewhere to sit rather than be shaved by the scroll port. TWO
+   classes on purpose: editor.js's own `.smr-edpick { padding: 2px }` is
+   injected into <head> at runtime, i.e. after this file, so a single-class
+   selector here would tie on specificity and LOSE to that shorthand. */
+.smr-edpick.smr-edpick--lib { padding-bottom: 10px; }
+.smr-edvbadge {
+  position: absolute; inset-block-start: 4px; inset-inline-end: 4px;
+  background: var(--accent); color: var(--solid-ink);
+  border-radius: 999px; font-size: .6rem; line-height: 1; font-weight: 700;
+  padding: 3px 6px; font-variant-numeric: tabular-nums; pointer-events: none;
+}
+/* Deliberately a <span>, not a <button>: it lives inside the tile's <button>
+   and nested interactive elements are invalid HTML (browsers flatten them).
+   In the sidebar the tile itself cycles and this is decoration; in the
+   pick-and-return modal — where a click must resolve the pick, because that
+   modal has no drag — this span IS the cycle control, which is why it keeps
+   its own pointer target and hover state. */
+.smr-edvrot {
+  position: absolute; inset-block-end: 4px; inset-inline-end: 4px;
+  width: 20px; height: 20px; border-radius: 999px; cursor: pointer;
+  display: flex; align-items: center; justify-content: center;
+  background: var(--paper); border: 1px solid var(--line);
+  color: var(--ink-soft); font-size: .72rem; line-height: 1;
+  transition: transform .18s ease, color .18s ease;
+}
+.smr-edpick--lib > button.is-stack:hover .smr-edvrot {
+  color: var(--accent); transform: rotate(140deg);
+}
+

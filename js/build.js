@@ -44,6 +44,11 @@ function designAssets() {
     tags: Array.isArray(a.tags) ? a.tags : [],
     post_id: a.post_id || null,
     url: assetRowUrl(a),
+    // v2.5.2 — same reason as post.js designAssets(): the picker's version
+    // stacks are ordered by derived.variant, and this shim is the editor's
+    // whole view of a store row.
+    derived: a.derived || null,
+    created_at: a.created_at || null,
   })).filter((a) => a.url);
 }
 
