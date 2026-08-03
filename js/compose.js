@@ -266,8 +266,20 @@ const DESIGN_RATIOS = {
   native: null, '1:1': '1/1', '4:5': '4/5', '5:4': '5/4',
   '3:2': '3/2', '2:3': '2/3', '16:9': '16/9', '9:16': '9/16',
 };
-const designRatio = (r) =>
-  Object.prototype.hasOwnProperty.call(DESIGN_RATIOS, r) ? DESIGN_RATIOS[r] : null;
+// A free-form crop needs a frame aspect no preset can name — 1.37:1 falls
+// between 4:5 and 3:2 — so the crop handles (v2.5) write a NUMBER here,
+// width ÷ height, beside the eight preset strings every design already on disk
+// carries. Both spellings mean the same thing: a PINNED frame the image covers.
+// Bounds match the editor's (past 5:1 or under 1:5 a frame is a hairline, not a
+// crop), and dround holds the value at the storage precision the sanitizer uses
+// too — so the live drag and the committed PNG cannot disagree in the last
+// decimal. Anything else (including a zero or negative number) stays null, i.e.
+// the frame is left native, exactly as an unknown preset always was.
+const designRatio = (r) => {
+  const n = dnum(r);
+  if (n != null) return n > 0 ? String(dround(dclamp(n, 0.2, 5))) : null;
+  return Object.prototype.hasOwnProperty.call(DESIGN_RATIOS, r) ? DESIGN_RATIOS[r] : null;
+};
 
 // The legacy presets, restated in the painted mechanism below so ONE code path
 // draws every ring. Widths and tokens are lifted from tokens.css (.photo::after
@@ -769,7 +781,13 @@ function designPhotoProblems(s, where, problems) {
   if (s.shape != null && designShape(s.shape) === undefined) {
     problems.push('צורת תמונה לא מוכרת ב' + where + ': ”' + String(s.shape) + '“');
   }
-  if (s.ratio != null &&
+  // v2.5: a positive NUMBER is a free-form crop's frame aspect and is as valid
+  // as any preset. Without this arm every cropped photo would carry a «יחס
+  // צדדים לא מוכר» banner over a frame that is in fact rendering correctly.
+  // A zero or negative number is still wrong — designRatio drops it and the
+  // frame silently stays native, which is exactly what this banner is for.
+  const ratioNum = dnum(s.ratio);
+  if (s.ratio != null && !(ratioNum != null && ratioNum > 0) &&
       !Object.prototype.hasOwnProperty.call(DESIGN_RATIOS, String(s.ratio))) {
     problems.push('יחס צדדים לא מוכר ב' + where + ': ”' + String(s.ratio) + '“');
   }

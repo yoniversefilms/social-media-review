@@ -422,9 +422,55 @@ const paletteToken = (v) => (typeof v === 'string' && RE_PALETTE_TOKEN.test(v) ?
 // A slot always covers. This is what tells the crop gestures whether panning
 // has anywhere to go at zoom 1.
 const PHOTO_SQUARE_SHAPES = new Set(['circle']);
-const photoPinned = (o) => !!(o && (
-  (typeof o.ratio === 'string' && o.ratio !== 'native' && PHOTO_RATIO_KEYS.has(o.ratio)) ||
-  PHOTO_SQUARE_SHAPES.has(o.shape)));
+
+// v2.5 crop: the frame aspect as a NUMBER (w ÷ h), whichever spelling the
+// design uses — a free-form crop's number, one of the eight presets, or the
+// implicit 1/1 a circle carries. null = native (the frame follows the picture).
+// The clamp and the rounding MUST match designRatio in both engines: this is
+// the value the drag maths solves against, and a sanitizer that stored 1.373
+// while the engine drew 1.37 would leave every crop a hair off its own preview.
+const RATIO_MIN = 0.2, RATIO_MAX = 5;
+const ratioNumOf = (r) => {
+  if (typeof r === 'number' && Number.isFinite(r) && r > 0) {
+    return Math.round(clamp(r, RATIO_MIN, RATIO_MAX) * 100) / 100;
+  }
+  if (typeof r === 'string' && PHOTO_RATIO_KEYS.has(r) && r !== 'native') {
+    const [a, b] = r.split(':').map(Number);
+    if (a > 0 && b > 0) return a / b;
+  }
+  return null;
+};
+// How many doc px of PAINTED RING sit between a photo's outer frame and the
+// picture itself, per side. Mirrors designBorderSpec in both engines, defaults
+// included — `paper` is the omitted default (3px) except on shape:"original",
+// which defaults to bare, and {width:0} means a ring was explicitly removed.
+//
+// The crop maths NEEDS this and it is not obvious why: `ratio` and the grips
+// act on the OUTER box, but object-fit:cover and object-position act on the
+// INNER one, and the ring between them is 0–48px per side. Solve the crop
+// against the outer box and the picture visibly jumps on every trim — by a
+// hair at the 3px default, by a third of the frame at 48px.
+const PHOTO_BORDER_PRESETS = { paper: 3, line: 2, none: 0 };
+function photoBorderPx(o) {
+  if (!o) return 0;
+  const b = o.border;
+  if (b == null) return o.shape === 'original' ? 0 : PHOTO_BORDER_PRESETS.paper;
+  if (typeof b === 'string') {
+    return Object.prototype.hasOwnProperty.call(PHOTO_BORDER_PRESETS, b)
+      ? PHOTO_BORDER_PRESETS[b] : PHOTO_BORDER_PRESETS.paper;
+  }
+  if (typeof b !== 'object' || Array.isArray(b)) return PHOTO_BORDER_PRESETS.paper;
+  const w = clamp(Number(b.width) || 0, 0, 48);
+  return w > 0 ? Math.round(w) : 0;
+}
+
+function photoRatioNum(o) {
+  if (!o) return null;
+  const n = ratioNumOf(o.ratio);
+  if (n != null) return n;
+  return PHOTO_SQUARE_SHAPES.has(o.shape) ? 1 : null;
+}
+const photoPinned = (o) => photoRatioNum(o) != null;
 
 // Shared canonicalization for slot fills and photo extras: pos [%,%] (omitted
 // at the 50/50 default), zoom clamped 1..3 (omitted at 1), plus everything v2.4
@@ -447,6 +493,14 @@ function pruneCropInto(o, src) {
   if (typeof src.shape === 'string' && PHOTO_SHAPE_KEYS.has(src.shape)) o.shape = src.shape;
   if (typeof src.ratio === 'string' && PHOTO_RATIO_KEYS.has(src.ratio) &&
       src.ratio !== 'native') o.ratio = src.ratio;      // native is the default = silence
+  // v2.5 free-form crop: a NUMBER is the frame aspect the handles dragged out.
+  // Missing this arm is the single most likely way to ship this feature broken —
+  // the crop would look right until commit and then vanish without a trace,
+  // because prune() is what decides which keys survive a gesture.
+  else if (typeof src.ratio === 'number') {
+    const n = ratioNumOf(src.ratio);
+    if (n != null) o.ratio = n;
+  }
   // Arrays are objects, and an array border would jump a photo onto the framed
   // path while resolving to no ring — a legacy-looking photo silently losing
   // its mat. Only a plain object counts.
@@ -647,6 +701,31 @@ function injectStyles() {
 .smr-edh--rot{top:-30px;left:50%;transform:translateX(-50%);cursor:grab}
 .smr-edh--rot::after{content:'';position:absolute;top:14px;left:50%;width:2px;height:14px;
   background:#1c1518;box-shadow:0 0 0 1px rgba(255,255,255,.85);transform:translateX(-50%)}
+/* v2.5 crop grips — eight of them, ON the crop frame (children of the thirds
+   grid, so they ride its placement and its rotation for free). The SHAPE says
+   what the grip does before you touch it: a square corner opens both axes, a
+   bar trims the one side it lies on. They replace the frame's resize/rotate
+   handles while crop mode is on, so no two handles ever sit on the same pixel.
+   RTL TRAP: these are PHYSICAL left/right/top/bottom on purpose, never the
+   logical inset-inline-*. The overlay is dir="rtl" (the panel is Hebrew) but
+   the crop frame is slide geometry, which is LTR in both languages — logical
+   properties here would mirror the west grip onto the east edge in Hebrew and
+   silently invert every one-sided trim. */
+.smr-edch{position:absolute;background:#fff;border:2px solid #1c1518;border-radius:3px;
+  box-shadow:0 0 0 1.5px rgba(255,255,255,.9),0 1px 4px rgba(0,0,0,.4);
+  pointer-events:auto}
+.smr-edch--nw,.smr-edch--ne,.smr-edch--se,.smr-edch--sw{width:14px;height:14px}
+.smr-edch--n,.smr-edch--s{width:26px;height:9px;left:50%;transform:translateX(-50%)}
+.smr-edch--w,.smr-edch--e{width:9px;height:26px;top:50%;transform:translateY(-50%)}
+.smr-edch--nw{top:-8px;left:-8px;cursor:nwse-resize}
+.smr-edch--ne{top:-8px;right:-8px;cursor:nesw-resize}
+.smr-edch--se{bottom:-8px;right:-8px;cursor:nwse-resize}
+.smr-edch--sw{bottom:-8px;left:-8px;cursor:nesw-resize}
+.smr-edch--n{top:-5px;cursor:ns-resize}
+.smr-edch--s{bottom:-5px;cursor:ns-resize}
+.smr-edch--w{left:-5px;cursor:ew-resize}
+.smr-edch--e{right:-5px;cursor:ew-resize}
+.smr-edch[hidden]{display:none}
 .smr-eddrop[hidden],.smr-edbusy[hidden]{display:none}
 .smr-eddrop{position:absolute;inset:10px;z-index:6;pointer-events:none;
   display:flex;align-items:center;justify-content:center;border-radius:14px;
@@ -1099,6 +1178,16 @@ export function initEditor(handle, slide, opts = {}) {
   const safeMg = el('div', { class: 'smr-edsafe smr-edsafe--mg' });
   const safeBox = el('div', { class: 'smr-edsafelayer', hidden: true }, safeSq, safeMg);
   const gridBox = el('div', { class: 'smr-edgrid', hidden: true });
+  // v2.5 crop grips live INSIDE the thirds grid: the grid is already placed on
+  // the crop frame every refresh (placeBox, rotation included), so the grips
+  // need no placement code of their own and can never drift off the frame they
+  // claim to trim. Order here is irrelevant; `data-grip` is what the gesture
+  // reads. On a SLOT only «s» is mounted — see cropGripsFor.
+  const CROP_GRIPS = ['nw', 'n', 'ne', 'e', 'se', 's', 'sw', 'w'];
+  const cropGrips = CROP_GRIPS.map((k) => el('div', {
+    class: 'smr-edch smr-edch--' + k, 'data-grip': k, hidden: true,
+  }));
+  gridBox.append(...cropGrips);
   const guideV = el('div', { class: 'smr-edguide smr-edguide--v' });
   const guideH = el('div', { class: 'smr-edguide smr-edguide--h' });
   const overlay = el('div', { class: 'smr-edov', dir: 'rtl' },
@@ -1736,11 +1825,15 @@ export function initEditor(handle, slide, opts = {}) {
       return;
     }
     placeBox(selBox, g);
-    const showHandles = sel.kind === 'extra';
+    const ct = cropTarget();
+    // v2.5: in crop mode the crop grips OWN the box — the frame's resize and
+    // rotate handles step aside rather than share a corner with a grip that
+    // means something else. Leaving ✂️ (or selecting anything else) brings them
+    // straight back.
+    const showHandles = sel.kind === 'extra' && !ct;
     hRot.style.display = showHandles ? '' : 'none';
     hRz.style.display = showHandles ? '' : 'none';
-    const ct = cropTarget();
-    if (ct && g) placeBox(gridBox, g); else gridBox.hidden = true;
+    if (ct && g) { placeBox(gridBox, g); paintCropGrips(ct); } else gridBox.hidden = true;
     paintMoreBoxes();
     toolbar.hidden = false;
     syncPropsPane();
@@ -2638,10 +2731,19 @@ export function initEditor(handle, slide, opts = {}) {
   // pan and zoom finally have somewhere to move inside.
   function ratioRow(getObj) {
     const cur = () => (getObj() || {}).ratio || 'native';
+    // v2.5: a free-form crop stores a NUMBER, which equals none of the eight
+    // presets. Without a chip for it the row would show every button OFF, i.e.
+    // exactly what «מקורי» looks like — the panel would claim the frame was
+    // native while the picture on screen was cropped to 1.37:1.
+    const freeVal = () => {
+      const r = (getObj() || {}).ratio;
+      return typeof r === 'number' ? ratioNumOf(r) : null;
+    };
+    const fv = freeVal();
     return el('div', { class: 'smr-edtb__row' },
       el('span', null, 'יחס'),
       PHOTO_RATIOS.map(([v, lab]) => el('button', {
-        class: 'smr-edtg smr-edtg--w' + (cur() === v ? ' on' : ''),
+        class: 'smr-edtg smr-edtg--w' + (cur() === v && fv == null ? ' on' : ''),
         type: 'button',
         onclick: () => {
           const o = getObj();
@@ -2650,7 +2752,29 @@ export function initEditor(handle, slide, opts = {}) {
           commit();
           renderToolbar();
         },
-      }, lab)));
+      }, lab)),
+      fv != null
+        ? el('span', {
+            class: 'smr-edtg smr-edtg--w on',
+            style: { cursor: 'default' },
+            title: 'יחס חופשי שנגזר מגרירת הידיות',
+          }, 'חופשי ' + fv.toFixed(2))
+        : null);
+  }
+
+  // «איפוס חיתוך» — the picture back as it arrived: no pinned frame, no pan,
+  // no zoom. Shape, ring and wash are NOT crop keys and deliberately survive —
+  // this undoes the cropping, not the styling. Shown only once there is
+  // something to undo, so it never sits there greyed out or lying.
+  function resetCropRow(getObj, target) {
+    const o = getObj() || {};
+    if (o.ratio == null && o.pos == null && o.zoom == null) return null;
+    const b = el('button', {
+      class: 'btn btn--ghost', type: 'button',
+      title: 'ביטול היחס, המיקום והזום — הצורה, המסגרת והגוון נשארים',
+    }, '↺ איפוס חיתוך');
+    b.addEventListener('click', () => resetCrop(target));
+    return el('div', { class: 'smr-edtb__row' }, b);
   }
 
   // The colour wash. Same {color, opacity} shape as the background scrim, and
@@ -2699,6 +2823,7 @@ export function initEditor(handle, slide, opts = {}) {
     return [
       shapeRow(getObj),
       ratioRow(getObj),
+      (opts && opts.target) ? resetCropRow(getObj, opts.target) : null,
       borderRows(getObj),
       overlayRows(getObj),
       opacityRow(getObj),
@@ -2777,9 +2902,12 @@ export function initEditor(handle, slide, opts = {}) {
     toolbar.replaceChildren(...[
       el('div', { class: 'smr-edtb__row' }, name, swapB, rmB, hideB),
       photoRows(() => slotSpec(n),
-        { zoom: zoomRow(() => slotSpec(n), { kind: 'slot', n }) }),
+        { zoom: zoomRow(() => slotSpec(n), { kind: 'slot', n }), target: { kind: 'slot', n } }),
+      // A slot offers ONE grip: its width belongs to the template's layout and
+      // no slot key can change it, so the bottom edge is the only side the
+      // editor can honestly move (v2.5).
       el('div', { class: 'smr-edtb__row', style: { fontSize: '.78rem', color: 'var(--ink-soft,#6b5f63)' } },
-        'גוררים את התמונה בתוך המסגרת כדי למקם אותה · גלגלת = זום'),
+        'גוררים את התמונה בתוך המסגרת כדי למקם אותה · גלגלת = זום · הידית התחתונה משנה את גובה המשבצת'),
     ].flat().filter(Boolean));
   }
 
@@ -3121,11 +3249,15 @@ export function initEditor(handle, slide, opts = {}) {
             zoom: extraCropOn
               ? zoomRow(() => design.extras[i], { kind: 'extra', index: i })
               : null,
+            target: { kind: 'extra', index: i },
           })
         : opacityRow(() => design.extras[i]),
       ex.type === 'photo' && !ex.art && extraCropOn
+        // v2.5: «הידית קובעת, ⇧ נועל» — the one sentence that makes the eight
+        // grips self-explanatory, so nobody has to discover the corner/edge
+        // difference by dragging one and undoing it
         ? el('div', { class: 'smr-edtb__row', style: { fontSize: '.78rem', color: 'var(--ink-soft,#6b5f63)' } },
-            'גוררים את התמונה בתוך המסגרת · גלגלת = זום')
+            'גוררים את התמונה בתוך המסגרת · גלגלת = זום · ידית בצד חותכת צד אחד · ידית בפינה חופשית · ⇧ בפינה שומרת על היחס')
         // out of crop mode the drag moves the FRAME — so the edge rule applies
         : dragHint(),
     ].flat().filter(Boolean));
@@ -3629,6 +3761,310 @@ export function initEditor(handle, slide, opts = {}) {
       return { x: z * bx + (z - 1) * g.w, y: z * by + (z - 1) * g.h };
     }
     return { x: (z - 1) * g.w, y: (z - 1) * g.h };
+  }
+
+  // ---------------- crop resize (v2.5) ----------------
+  //
+  // «The handle decides, ⇧ locks» (operator, 2026-08-02): an EDGE grip trims
+  // that one side, a CORNER grip is free-form on both axes, ⇧ on a corner keeps
+  // the aspect the frame already has. There is no mode toggle, so you cannot be
+  // in the wrong mode and no crop costs an extra click.
+  //
+  // Everything is solved in the frame's LOCAL space — origin at the frame's
+  // top-left as the drag began, axes along the frame's own edges — and only
+  // converted back to slide % at the end. That is what makes a ROTATED extra
+  // crop correctly: the grips travel along the box's edges rather than the
+  // screen's, and the box's CENTRE shifts along the rotated axis so the
+  // anchored edge stays visually nailed down. (`x`/`y` are the layout box's
+  // top-left, but rotation pivots on the centre, so nothing else works.)
+  //
+  // The hard part is that a crop must not move the PICTURE, only the window
+  // onto it. A pinned frame is covered, so the drawn image size is
+  // (cover scale × zoom) — holding the picture still while the frame changes
+  // means solving the zoom back out (z' = s0·z / s0') and re-aiming `pos` at
+  // the same source point. Skip that and every trim quietly re-zooms the photo,
+  // which is exactly the difference between a crop tool and a resize tool.
+
+  const CROP_MIN_PX = 24;   // doc px — under this a frame is a hairline, not a crop
+
+  // -1 = this grip drives the left/top edge, +1 the right/bottom, 0 = axis untouched
+  const GRIP_AXES = {
+    nw: [-1, -1], n: [0, -1], ne: [1, -1], e: [1, 0],
+    se: [1, 1], s: [0, 1], sw: [-1, 1], w: [-1, 0],
+  };
+
+  // Which grips a target can honestly offer. An EXTRA owns its whole box — x, y
+  // and w are all its own keys — so all eight trims are real. A SLOT does not:
+  // its width comes from the TEMPLATE's layout and no slot key can change it
+  // (v2.4's `ratio` drives HEIGHT, through aspect-ratio + height:auto), so the
+  // only edge the editor can actually move is the bottom one. Grips that could
+  // not move anything are never mounted: a handle that answers a drag with
+  // nothing reads as a broken feature, not as a protected template.
+  function cropGripsFor(t) {
+    return t && t.kind === 'slot' ? SLOT_GRIPS : ALL_GRIPS;
+  }
+  const ALL_GRIPS = new Set(CROP_GRIPS);
+  const SLOT_GRIPS = new Set(['s']);
+
+  function paintCropGrips(t) {
+    const allow = cropGripsFor(t);
+    for (const gEl of cropGrips) {
+      gEl.hidden = !allow.has(gEl.getAttribute('data-grip'));
+    }
+  }
+
+  // The picture's natural aspect (w ÷ h). natSize is the truth; extraAspect is
+  // the same number by another cache; the frame itself is the last resort, and
+  // it can only be wrong for one gesture — both caches refreshUI on load.
+  function cropAspect(t, obj, g) {
+    const nat = (obj && obj.url) ? natSize(obj.url) : null;
+    if (nat && nat.w > 0 && nat.h > 0) return nat.w / nat.h;
+    if (t.kind === 'extra') {
+      const ex = design.extras[t.index];
+      const a = ex ? extraAspect(ex) : 0;
+      if (a > 0) return a;
+    }
+    return (g && g.h > 0) ? g.w / g.h : 1;
+  }
+
+  // Where the picture sits INSIDE a frame of fw × fh, in that frame's own
+  // coordinates. Mirrors object-fit:cover + object-position exactly: cover
+  // takes the LARGER of the two fits, and object-position aligns the same
+  // percentage of image and container, so the offset is (frame − drawn)·pos/100
+  // — always ≤ 0, because a covered image is never smaller than its frame.
+  function cropImgRect(fw, fh, a, z, px, py) {
+    const s0 = Math.max(fw / a, fh);       // natural size normalised to (a, 1)
+    const dw = a * s0 * z, dh = s0 * z;
+    return { s0, dw, dh, x: (fw - dw) * px / 100, y: (fh - dh) * py / 100 };
+  }
+
+  // Everything a crop drag needs, captured once at pointerdown. `base` is what
+  // a cancelled drag restores — applyCropLive writes pos/zoom onto the live
+  // design object (the pan gesture does the same), so without this a cancel
+  // would leave the photo re-aimed.
+  function cropResizeSpec(t) {
+    const g = geomOf(t);
+    const obj = t.kind === 'slot' ? slotSpec(t.n) : design.extras[t.index];
+    if (!g || !obj || !(g.w > 0) || !(g.h > 0)) return null;
+    const pos = Array.isArray(obj.pos) ? obj.pos : [50, 50];
+    const ex = t.kind === 'extra' ? design.extras[t.index] : null;
+    return {
+      g, obj, ex,
+      bw: photoBorderPx(obj),          // painted ring, per side — see photoBorderPx
+      a: cropAspect(t, obj, g),
+      z: clamp(Number(obj.zoom) || 1, 1, 3),
+      px: clamp(Number(pos[0]) || 0, 0, 100),
+      py: clamp(Number(pos[1]) || 0, 0, 100),
+      x0: ex ? (Number(ex.x) || 0) : 0,
+      y0: ex ? (Number(ex.y) || 0) : 0,
+      base: {
+        pos: Array.isArray(obj.pos) ? obj.pos.slice() : null,
+        zoom: obj.zoom, ratio: obj.ratio,
+        x: ex ? ex.x : undefined, y: ex ? ex.y : undefined, w: ex ? ex.w : undefined,
+      },
+    };
+  }
+
+  // Snap the one edge this grip is moving to the slide's own lines — the brand
+  // margin, the frame edges, the centre — reusing SNAP_T and MARGIN_PX so a
+  // crop drag engages at the same distance every other drag does. Returns the
+  // snapped edge position, or null for no magnet. Deliberately NOT applied to a
+  // rotated frame (its edges are not axis-aligned, so a slide-space line means
+  // nothing to them) and not under ⇧, where the operator has already said the
+  // aspect is what matters and a magnet would fight it.
+  function snapCropEdge(edge, span) {
+    const cands = [MARGIN_PX, span - MARGIN_PX, 0, span, span / 2];
+    let best = null, bd = SNAP_T / 100 * span;
+    for (const c of cands) {
+      const d = Math.abs(edge - c);
+      if (d <= bd) { bd = d; best = c; }
+    }
+    return best;
+  }
+
+  // Solve one crop-resize drag. lx/ly are the pointer delta ALREADY rotated
+  // into the frame's local axes, in doc units. Returns the whole commit —
+  // frame, ratio, pos, zoom and (for an extra) x/y/w — or null if the target
+  // vanished mid-drag.
+  function solveCropResize(spec, grip, lx, ly, lock, free, resp) {
+    const ax = GRIP_AXES[grip];
+    if (!ax) return null;
+    const [sx, sy] = ax;
+    const fw = spec.g.w, fh = spec.g.h;
+    let fw2 = fw + (sx ? sx * lx : 0);
+    let fh2 = fh + (sy ? sy * ly : 0);
+
+    // ⇧ on a corner: keep the aspect the frame has right now. Driven by
+    // whichever axis the pointer pushed harder (compared as a FRACTION of each
+    // side, so a wide frame does not always win), so the corner tracks the hand.
+    const ar0 = fw / fh;
+    if (lock && sx && sy) {
+      if (Math.abs(fw2 - fw) * fh >= Math.abs(fh2 - fh) * fw) fh2 = fw2 / ar0;
+      else fw2 = fh2 * ar0;
+    }
+
+    let snapX = null, snapY = null;
+    if (!free && !lock && !spec.g.rot) {
+      const left0 = spec.g.cx - fw / 2, right0 = spec.g.cx + fw / 2;
+      const top0 = spec.g.cy - fh / 2, bot0 = spec.g.cy + fh / 2;
+      if (sx) {
+        const edge = sx > 0 ? left0 + fw2 : right0 - fw2;
+        const hit = snapCropEdge(edge, W);
+        if (hit != null) { fw2 = sx > 0 ? hit - left0 : right0 - hit; snapX = hit; }
+      }
+      if (sy) {
+        const edge = sy > 0 ? top0 + fh2 : bot0 - fh2;
+        const hit = snapCropEdge(edge, H);
+        if (hit != null) { fh2 = sy > 0 ? hit - top0 : bot0 - hit; snapY = hit; }
+      }
+    }
+
+    // Floor: the frame must stay a frame, and it must still have room for the
+    // ring plus a picture inside it — a 48px ring on a 24px box is not a crop
+    const floor = Math.max(CROP_MIN_PX, 2 * spec.bw + 8);
+    fw2 = Math.max(floor, fw2);
+    fh2 = Math.max(floor, fh2);
+    // an extra's width is a stored key with its own bounds (the frame-resize
+    // handle clamps identically) — a slot's width is the template's and never moves
+    if (spec.ex) fw2 = clamp(fw2, 0.04 * W, W);
+    // Hold the frame inside the aspect range BOTH engines clamp to, so the
+    // stored number can never be one the render would refuse. The axis this
+    // grip is not driving gives way; on a one-sided trim there is no other
+    // axis, so the grip simply stops — which is what a limit should feel like.
+    const rRaw = fw2 / fh2;
+    const rFit = clamp(rRaw, RATIO_MIN, RATIO_MAX);
+    if (rFit !== rRaw) { if (sy === 0) fw2 = fh2 * rFit; else fh2 = fw2 / rFit; }
+
+    // the anchored edge: the local origin only moves for a west/north grip
+    const ox0 = sx < 0 ? (fw - fw2) : 0;
+    const oy0 = sy < 0 ? (fh - fh2) : 0;
+
+    // Hold the picture still — same drawn size if the zoom range allows it,
+    // then re-aim pos at the same source point through the new overflow.
+    // ALL of this is the INNER box: cover and object-position see the frame
+    // minus its painted ring, while the grips and `ratio` move the outer one.
+    // (`ox0`/`oy0` need no ring correction: the ring is the same width before
+    // and after, so the inner origin shifts by exactly what the outer did.)
+    const bw2 = 2 * spec.bw;
+    const fwI = fw - bw2, fhI = fh - bw2;
+    const fw2I = fw2 - bw2, fh2I = fh2 - bw2;
+    const im = cropImgRect(fwI, fhI, spec.a, spec.z, spec.px, spec.py);
+    const s1 = Math.max(fw2I / spec.a, fh2I);
+    // QUANTIZE FIRST, then solve pos against the zoom that will actually be
+    // stored. `zoom` lives at 2dp in the schema and both engines dround it, so
+    // aiming pos at the ideal (unrounded) zoom leaves pos compensating for a
+    // scale the render never uses — a small, permanent offset that compounds
+    // over a run of trims. Solving against the quantized value pins the picture
+    // exactly at the focal point and leaves only the scale grid itself.
+    const z2 = Math.round(clamp(im.s0 * spec.z / s1, 1, 3) * 100) / 100;
+    const dw2 = spec.a * s1 * z2, dh2 = s1 * z2;
+    const ovx = dw2 - fw2I, ovy = dh2 - fh2I;
+    const px2 = ovx > 0.5 ? clamp(100 * (ox0 - im.x) / ovx, 0, 100) : 50;
+    const py2 = ovy > 0.5 ? clamp(100 * (oy0 - im.y) / ovy, 0, 100) : 50;
+
+    // local centre shift -> doc centre shift (through the frame's rotation)
+    const shx = (ox0 + fw2 / 2) - fw / 2;
+    const shy = (oy0 + fh2 / 2) - fh / 2;
+    const rad = (spec.g.rot || 0) * Math.PI / 180;
+    const cx2 = spec.g.cx + shx * Math.cos(rad) - shy * Math.sin(rad);
+    const cy2 = spec.g.cy + shx * Math.sin(rad) + shy * Math.cos(rad);
+
+    const out = {
+      fw: fw2, fh: fh2, cx: cx2, cy: cy2,
+      ratio: Math.round((fw2 / fh2) * 100) / 100,
+      zoom: z2,                        // already at storage precision, above
+      pos: [round1(px2), round1(py2)],
+      snapX, snapY,
+    };
+    if (spec.ex) {
+      // Written through the SAME measured response the drag magnets use: on a
+      // template whose CSS absorbs half of every inline `left` change, writing
+      // the raw value would slide the anchored edge out from under the crop.
+      const rx = (isFinite(resp.ax) && Math.abs(resp.ax) > 0.1) ? resp.ax : 1;
+      const ry = (isFinite(resp.ay) && Math.abs(resp.ay) > 0.1) ? resp.ay : 1;
+      const dLeft = (cx2 - fw2 / 2) - (spec.g.cx - fw / 2);
+      const dTop = (cy2 - fh2 / 2) - (spec.g.cy - fh / 2);
+      out.x = spec.x0 + (dLeft / rx) / W * 100;
+      out.y = spec.y0 + (dTop / ry) / H * 100;
+      out.w = fw2 / W * 100;
+    }
+    return out;
+  }
+
+  // Live preview of a crop-resize — no re-compose, exactly as the pan does.
+  // The frame's geometry goes on inline, and the picture is FORCED to cover it:
+  // a photo that has never been pinned renders on the legacy path (natural
+  // aspect, no object-fit), so without this it would letterbox inside the new
+  // frame for the whole drag and only snap right on release — the gesture
+  // lying about its own result until it is too late to adjust. Every property
+  // written here is wiped by the next compose, which both commit and cancel do.
+  function applyCropLive(t, spec, r) {
+    const obj = spec.obj;
+    obj.pos = [r.pos[0], r.pos[1]];
+    obj.zoom = r.zoom;
+    const node = t.kind === 'slot' ? slotEl(t.n) : extraEl(t.index);
+    if (node) {
+      if (t.kind === 'extra') {
+        node.style.left = round1(r.x) + '%';
+        node.style.top = round1(r.y) + '%';
+        node.style.width = round1(r.w) + '%';
+      }
+      node.style.aspectRatio = String(r.ratio);
+      node.style.height = 'auto';
+      node.style.overflow = 'hidden';
+      const img = node.querySelector('img');
+      if (img) {
+        const inner = img.parentElement;
+        if (inner && inner !== node) { inner.style.width = '100%'; inner.style.height = '100%'; }
+        img.style.position = 'absolute';
+        img.style.inset = '0';
+        img.style.width = '100%';
+        img.style.height = '100%';
+        img.style.objectFit = 'cover';
+        img.style.objectPosition = r.pos[0] + '% ' + r.pos[1] + '%';
+        img.style.transform = r.zoom > 1 ? 'scale(' + r.zoom + ')' : '';
+        img.style.transformOrigin = r.pos[0] + '% ' + r.pos[1] + '%';
+      }
+    }
+    const g = { cx: r.cx, cy: r.cy, w: r.fw, h: r.fh, rot: spec.g.rot || 0 };
+    placeBox(selBox, g);
+    placeBox(gridBox, g);
+    if (zoomUI) {
+      zoomUI.input.value = String(r.zoom);
+      zoomUI.val.textContent = '×' + r.zoom.toFixed(2);
+    }
+  }
+
+  // Put back everything a cancelled crop drag touched. pos/zoom were written
+  // live onto the design object; ratio/x/y/w only land on commit, but a drag
+  // cancelled after a previous one committed still restores cleanly this way.
+  function restoreCropBase(t, spec) {
+    const b = spec.base;
+    const obj = spec.obj;
+    if (b.pos) obj.pos = b.pos.slice(); else delete obj.pos;
+    if (b.zoom === undefined) delete obj.zoom; else obj.zoom = b.zoom;
+    if (b.ratio === undefined) delete obj.ratio; else obj.ratio = b.ratio;
+    if (spec.ex) {
+      const ex = design.extras[t.index];
+      if (ex) {
+        if (b.x === undefined) delete ex.x; else ex.x = b.x;
+        if (b.y === undefined) delete ex.y; else ex.y = b.y;
+        if (b.w === undefined) delete ex.w; else ex.w = b.w;
+      }
+    }
+  }
+
+  // «איפוס חיתוך» — back to the picture as it arrived: no pinned frame, no
+  // pan, no zoom. Shape, ring and wash are NOT crop keys and deliberately
+  // survive; this button undoes the cropping, not the styling.
+  function resetCrop(t) {
+    const obj = t.kind === 'slot' ? slotSpec(t.n) : design.extras[t.index];
+    if (!obj) return;
+    delete obj.ratio;
+    delete obj.pos;
+    delete obj.zoom;
+    commit();
+    renderToolbar();
   }
 
   // ---------------- reset dialog (PLAN «Reset», v1.2) ----------------
@@ -4669,6 +5105,29 @@ export function initEditor(handle, slide, opts = {}) {
     e.preventDefault();
     e.stopPropagation();
 
+    // v2.5 crop grip — checked BEFORE the frame handles and before the Shift
+    // group-toggle below, so ⇧ on a grip means «lock the aspect» and never
+    // «add this to the selection». Nothing else in the editor reads ⇧ during a
+    // gesture, so the two meanings cannot collide.
+    const cEl = e.target.closest && e.target.closest('.smr-edch');
+    if (cEl) {
+      const ct0 = cropTarget();
+      const grip = cEl.getAttribute('data-grip');
+      if (ct0 && cropGripsFor(ct0).has(grip)) {
+        const spec = cropResizeSpec(ct0);
+        if (spec) {
+          const node = ct0.kind === 'slot' ? slotEl(ct0.n) : extraEl(ct0.index);
+          ges = {
+            mode: 'cropsize', moved: false, startX: e.clientX, startY: e.clientY,
+            target: ct0, grip, spec, live: null,
+            resp: ct0.kind === 'extra' ? measureResponse(ct0, node) : { ax: 1, ay: 1 },
+          };
+          overlay.setPointerCapture(e.pointerId);
+        }
+      }
+      return;
+    }
+
     const hEl = e.target.closest && e.target.closest('.smr-edh');
     if (hEl && sel && sel.kind === 'extra') {
       const ex = design.extras[sel.index];
@@ -4853,6 +5312,20 @@ export function initEditor(handle, slide, opts = {}) {
         const py = clamp(ges.basePY - (ov.y > 0.5 ? (dyc / s) / ov.y * 100 : 0), 0, 100);
         obj.pos = [round1(px), round1(py)];
         liveCrop(ges.target, obj);
+      } else if (ges.mode === 'cropsize') {
+        // pointer delta -> doc units -> the FRAME's local axes (inverse
+        // rotation), so a grip on a rotated crop frame travels along the edge
+        // it is sitting on instead of along the screen
+        const rad = (ges.spec.g.rot || 0) * Math.PI / 180;
+        const dxd = dxc / s, dyd = dyc / s;
+        const lx = dxd * Math.cos(rad) + dyd * Math.sin(rad);
+        const ly = -dxd * Math.sin(rad) + dyd * Math.cos(rad);
+        const r = solveCropResize(ges.spec, ges.grip, lx, ly, e.shiftKey, e.altKey, ges.resp);
+        if (!r) return;
+        ges.live = r;
+        applyCropLive(ges.target, ges.spec, r);
+        selBox.classList.toggle('is-snap', r.snapX != null || r.snapY != null);
+        paintGuides(r.snapX, r.snapY);
       } else if (ges.mode === 'rotate') {
         const ang = Math.atan2(e.clientY - ges.cy, e.clientX - ges.cx) * 180 / Math.PI;
         let rot = ges.baseRot + (ang - ges.startAng);
@@ -4906,10 +5379,32 @@ export function initEditor(handle, slide, opts = {}) {
           ? slotSpec(g.target.n) : design.extras[g.target.index];
         if (obj) obj.pos = [g.basePX, g.basePY];
       }
+      // a crop RESIZE mutated pos/zoom live too, and its inline frame styles
+      // are undone by the re-compose below
+      if (g.mode === 'cropsize') restoreCropBase(g.target, g.spec);
       applyNow(); // re-compose from the design as-is
       return;
     }
 
+    if (g.mode === 'cropsize') {
+      // ratio · pos · zoom · x · y · w land TOGETHER in one commit — they are
+      // one gesture's answer and any subset of them is a different picture
+      const r = g.live;
+      const obj = g.target.kind === 'slot'
+        ? slotSpec(g.target.n) : design.extras[g.target.index];
+      if (r && obj) {
+        obj.ratio = r.ratio;
+        obj.pos = [r.pos[0], r.pos[1]];
+        obj.zoom = r.zoom;
+        if (g.target.kind === 'extra') {
+          const ex = design.extras[g.target.index];
+          if (ex) { ex.x = round1(r.x); ex.y = round1(r.y); ex.w = round1(r.w); }
+        }
+      }
+      commit();
+      renderToolbar();   // the «חופשי» chip and the zoom slider both moved
+      return;
+    }
     if (g.mode === 'croppan') {
       // obj.pos was written live during the pan — prune+fire+re-compose
       commit();
