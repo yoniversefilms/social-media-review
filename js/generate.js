@@ -341,11 +341,17 @@ async function sliceSheet(src, { fixed = false } = {}) {
     note = 'נחתך ברשת קבועה 3×3 לפי בקשה — ייתכן שחלק מהציורים ייחתכו.';
   } else {
     const found = gutterBoxes(ctx, W, H);
-    if (found.length !== CELLS) {
-      return { ok: false, count: found.length, tiles: [], bmp,
-        reason: `זוהו ${found.length} ציורים בגיליון במקום ${CELLS}` };
+    if (found.length === CELLS) {
+      boxes = found;
+    } else {
+      const rescued = gridRescue(found, W, H);
+      if (!rescued) {
+        return { ok: false, count: found.length, tiles: [], bmp,
+          reason: `זוהו ${found.length} ציורים בגיליון במקום ${CELLS}` };
+      }
+      boxes = rescued;
+      note = `זוהו ${found.length} גושי דיו אבל כולם יושבים נקי בתאי רשת 3×3 — נחתך לפי הרשת (ציורים מרובי-חלקים).`;
     }
-    boxes = found;
   }
 
   const tiles = [];
@@ -372,6 +378,42 @@ function fixedGrid(W, H) {
     out.push({ x: col * cw, y: r * ch, w: cw, h: ch });
   }
   return out;
+}
+
+// GRID RESCUE (2026-08-03). A drawing made of DISCONNECTED parts — «two chairs
+// facing each other», a broken-off cup handle beside its cup — detects as two
+// ink boxes, so a perfectly drawn sheet counts ≠9 and was refused. If every
+// detected box sits wholly inside one cell of the requested 3×3 grid, the grid
+// is real and slicing by cells cuts through nothing: accept, union the boxes
+// per cell, reading order by construction. A box straddling a cell boundary,
+// or an empty cell, still refuses. Twin of scripts/lib/fal-client.mjs
+// gridRescue() — keep them identical.
+function gridRescue(found, W, H) {
+  if (!found.length) return null;
+  const cw = W / 3, ch = H / 3;
+  const sx = cw * 0.02, sy = ch * 0.02;          // 2% slack on the boundary
+  const cellOf = (b) => {
+    const c0 = Math.floor((b.x + sx) / cw), c1 = Math.floor((b.x + b.w - 1 - sx) / cw);
+    const r0 = Math.floor((b.y + sy) / ch), r1 = Math.floor((b.y + b.h - 1 - sy) / ch);
+    if (c0 !== c1 || r0 !== r1) return -1;       // straddles a gutter line
+    const c = Math.min(2, Math.max(0, c0));
+    const r = Math.min(2, Math.max(0, r0));
+    return r * 3 + c;
+  };
+  const cells = Array.from({ length: CELLS }, () => null);
+  for (const b of found) {
+    const i = cellOf(b);
+    if (i < 0) return null;
+    const u = cells[i];
+    cells[i] = u ? {
+      x: Math.min(u.x, b.x),
+      y: Math.min(u.y, b.y),
+      w: Math.max(u.x + u.w, b.x + b.w) - Math.min(u.x, b.x),
+      h: Math.max(u.y + u.h, b.y + b.h) - Math.min(u.y, b.y),
+    } : { x: b.x, y: b.y, w: b.w, h: b.h };
+  }
+  if (cells.some((cell) => !cell)) return null;  // a missing drawing stays a refusal
+  return cells;
 }
 
 // Row bands first (top→bottom), then columns inside each band (left→right, and
