@@ -1089,13 +1089,35 @@ function renderStyles() {
   ];
 }
 
+// Which of a style's refs are PICTURES that ride along with every generation.
+// Read-only mirror of styleRefImages() in the two fal callers — it must not
+// drift, but it also cannot be imported (one is Deno, one is Node), so it is
+// deliberately the SAME two kinds and the same http(s) test, and nothing else.
+function styleRefImageUrls(s) {
+  return (Array.isArray(s && s.refs) ? s.refs : [])
+    .filter((r) => r && (r.kind === 'image' || r.kind === 'reference_sheet'))
+    .map((r) => String(r.url || '').trim())
+    .filter((u) => /^https?:\/\//i.test(u));
+}
+
 function styleCard(s) {
+  const refImgs = styleRefImageUrls(s);
   return el('div', { class: 'gen-style' + (s.archived ? ' is-off' : '') },
     el('div', { class: 'gen-style__head' },
       el('b', null, s.name),
       el('span', { class: 'tag' }, KIND_LABEL[s.kind] || s.kind),
       el('span', { class: 'tag' }, el('span', { class: 'ltr' }, `v${s.version}`)),
+      // A style with reference images generates differently — the model copies
+      // the pictures instead of only reading the words. That is worth saying on
+      // the card, not only in a dry run.
+      refImgs.length
+        ? el('span', { class: 'tag gen-style__guided' }, `🖼️ מונחה תמונות · ${Math.min(refImgs.length, STYLE_REF_SENT)}`)
+        : null,
       s.archived ? el('span', { class: 'tag' }, 'בארכיון') : null),
+    refImgs.length
+      ? el('div', { class: 'gen-refs gen-refs--sm' }, refImgs.slice(0, STYLE_REF_SENT).map((u) =>
+          el('div', { class: 'gen-ref' }, el('img', { src: u, alt: '', loading: 'lazy' }))))
+      : null,
     s.notes ? el('div', { class: 'gen-style__notes' }, s.notes) : null,
     el('div', { class: 'gen-style__prompt ltr' }, s.prompt_en || '(אין ניסוח)'),
     el('div', { class: 'a-sub' },
@@ -1179,6 +1201,26 @@ function styleForm(existing) {
 // a vision task, and spec 07 keeps it inside the factory rather than giving an
 // Edge Function an API bill: the request queues, the operator's local session
 // reads the references and writes the row. State the latency honestly.
+//
+// TWO KINDS OF REFERENCE, and the difference is worth a line of UI (v2.5.2):
+//   · an UPLOADED IMAGE becomes {kind:'image', url, asset_id} — a public
+//     sm-photos URL. The session looks at it when it writes prompt_en, AND it
+//     rides along with every later generation as `image_urls` on
+//     nano-banana-2's /edit endpoint, i.e. the model copies that picture.
+//   · a LINK becomes {kind:'url', url}. Creation-time only, forever: a
+//     Pinterest board URL cannot be an image input (422), so the session can
+//     browse it but fal never sees it.
+// Nobody should have to infer that from the shape of the form, so it is said
+// in one sentence under the file picker.
+const STYLE_REF_MAX_FILES = 6;
+const STYLE_REF_MAX_BYTES = 8 * 1024 * 1024;
+const STYLE_REF_MIME = /^image\/(png|jpe?g|webp)$/i;
+// The generation-time cap, mirrored from the two fal callers
+// (supabase/functions/generate/index.ts + scripts/lib/fal-client.mjs
+// MAX_STYLE_REF_IMAGES). Stated here so the form can warn while the reviewer
+// is still choosing, instead of silently dropping the fourth picture later.
+const STYLE_REF_SENT = 3;
+
 function refStyleForm() {
   const kindSel = el('select', { class: 'field__input' },
     el('option', { value: 'illustration' }, 'איור'),
@@ -1190,32 +1232,130 @@ function refStyleForm() {
     placeholder: 'קישור לבורד ב-Pinterest, או קישורים לתמונות — אחד בכל שורה',
   });
 
+  // The files are held as {file, url} where url is an object URL for the
+  // thumbnail ONLY — nothing is uploaded until the request is actually sent,
+  // so cancelling the modal costs nothing and leaves no orphan rows.
+  const picked = [];
+  const thumbs = el('div', { class: 'gen-refs' });
+  const tally = el('div', { class: 'pv-note gen-refs__tally' });
+  const fileInput = el('input', {
+    type: 'file', accept: 'image/png,image/jpeg,image/webp', multiple: true,
+    style: { display: 'none' },
+  });
+
+  const drawThumbs = () => {
+    thumbs.replaceChildren(...picked.map((p, i) =>
+      el('div', { class: 'gen-ref' + (i < STYLE_REF_SENT ? '' : ' is-extra') },
+        el('img', { src: p.url, alt: p.file.name }),
+        el('button', {
+          class: 'gen-ref__x', type: 'button',
+          'aria-label': `הסרת ${p.file.name}`, title: 'הסרה',
+          onclick: () => {
+            URL.revokeObjectURL(p.url);
+            picked.splice(i, 1);
+            drawThumbs();
+          },
+        }, '✕'),
+        el('div', { class: 'gen-ref__name ltr' }, p.file.name))));
+    tally.replaceChildren(...(picked.length
+      ? [
+        `${picked.length} תמונות מצורפות. `,
+        picked.length > STYLE_REF_SENT
+          ? el('b', null, `רק ${STYLE_REF_SENT} הראשונות ילוו כל יצירה בסגנון — השאר משמשות רק לכתיבת הניסוח.`)
+          : `כולן ילוו כל יצירה בסגנון.`,
+      ]
+      : []));
+  };
+
+  fileInput.addEventListener('change', () => {
+    const chosen = Array.from(fileInput.files || []);
+    fileInput.value = '';   // so re-picking the same file fires 'change' again
+    for (const f of chosen) {
+      if (picked.length >= STYLE_REF_MAX_FILES) {
+        toast(`אפשר לצרף עד ${STYLE_REF_MAX_FILES} תמונות`, 'err');
+        break;
+      }
+      if (!STYLE_REF_MIME.test(f.type || '')) {
+        toast(`«${f.name}» אינו PNG / JPG / WEBP`, 'err');
+        continue;
+      }
+      if (f.size > STYLE_REF_MAX_BYTES) {
+        toast(`«${f.name}» גדול מ-${STYLE_REF_MAX_BYTES / 1024 / 1024}MB`, 'err');
+        continue;
+      }
+      picked.push({ file: f, url: URL.createObjectURL(f) });
+    }
+    drawThumbs();
+  });
+
+  const dropAll = () => { for (const p of picked) URL.revokeObjectURL(p.url); };
+
   modal('יצירת סגנון מרפרנסים', el('div', null,
     el('p', { class: 'pv-note' },
       'הבקשה נכנסת לתור. מי שמריץ את הסטודיו מסתכל על הרפרנסים, כותב את הניסוח, והסגנון מופיע כאן. ',
       el('b', null, 'זה לוקח זמן — דקות עד שהסשן במשרד רץ, לא שניות.')),
     field('סוג', kindSel),
     field('שם', name),
-    field('רפרנסים', refs),
+    field('תמונות רפרנס', el('div', null,
+      el('div', { class: 'gen-acts' },
+        el('button', {
+          class: 'btn btn--ghost', type: 'button', onclick: () => fileInput.click(),
+        }, '📎 בחירת תמונות'),
+        fileInput),
+      thumbs,
+      tally),
+      // The one honest line. Images do two jobs, links do one.
+      `תמונות שמעלים כאן נשמרות בספרייה וגם נשלחות למודל בכל יצירה בסגנון — הוא מעתיק מהן את המראה בפועל. ` +
+      `קישורים (למטה) משמשים רק לכתיבת הניסוח ולא נשלחים למודל אף פעם. ` +
+      `PNG / JPG / WEBP, עד ${STYLE_REF_MAX_BYTES / 1024 / 1024}MB לקובץ, עד ${STYLE_REF_MAX_FILES} קבצים.`),
+    field('קישורים', refs,
+      'בורד ב-Pinterest או דפים — מישהו יסתכל עליהם כאן, אבל הם לא נשלחים למודל.'),
     field('הערות', notes),
   ), {
-    actions: [{ label: 'ביטול' }, {
+    actions: [{ label: 'ביטול', onClick: () => { dropAll(); } }, {
       label: 'שליחה לתור', primary: true,
       onClick: async (close) => {
+        const links = linesOf(refs.value);
+        if (!picked.length && !links.length) {
+          toast('צריך לפחות רפרנס אחד — תמונה או קישור', 'err');
+          return false;
+        }
+        if (close) close();
+        // Uploads run AFTER the modal is gone, against the tab's own busy
+        // banner: a ref has to be a real public URL before the queue row can
+        // carry it, and there is no other moment to do it.
+        setBusy('מעלים את תמונות הרפרנס…');
         try {
+          const uploaded = [];
+          for (const [i, p] of picked.entries()) {
+            setBusy(`מעלים תמונת רפרנס ${i + 1} מתוך ${picked.length}…`);
+            const up = await uploadAsset({
+              file: p.file,
+              kind: 'other',                 // a style exemplar is not a post photo
+              tags: ['style-ref'],
+              label: `רפרנס לסגנון ${name.value.trim() || ''}`.trim(),
+            });
+            uploaded.push({ kind: 'image', url: up.url, asset_id: up.row.id });
+          }
+          setBusy('שולחים את הבקשה לתור…');
           await requestStyleFromRefs({
             kind: kindSel.value,
             name: name.value.trim(),
             notes: notes.value.trim(),
-            refs: linesOf(refs.value).map((url) => ({ kind: 'url', url })),
+            // Images first, in the order they were chosen — that IS the order
+            // the generation-time cap of 3 walks, so the thumbnails already
+            // showed which ones will be sent.
+            refs: [...uploaded, ...links.map((url) => ({ kind: 'url', url }))],
           });
+          dropAll();
+          await refreshAssets();
           toast('הבקשה נשלחה לתור', 'ok');
-          if (close) close();
         } catch (e) {
           toast(e && e.pending08
             ? 'תור הבקשות עוד לא הותקן בשרת — אפשר בינתיים ליצור סגנון ידנית'
             : ((e && e.message) || String(e)), 'err');
-          return false;
+        } finally {
+          setBusy('');
         }
         return true;
       },

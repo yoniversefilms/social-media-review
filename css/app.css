@@ -1142,3 +1142,44 @@ hr, .rule {
    says so in bold, and the boxes type LTR because their content is English. */
 .gen-lines--en { text-align: left; }
 .gen-lines--en::placeholder { font-weight: 700; opacity: 1; color: var(--ink-soft, #55484d); }
+
+/* ===== v2.5.2 style ref uploads ===== */
+/* Reference images attached to a style: thumbnails in «יצירת סגנון מרפרנסים»
+   and a read-only strip on the style card. Tokens only (--wash/--line/
+   --ink-soft/--accent/--paper), so light and dark both come for free. RTL is
+   the document direction; the grid and the logical inset properties follow it
+   without a single physical left/right. */
+.gen-refs {
+  display: grid; grid-template-columns: repeat(auto-fill, minmax(84px, 1fr));
+  gap: 8px; margin-block-start: 8px;
+}
+.gen-refs:empty { display: none; }
+.gen-refs--sm { grid-template-columns: repeat(auto-fill, minmax(56px, 1fr)); max-width: 260px; }
+.gen-ref {
+  position: relative; aspect-ratio: 1; overflow: hidden;
+  border: 1px solid var(--line); border-radius: 8px; background: var(--wash);
+}
+.gen-ref img { width: 100%; height: 100%; object-fit: cover; display: block; }
+/* Past the generation-time cap the picture still helps whoever writes the
+   scaffold, but it will NOT be sent to the model — so it reads as secondary
+   rather than disappearing. */
+.gen-ref.is-extra { opacity: .55; border-style: dashed; }
+.gen-ref__x {
+  position: absolute; inset-block-start: 3px; inset-inline-end: 3px;
+  width: 20px; height: 20px; border-radius: 999px; cursor: pointer;
+  display: flex; align-items: center; justify-content: center;
+  padding: 0; line-height: 1; font-size: .7rem;
+  background: var(--paper); color: var(--ink-soft);
+  border: 1px solid var(--line);
+  transition: color .14s ease, border-color .14s ease;
+}
+.gen-ref__x:hover { color: var(--accent); border-color: var(--accent); }
+.gen-ref__name {
+  position: absolute; inset-block-end: 0; inset-inline: 0;
+  padding: 2px 4px; font-size: .58rem; line-height: 1.3;
+  white-space: nowrap; overflow: hidden; text-overflow: ellipsis;
+  background: color-mix(in srgb, var(--paper) 86%, transparent);
+  color: var(--ink-soft);
+}
+.gen-refs__tally { margin-block-start: 6px; }
+.gen-style__guided { border-color: color-mix(in srgb, var(--accent) 45%, transparent); }
