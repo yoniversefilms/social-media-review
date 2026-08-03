@@ -34,7 +34,7 @@ import {
 import { mountHowMade } from './create-ai.js';
 import {
   el, modal, toast, fmtDate, fmtWhen, toLocalInput, fromLocalInput, voteGlyph,
-  stageLabel, categoryLabel, STAGES, navBar, zoomControl,
+  stageLabel, categoryLabel, STAGES, navBar, zoomControl, uploadProgress,
 } from './ui.js';
 import { initCompose, mountSlide, manifest, composeSlideHTML } from './compose.js';
 // v2.3 «English translation panel» — the ONE hash implementation, shared
@@ -3507,6 +3507,11 @@ function renderPhotosTab() {
     el('div', { class: 'pv-note', style: { marginTop: '6px' } },
       'כאן מעלים תמונות אמיתיות שתרצו שישולבו בפוסט — צילומים מהשטח, רפרנסים והשראה.'),
   );
+  // v2.8: until now this tab said NOTHING between the picker closing and the
+  // grid repainting — on a phone that is a minute of a dead-looking page. The
+  // bar lives inside the tab's own DOM; renderActiveTab() only re-renders
+  // AFTER the batch is finished, so nothing yanks it mid-upload.
+  const prog = uploadProgress();
   drop.addEventListener('click', () => file.click());
   drop.addEventListener('dragover', (e) => { e.preventDefault(); drop.classList.add('over'); });
   drop.addEventListener('dragleave', () => drop.classList.remove('over'));
@@ -3533,16 +3538,21 @@ function renderPhotosTab() {
     // the tab on the way to being rejected. This path had no cap at all; the
     // numbers are imgprep's, shared with the generate pickers.
     const tooBig = batchTooBig(files);
+    // The cap refusal shows a toast and uploads nothing — the bar stays down.
     if (tooBig) { toast(tooBig, 'err'); return; }
+    prog.phase('מכינים את התמונות…');
     const snap = await snapshotFiles(files);
     if (snap.failed.length) toast(summarizeFailures(snap.failed), 'err');
     await uploadFiles(snap.ok, noteText);
   }
 
   async function uploadFiles(files, noteText) {
-    if (!files.length) return;
+    // Every file went stale in the snapshot: the toast above already named
+    // them, and there is no batch left to show progress for.
+    if (!files.length) { prog.hide(); return; }
     const failed = [];
     let ok = 0;
+    prog.start(files.length);
     for (const f of files) {
       try {
         await uploadPhoto({ post_id: S.post.id, pin_id: null, file: f, note: noteText });
@@ -3550,12 +3560,17 @@ function renderPhotosTab() {
       } catch (e) {
         failed.push({ name: f.name, reason: (e && e.message) || String(e) });
       }
+      prog.tick(ok + failed.length, f.name);
     }
     if (ok) toast(ok === 1 ? 'התמונה עלתה' : `${ok} תמונות עלו`, 'ok');
     if (failed.length) toast(summarizeFailures(failed), 'err');
     note.value = '';
+    // Same paint-honesty rule as the assets dock: the FULL bar stays on screen
+    // across the awaited refresh, and the tab re-render is what retires it.
+    // hide() after is the belt for the path where the re-render never happens.
     await refreshAll();
     renderActiveTab(true); // own action: show the new photo even if an input still has focus
+    prog.hide();
   }
 
   const cards = S.photos.map((ph) => {
@@ -3584,6 +3599,7 @@ function renderPhotosTab() {
 
   return [
     drop,
+    prog.root,
     el('div', { class: 'ph-note-row' }, note),
     file,
     cards.length
