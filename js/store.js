@@ -2083,6 +2083,14 @@ export async function callGenerator({ mode = 'plan', operator_key = '', ...paylo
     method: 'POST',
     headers: {
       'Content-Type': 'application/json',
+      // The functions GATEWAY rejects any call without an Authorization
+      // header before our code runs («Missing authorization header» — found
+      // live on the first real submit after deploy; the builder's cloud path
+      // was unexercisable). The publishable key is the right bearer — the
+      // same one every REST call sends. The function's OWN auth stays the
+      // board key + optional operator key below.
+      'Authorization': 'Bearer ' + String(cfg().supabaseAnon || ''),
+      'apikey': String(cfg().supabaseAnon || ''),
       'x-board-key': boardKey,
       ...(operator_key ? { 'x-operator-key': operator_key } : {}),
     },
