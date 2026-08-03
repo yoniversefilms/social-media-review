@@ -550,8 +550,8 @@ function linesOf(text) {
 
 function renderIll() {
   const ta = el('textarea', {
-    class: 'field__input gen-lines', rows: '5', value: S.ill.lines,
-    placeholder: 'שורה אחת = ציור אחד.\nלמשל: קומקום על הכיריים עם אדים\nכיסא ריק ליד חלון',
+    class: 'field__input gen-lines gen-lines--en', rows: '5', value: S.ill.lines, dir: 'ltr',
+    placeholder: 'ENGLISH ONLY — one line = one drawing.\ne.g.  a kettle on the stove with steam\ne.g.  an empty chair by a window',
     oninput: () => { S.ill.lines = ta.value; hint.replaceChildren(...divisionHint(linesOf(ta.value))); },
   });
   const hint = el('div', { class: 'pv-note gen-hint' }, ...divisionHint(linesOf(S.ill.lines)));
@@ -811,8 +811,8 @@ function renderBatch() {
   }
 
   const ta = el('textarea', {
-    class: 'field__input gen-lines', rows: '6', value: b.lines,
-    placeholder: 'שורה אחת = נושא אחד.\nכוס תה על אדן חלון, אור בוקר רך\nכיסא ריק במטבח\nשמיכה מקופלת על הספה',
+    class: 'field__input gen-lines gen-lines--en', dir: 'ltr', rows: '6', value: b.lines,
+    placeholder: 'ENGLISH ONLY — one line = one subject.\ne.g.  a cup of tea on a windowsill, soft morning light\ne.g.  an empty chair in a kitchen\ne.g.  a folded blanket on a sofa',
     oninput: () => { b.lines = ta.value; count.replaceChildren(...batchHint()); },
     disabled: b.running,
   });
@@ -875,8 +875,8 @@ function renderBatch() {
 
 function renderPhoto() {
   const ta = el('textarea', {
-    class: 'field__input gen-lines', rows: '4', value: S.photo.lines,
-    placeholder: 'שורה אחת = תמונה אחת.\nלמשל: כוס תה על אדן חלון, אור בוקר רך',
+    class: 'field__input gen-lines gen-lines--en', dir: 'ltr', rows: '4', value: S.photo.lines,
+    placeholder: 'ENGLISH ONLY — one line = one photo.\ne.g.  a cup of tea on a windowsill, soft morning light',
     oninput: () => { S.photo.lines = ta.value; },
   });
 

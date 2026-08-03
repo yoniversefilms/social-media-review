@@ -1015,3 +1015,9 @@ hr, .rule {
 .pv-zoom__pct { min-width: 52px; text-align: center; font-size: .88rem;
   font-weight: 600; color: var(--ink-soft); cursor: pointer; }
 .pv-zoom__pct:hover { color: var(--ink); }
+
+/* ===== v2.5.2 fal prompt boxes (operator 2026-08-03) ===== */
+/* Input to fal is ENGLISH ONLY (no translation key set) — the placeholder
+   says so in bold, and the boxes type LTR because their content is English. */
+.gen-lines--en { text-align: left; }
+.gen-lines--en::placeholder { font-weight: 700; opacity: 1; color: var(--ink-soft, #55484d); }
