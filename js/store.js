@@ -115,6 +115,9 @@ export function ensureName() {
       if (!name) { input.focus(); return false; }
       localStorage.setItem(LS.name, name);
       window.dispatchEvent(new CustomEvent('smr:name', { detail: { name } }));
+      // FIRST naming only — never ui.js's nav-chip rename. tours.js listens
+      // for this to offer the guided tour once per browser.
+      window.dispatchEvent(new CustomEvent('smr:first-name', { detail: { name } }));
       namePromise = null;
       if (close) close();
       resolve(whoAmI());

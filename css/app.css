@@ -1183,3 +1183,130 @@ hr, .rule {
 }
 .gen-refs__tally { margin-block-start: 6px; }
 .gen-style__guided { border-color: color-mix(in srgb, var(--accent) 45%, transparent); }
+
+/* ── guided tour (tours.js) ───────────────────────────────────────────────
+   Chrome for app/js/tour.js. Tokens only (--paper/--ink/--line/--accent),
+   so the dark theme flips it for free like everything else.
+
+   ONE dimming mechanism: the page is darkened by .tour-spot's second,
+   enormous box-shadow (200vmax of translucent scrim spreading out from the
+   cutout). Centered steps (welcome / finale) do NOT hide the spot — tour.js
+   parks it 0×0 at dead centre and adds .tour-spot--center, which drops the
+   ring so nothing shows but the dim. There is no second scrim anywhere.
+
+   THE SCRIM IS --overlay, the same token .modal-overlay uses, and it has to
+   stay a token that is dark in BOTH themes. The obvious
+   `color-mix(in srgb, var(--ink) 45%, transparent)` is wrong here: --ink
+   inverts between themes (#1c1518 light, #f0e7e3 dark), so in dark mode that
+   "dim" resolves to a near-white wash which LIGHTENS the page instead of
+   darkening it. Measured in a real dark-mode render, not guessed.
+
+   Physical `left`/`bottom` on the fab on purpose: Chromium resolves
+   inset-inline-* against the element's OWN direction, the RTL trap post.html
+   documents, and this button is positioned. Keep it physical. */
+
+.tour-block { position: fixed; inset: 0; z-index: 9990; }
+
+.tour-spot {
+  position: fixed; pointer-events: none; border-radius: 12px;
+  box-shadow:
+    0 0 0 3px var(--accent),
+    0 0 0 200vmax var(--overlay);
+  /* named properties, not `all`: `all` would animate the box-shadow too and
+     fight the ring's own pulse */
+  transition: left .28s ease, top .28s ease, width .28s ease, height .28s ease;
+}
+.tour-spot::after {
+  content: ''; position: absolute; inset: -3px;
+  border-radius: inherit; border: 2px solid var(--accent);
+  animation: tour-pulse 1.9s ease-out infinite;
+}
+@keyframes tour-pulse {
+  0%   { opacity: .8; transform: scale(1); }
+  70%  { opacity: 0;  transform: scale(1.05); }
+  100% { opacity: 0;  transform: scale(1.05); }
+}
+/* welcome / finale: dim only, no ring and no 6px accent dot mid-screen */
+.tour-spot--center {
+  box-shadow: 0 0 0 200vmax var(--overlay);
+}
+.tour-spot--center::after { display: none; }
+
+.tour-tip {
+  position: fixed; max-width: 340px;
+  background: var(--paper); color: var(--ink);
+  border: 1px solid var(--line); border-radius: 14px;
+  box-shadow: var(--shadow-lift); padding: 16px;
+}
+.tour-tip--center {
+  left: 50%; top: 50%; transform: translate(-50%, -50%);
+  max-width: 420px; text-align: center;
+}
+.tour-tip__head { display: flex; align-items: center; gap: 8px; margin-bottom: 8px; }
+.tour-tip__n {
+  font-size: .76rem; color: var(--ink-soft); letter-spacing: .02em;
+  direction: ltr; unicode-bidi: isolate;   /* static span; safe, unlike positioned nodes */
+}
+.tour-tip__exit {
+  margin-inline-start: auto; border: 0; background: none; padding: 2px 4px;
+  font: inherit; font-size: .9rem; line-height: 1; cursor: pointer;
+  color: var(--ink-soft); border-radius: 6px;
+  transition: color .14s ease, background-color .14s ease;
+}
+.tour-tip__exit:hover { color: var(--accent); background: var(--wash); }
+.tour-tip__title { margin: 0 0 6px; font-size: 1.02rem; font-weight: 700; line-height: 1.35; }
+.tour-tip__text {
+  margin: 0; font-size: .92rem; line-height: 1.6;
+  color: var(--ink-soft); white-space: pre-line;
+}
+.tour-tip__actions { display: flex; gap: 8px; margin-top: 14px; }
+.tour-tip--center .tour-tip__actions { justify-content: center; }
+.tour-tip__back[disabled] { opacity: .4; pointer-events: none; }
+
+/* z-index 90/91 sits ABOVE the sticky nav (40) and BELOW .modal-overlay (100)
+   and .toast-wrap (200) on purpose. At 900 the fab floated over the blocking
+   «איך קוראים לך?» scrim, undimmed and clickable — a first-time reviewer
+   could start a tour on top of a modal they cannot dismiss. Measured in a
+   real render; keep it under 100. The tour's own .tour-block is 9990. */
+.tour-fab {
+  position: fixed; left: 18px; bottom: 18px; z-index: 90;
+  display: inline-flex; align-items: center; gap: 6px;
+  padding: 9px 16px; border-radius: 999px;
+  background: var(--paper); color: var(--ink);
+  border: 1px solid var(--line); box-shadow: var(--shadow);
+  font: inherit; font-size: .88rem; font-weight: 700; cursor: pointer;
+  transition: color .16s ease, border-color .16s ease, box-shadow .16s ease;
+}
+.tour-fab:hover { color: var(--accent); border-color: var(--accent); box-shadow: var(--shadow-lift); }
+
+.tour-fab-menu {
+  position: fixed; left: 18px; bottom: 64px; z-index: 91;
+  display: grid; gap: 2px; padding: 6px; min-width: 190px;
+  background: var(--paper); border: 1px solid var(--line);
+  border-radius: 12px; box-shadow: var(--shadow-lift);
+}
+.tour-fab-menu__opt {
+  border: 0; background: none; padding: 8px 12px; border-radius: 8px;
+  font: inherit; font-size: .88rem; color: var(--ink);
+  text-align: start; cursor: pointer;
+  transition: color .14s ease, background-color .14s ease;
+}
+.tour-fab-menu__opt:hover { color: var(--accent); background: var(--wash); }
+
+/* `[hidden] {display:none}` is a USER-AGENT rule and ANY author `display`
+   beats it — the trap post.html spells out. Both of these declare a display,
+   so both need the override or `node.hidden = true` does nothing at all. */
+.tour-fab[hidden], .tour-fab-menu[hidden] { display: none; }
+
+.tour-offer__text { margin: 0; line-height: 1.6; color: var(--ink-soft); }
+
+@media (prefers-reduced-motion: reduce) {
+  .tour-spot { transition: none; }
+  .tour-spot::after { animation: none; opacity: .8; }
+}
+
+/* Desktop only until the mobile layout lands: tour.js refuses to start under
+   920px, and the fab must not advertise something that will not run. */
+@media (max-width: 919px) {
+  .tour-fab, .tour-fab-menu { display: none; }
+}
