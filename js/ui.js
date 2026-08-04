@@ -495,82 +495,45 @@ export function navBar(active, opts = {}) {
     }, l.label)),
   );
 
+  // ── phone menu (v2.8-final): hamburger dropdown ────────────────────
+  // On a phone the nav row keeps THREE things: ☰, the board name (which takes
+  // the freed space), and the theme toggle. Everything else — the page links,
+  // the role chip, the name chip — lives in a dropdown the ☰ opens. Before
+  // this, the links row scrolled horizontally, which HID most of the menu
+  // with no visual hint that more existed (operator: «otherwise everything
+  // is hidden»). On desktop .nav__drop is display:contents, so the row is
+  // pixel-identical to what it has always been.
+  // (The v2.8 scroll-fold experiment that lived here is gone: nothing in the
+  // nav reacts to scroll any more, on any page.)
+  const drop = el('div', { class: 'nav__drop', id: 'nav-drop' },
+    linksEl, roleChip, chip,
+  );
+  const burger = el('button', {
+    class: 'nav__burger', type: 'button',
+    'aria-expanded': 'false', 'aria-controls': 'nav-drop', 'aria-label': 'תפריט',
+    title: 'תפריט',
+  }, '☰');
+
   const header = el('header', { class: 'nav' },
-    boardEl, linksEl, roleChip, chip, themeBtn,
+    burger, boardEl, drop, themeBtn,
   );
 
-  // ── collapse on scroll (v2.8, opt-in) ──────────────────────────────
-  // The gallery is a long scroll and the nav is the tallest stationary thing
-  // on it — on a phone it costs a row of cards. Scrolling DOWN folds it to a
-  // one-line strip; scrolling UP brings it back, because reaching upward is
-  // usually reaching for navigation. The strip keeps an explicit «⌄» control
-  // so the menu is never reachable by gesture alone: a scroll-only
-  // affordance strands keyboard users, and strands everyone on a page too
-  // short to scroll up.
-  //
-  // Opt-in per page — `navBar(active, {collapsible:true})`. The review and
-  // builder screens are workbenches whose own chrome is positioned against a
-  // stationary nav, so they keep it still.
-  if (opts.collapsible) {
-    header.classList.add('nav--collapsible');
-    let folded = false;
-    const expandBtn = el('button', {
-      class: 'nav__expand', type: 'button',
-      'aria-expanded': 'true', 'aria-controls': 'nav-links',
-      title: 'פתיחת התפריט',
-      // foldCooled, not setFolded: the button changes layout height exactly
-      // like a scroll-fold does, so its click needs the same clamp-echo
-      // protection or the browser can undo it within a frame.
-      onclick: () => foldCooled(!folded),
-    }, '⌄');
-    header.insertBefore(expandBtn, boardEl);
-
-    function setFolded(next) {
-      if (folded === next) return;
-      folded = next;
-      header.classList.toggle('is-folded', folded);
-      expandBtn.setAttribute('aria-expanded', folded ? 'false' : 'true');
-      expandBtn.title = folded ? 'פתיחת התפריט' : 'קיפול התפריט';
-    }
-
-    // A threshold, not "any movement": iOS momentum scrolling reports jitter
-    // in both directions and a 1px-sensitive nav flickers open and shut.
-    //
-    // THE FEEDBACK LOOP (the bug that sank v1 of this feature): folding
-    // shortens the nav, which shortens the DOCUMENT — and if the reader is
-    // deep in the page the browser clamps scrollY to the new maximum and
-    // fires a scroll event with the OPPOSITE delta, which unfolds the nav,
-    // which lengthens the document, which… (Playwright caught the ⌄ button
-    // in continuous motion: «element is not stable» ×60.) The cure is a
-    // cooldown: for 250ms after every fold/unfold, scroll events only RESYNC
-    // lastY — they never change state. A human gesture outlives 250ms; the
-    // browser's clamp-echo does not.
-    const DELTA = 8;
-    const TOP = 48;              // near the top it is always open
-    const COOL_MS = 250;
-    let lastY = window.scrollY;
-    let coolUntil = 0;
-    let ticking = false;
-    const foldCooled = (next) => {
-      if (folded === next) return;
-      setFolded(next);
-      coolUntil = performance.now() + COOL_MS;
-    };
-    window.addEventListener('scroll', () => {
-      if (ticking) return;
-      ticking = true;
-      requestAnimationFrame(() => {
-        ticking = false;
-        const y = Math.max(0, window.scrollY);
-        if (performance.now() < coolUntil) { lastY = y; return; }
-        const dy = y - lastY;
-        if (Math.abs(dy) < DELTA) return;
-        lastY = y;
-        if (y <= TOP) foldCooled(false);
-        else foldCooled(dy > 0);   // down folds, up reveals
-      });
-    }, { passive: true });
-  }
+  let menuOpen = false;
+  const setMenu = (open) => {
+    if (menuOpen === open) return;
+    menuOpen = open;
+    header.classList.toggle('nav--open', open);
+    burger.setAttribute('aria-expanded', open ? 'true' : 'false');
+  };
+  burger.addEventListener('click', () => setMenu(!menuOpen));
+  // tapping anywhere outside closes it; so does Escape. Link taps navigate
+  // to a new page, which closes it by construction.
+  document.addEventListener('pointerdown', (e) => {
+    if (menuOpen && !header.contains(e.target)) setMenu(false);
+  });
+  document.addEventListener('keydown', (e) => {
+    if (e.key === 'Escape' && menuOpen) setMenu(false);
+  });
 
   return header;
 }
