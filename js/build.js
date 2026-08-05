@@ -12,6 +12,14 @@ import {
   listAssets, assetRowUrl,
   // v2.9 photo editing (spec 12) — «הסרת רקע» in the design editor.
   removeBackground,
+  // v2.12 (spec 14) — the read-only program rail. READ-ONLY: no store write on
+  // this page touches a program, and none should.
+  listPrograms, programsMissing, listProgramAssets,
+  // …and the board's freshness cadence, which this page did not use before
+  // v2.12. It does now for exactly one reason: the rail quotes ANOTHER page's
+  // living document, so a builder who leaves this tab open all afternoon was
+  // copying a date somebody corrected at lunchtime.
+  subscribe,
 } from './store.js';
 import { el as h, navBar, toast, modal, zoomControl } from './ui.js';
 
@@ -74,6 +82,226 @@ async function uploadToDraft(file) {
   refreshAssets().catch(() => {});
   return res;
 }
+/* ── §P: the program rail (v2.12, spec 14) ────────────────────────────────
+   A REFERENCE CARD, and nothing more. It lists the chosen program's label/value
+   pairs with a copy button on each, plus its photos as links into the library.
+
+   WHAT IT DELIBERATELY DOES NOT DO, so nobody "finishes" it by accident:
+   it does not write into a slot, it does not touch editor.js, and it does not
+   save anything to the program. The builder's job is assembly and a rail that
+   silently filled fields would be a second, invisible author of the deck.
+   Deeper prefill is a later spec (14 §7).
+
+   The chosen program is remembered per browser, because a therapist building a
+   three-slide deck from one workshop opens this page more than once. */
+const RAIL_KEY = 'smr:railprog';
+let railPrograms = [];
+let railId = '';
+
+async function mountRail() {
+  const box = $('rail');
+  if (!box) return;
+  try { railId = localStorage.getItem(RAIL_KEY) || ''; } catch { railId = ''; }
+  await refreshRail();
+  // v2.12 FIX: the rail used to be filled ONCE, at boot, and never again. A
+  // builder keeps this page open for an hour while somebody else corrects the
+  // workshop's date on program.html, and every «העתקה» after that copied a
+  // sentence that was no longer true — silently, because the rail looked
+  // identical. It now rides the board's ordinary subscribe() cadence, like the
+  // status list on «יצירה עם AI» does.
+  subscribe(() => { refreshRail().catch(() => {}); });
+}
+
+/* Re-read the board's programs and repaint ONLY when something actually moved.
+   The stamp deliberately includes `rev` AND `updated_at` AND the title: rev is
+   the contract, updated_at catches a stamp that did not bump rev (a soft delete
+   pre-v2.12-fix, a hand-run SQL), and the title is what the picker shows. A
+   repaint on every tick would fight the <select> the moment somebody opened it. */
+function railStamp(rows) {
+  return JSON.stringify((rows || []).map((p) =>
+    [p.id, p.rev, p.updated_at, p.title]));
+}
+let railSeen = '';
+
+async function refreshRail() {
+  const box = $('rail');
+  if (!box) return;
+  let rows;
+  try { rows = await listPrograms(); }
+  catch { return; }                       // a poll failure is not a page failure
+  const stamp = railStamp(rows);
+  if (stamp === railSeen) return;
+  railSeen = stamp;
+  railPrograms = rows;
+  // A selected program that was deleted out from under us drops the selection
+  // rather than showing a stale card of a program that is gone.
+  if (railId && !railPrograms.some((p) => String(p.id) === railId)) railId = '';
+  await paintRail();
+}
+
+/* N2: THE SHELL IS BUILT ONCE AND THE <select> NODE IS NEVER REPLACED.
+   The first cut rebuilt the whole rail on every repaint, and a repaint fires
+   whenever ANY teammate saves ANY program on the board. A builder who had the
+   dropdown open to choose a program watched it snap shut under their finger,
+   with focus dumped onto <body>. Skipping the repaint while focus is inside the
+   rail was the cheap fix and it is the wrong one: the rail must ALSO drop a
+   selection whose program was deleted, and that has to happen whether or not
+   somebody is standing in it.
+   So the options are reconciled IN PLACE instead: same node, same focus, same
+   value, new text. Only the pairs body is rebuilt, and nothing in it holds
+   focus for longer than a click. */
+let railShell = null;
+let railSel = null;
+let railBody = null;
+let railSummary = null;
+let railGen = 0;          // guards late photo fetches against a moved selection
+
+function ensureRailShell(box) {
+  if (railShell && box.contains(railShell)) return;
+  railSel = h('select', { class: 'ai-select' });
+  railSel.addEventListener('change', () => {
+    railId = railSel.value;
+    try { localStorage.setItem(RAIL_KEY, railId); } catch { /* private mode */ }
+    paintRail().catch(() => {});
+  });
+  railBody = h('div', { class: 'b-rail__pairs' });
+  railSummary = h('summary', {}, 'פרטי התוכנית');
+  // `open` is decided ONCE, here. Forcing it on every repaint would re-open a
+  // rail the builder had deliberately collapsed, every ten seconds.
+  railShell = h('details', { class: 'b-rail', open: railId ? true : undefined },
+    railSummary,
+    h('div', { class: 'b-rail__inner' },
+      h('p', { class: 'b-note' },
+        'לקריאה בלבד. הכלי לא כותב את הפרטים לשקופיות בשבילכם: מעתיקים מה ' +
+        'שצריך, ומחליטים איפה הוא יושב.'),
+      railSel,
+      programsMissing()
+        ? h('p', { class: 'b-note' }, 'התוכניות לא נטענו מהשרת.')
+        : null,
+      railBody));
+  box.replaceChildren(railShell);
+}
+
+/* Reconcile the <option> list against railPrograms without touching the
+   <select> itself. textContent, never innerHTML: a program title is
+   therapist-typed text. */
+function syncRailOptions() {
+  const want = [
+    { key: '', label: 'בלי תוכנית' },
+    ...railPrograms.map((p) => ({
+      key: String(p.id),
+      label: `${String(p.title || 'ללא שם')} · גרסה ${p.rev || 1}`,
+    })),
+  ];
+  for (let i = 0; i < want.length; i++) {
+    let o = railSel.options[i];
+    if (!o) { o = document.createElement('option'); railSel.appendChild(o); }
+    if (o.value !== want[i].key) o.value = want[i].key;
+    if (o.textContent !== want[i].label) o.textContent = want[i].label;
+  }
+  while (railSel.options.length > want.length) railSel.remove(railSel.options.length - 1);
+  if (railSel.value !== railId) railSel.value = railId;
+}
+
+async function paintRail() {
+  const box = $('rail');
+  if (!box) return;
+  // Nothing to offer and nothing to explain on THIS page: a builder who has no
+  // programs is not blocked by that, and an empty picker beside the canvas is
+  // noise. The explanation lives on program.html, where it is actionable.
+  // (Checked HERE, not at mount, so a program created in another tab five
+  // minutes from now still makes the rail appear.)
+  if (!railPrograms.length) { box.replaceChildren(); railShell = null; return; }
+  ensureRailShell(box);
+  syncRailOptions();
+
+  const prog = railPrograms.find((p) => String(p.id) === railId) || null;
+  railSummary.textContent = 'פרטי התוכנית' + (prog ? ` · ${String(prog.title || '')}` : '');
+  const body = railBody;
+  body.replaceChildren();
+  // The body node is now REUSED across repaints, so a photo fetch that resolves
+  // after the selection moved would append the previous program's pictures under
+  // the new one's fields. The token is what makes a late answer a no-op.
+  const gen = ++railGen;
+
+  if (prog) {
+    const pairs = (Array.isArray(prog.fields) ? prog.fields : [])
+      .filter((f) => String((f && f.value) || '').trim());
+    if (!pairs.length) {
+      body.replaceChildren(h('p', { class: 'b-note' },
+        'כל השדות של התוכנית עדיין ריקים.'));
+    } else {
+      body.replaceChildren(...pairs.map(pairCard));
+    }
+    // Photos are a plain <a> to the file. The builder already has a library
+    // picker for placing an image; this is «which pictures belong to this
+    // program», which is a different question.
+    listProgramAssets(prog.id).then((rows) => {
+      if (gen !== railGen || !rows.length) return;
+      body.appendChild(h('div', { class: 'b-rail__photos' },
+        rows.map((a) => h('a', { href: assetRowUrl(a), target: '_blank', rel: 'noopener' },
+          h('img', { src: assetRowUrl(a), alt: String(a.label || a.name || 'תמונה של התוכנית'),
+            loading: 'lazy' })))));
+    }).catch(() => {});
+  }
+
+}
+
+function pairCard(f) {
+  const value = String(f.value || '');
+  const btn = h('button', {
+    class: 'b-mini', type: 'button', title: 'העתקה', 'aria-label': 'העתקת התוכן',
+    onclick: () => copyText(value, btn),
+  }, 'העתקה');
+  return h('div', { class: 'b-pair' },
+    h('div', { class: 'b-pair__head' },
+      // Label AND value are therapist-typed text, so both reach the DOM as text
+      // nodes. There is no innerHTML on this page and this is not the place to
+      // introduce one.
+      h('span', { class: 'b-pair__label' }, h('bdi', {}, String(f.label || 'שדה ללא שם'))),
+      btn),
+    h('p', { class: 'b-pair__value' }, h('bdi', {}, value)));
+}
+
+/* Clipboard, with the fallback that makes it work anywhere. navigator.clipboard
+   is undefined on an insecure origin (which localhost is not, but a LAN IP is)
+   and can reject when the document is not focused; the textarea + execCommand
+   path is the one that has always worked. The button says what happened either
+   way, because a copy button that looks identical whether or not it copied is
+   how someone pastes the previous thing into a client's post. */
+async function copyText(text, btn) {
+  const say = (ok) => {
+    if (btn) {
+      btn.textContent = ok ? 'הועתק ✓' : 'לא הועתק';
+      setTimeout(() => { btn.textContent = 'העתקה'; }, 1600);
+    }
+    if (!ok) toast('ההעתקה לא עבדה. אפשר לסמן ולהעתיק ביד.', 'err');
+  };
+  try {
+    if (navigator.clipboard && navigator.clipboard.writeText) {
+      await navigator.clipboard.writeText(text);
+      say(true);
+      return true;
+    }
+  } catch { /* fall through to the textarea path */ }
+  try {
+    const ta = document.createElement('textarea');
+    ta.value = text;
+    ta.setAttribute('readonly', '');
+    ta.style.position = 'fixed';
+    ta.style.opacity = '0';
+    document.body.appendChild(ta);
+    ta.select();
+    const ok = document.execCommand('copy');
+    ta.remove();
+    say(!!ok);
+    return !!ok;
+  } catch {
+    say(false);
+    return false;
+  }
+}
+
 /* design mode (editor.js over the large preview) */
 let designOn = false;
 let stageHandle = null;        // compose mountSlide handle for the stage
@@ -116,6 +344,7 @@ const sampleCache = new Map(); // template name -> sample vars (frozen master co
   $('b-design').addEventListener('click', toggleDesign);
   wireAutosave();
   refreshAssets().catch(() => {});   // v2.0 library — never blocks the build UI
+  mountRail().catch(() => {});       // v2.12 program rail — same rule
 
   // ?from=<post_id> — start from an existing post (a "spin")
   const from = new URLSearchParams(location.search).get('from');

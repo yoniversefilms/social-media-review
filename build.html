@@ -134,6 +134,13 @@ document.documentElement.dataset.theme=(t==='dark'||t==='light')?t:
     </div>
     <aside class="b-fields" id="fields" aria-label="תוכן השקופית"></aside>
   </div>
+
+  <!-- v2.12 (spec 14): the read-only program rail. It sits OUTSIDE .b-layout on
+       purpose — #fields is replaced on every slide selection, so a rail mounted
+       inside it would be wiped by the next click. Read-only by design: the
+       builder's job is assembly and this is the reference card beside it, not a
+       second writer into the slots. -->
+  <section class="b-rail" id="rail" aria-label="פרטי התוכנית"></section>
 </div>
 <script src="./config.js"></script>
 <script type="module" src="./js/build.js"></script>

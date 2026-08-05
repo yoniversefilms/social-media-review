@@ -21,10 +21,12 @@ import {
   initStore, whoAmI, ensureName, subscribe,
   createGenRequest, listGenRequests, campaignsFrom, genRequestForPost,
   GEN_STATUS_LABELS, listPosts, listAssets, assetRowUrl,
+  // v2.12 (spec 14) — the workshop tab stopped being a form and became a
+  // PICKER. The facts live in sm_programs now, edited on program.html.
+  listPrograms, programsMissing,
 } from './store.js';
 import {
   el as h, navBar, toast, fmtDate, CATEGORIES, stageLabel,
-  toLocalInput, fromLocalInput,
 } from './ui.js';
 
 const $ = (id) => document.getElementById(id);
@@ -53,35 +55,59 @@ let requests = [];
 let campaigns = [];
 let submitting = false;
 
-/* ── §W: the workshop event's own fields (spec 13) ─────────────────────────
-   These eleven keys ARE the payload's `workshop` object, in the contract's
-   order, and they are the therapist's typed facts about a real event. Two are
-   required (title, about); the other nine say «לא חובה» in their label,
-   because a blank one is not a gap to fill in later, it is an instruction to
-   the factory: a fact nobody gave is a fact no post may claim.
+/* ── §W: the workshop tab, v2.12 (spec 14) ─────────────────────────────────
+   THE ELEVEN-FIELD FORM THAT USED TO LIVE HERE IS GONE. Spec 13 asked the
+   therapist to type an event's facts into this page and submit them; spec 14
+   moved those facts into `sm_programs`, where they are a document the whole team
+   edits and re-uses. So this tab is now a PICKER plus the three settings that
+   belong to THIS request (how many posts, which shelf, which drawings) and one
+   free-text note for this request alone.
 
-   `when` holds LOCAL wall-clock exactly as <input type="datetime-local">
-   produces it ('2026-09-14T19:00', no Z). It is NOT run through
-   .toISOString(): the fulfiller and the generating session read this string as
-   the hour on the invitation, and a Z would move that hour by the UTC offset
-   in silence. toLocalInput/fromLocalInput (ui.js) are still what normalise it,
-   round-tripping local → instant → local so a garbage value drops out. */
-const WORKSHOP_FIELDS = () => ({
-  title: '', about: '', facilitator: '', when: '', when_note: '', where: '',
-  audience: '', cost: '', register_url: '', takeaways: '', emphasis: '',
-});
+   WHAT THAT MEANS FOR THE PAYLOAD, AND WHY THE OLD SHAPE STILL EXISTS
+   New rows carry {mode:'workshop', program_id, program_rev, note, …}. Rows
+   QUEUED BEFORE THIS BUILD carry the inline `workshop:{…}` object, and they
+   never expire — a request submitted last night is fulfilled tonight. So
+   fulfill.mjs supports BOTH shapes forever, and this file is the only writer of
+   the new one. Do not "simplify" the old branch out of the fulfiller.
+
+   `program_rev` is the rev THE PERSON SAW when they picked (§R below, and it is
+   deliberately NOT the rev at submit time). It is not what the words get written
+   from: the fulfiller re-reads the program LIVE at claim, and this number is
+   what lets it say out loud whether the details moved in between. */
 
 // The form's own model. Kept outside the DOM so switching modes (and the
 // status poll re-rendering the side column) never eats a half-written request.
+//
+// `program_id` on post/campaign is the OPTIONAL «משיכת פרטים מתוכנית» (spec 14
+// §6): when set, the request carries it and the brief gains a fenced program
+// context section. When empty, the payload is byte-identical to v2.11's.
 const F = {
   post: { intent: '', slides: [{ what: '', layout: '' }], caption: '', captionFromSlides: true,
-          cta: '', category: 'general', illustrations: '', generateImages: true },
+          cta: '', category: 'general', illustrations: '', generateImages: true,
+          program_id: '', program_rev: 0 },
   campaign: { brief: '', count: 5, lines: [], caption: '', cta: '',
               category: 'general', illustrations: '', generateImages: true,
-              revise: false, campaign_id: '', instruction: '' },
-  workshop: { w: WORKSHOP_FIELDS(), count: 3,
+              revise: false, campaign_id: '', instruction: '', program_id: '',
+              program_rev: 0 },
+  workshop: { program_id: '', program_rev: 0, note: '', count: 3,
               category: 'general', illustrations: '', generateImages: true },
 };
+
+/* The board's live programs, newest first. Loaded once at boot and topped up on
+   every subscribe() tick, exactly like the AI shelf: a program created in
+   another tab thirty seconds ago must be pickable here without a reload.
+   An unapplied migration 030 leaves this [] and programsMissing() true, and
+   every picker below then explains itself instead of offering an empty list. */
+let programs = [];
+
+async function loadPrograms() {
+  try { programs = await listPrograms(); }
+  catch { programs = []; }
+}
+
+function programById(id) {
+  return programs.find((p) => String(p.id) === String(id)) || null;
+}
 
 /* ── boot (page only — post.js imports this module for howMadeBlock) ── */
 if ($('form')) boot();
@@ -105,9 +131,17 @@ async function boot() {
   // offers a tab someone created yesterday. Loaded BEFORE the first form
   // render on purpose — operator bug report 2026-08-03.
   await loadShelf().catch(() => {});
+  // BEFORE the first form render, same reason as the shelf: the «סדנה» tab is a
+  // picker now, and a picker rendered before its list has loaded is an empty
+  // picker with no explanation.
+  await loadPrograms();
   renderForm();
   await refreshRequests();
-  subscribe(() => { refreshRequests(); loadShelf().catch(() => {}); });
+  subscribe(() => {
+    refreshRequests();
+    loadShelf().catch(() => {});
+    loadPrograms().catch(() => {});
+  });
 }
 
 /* ── the AI-posts shelf + custom tabs (operator 2026-08-03) ─────────────────
@@ -214,15 +248,6 @@ function select(options, value, onchange) {
   return s;
 }
 
-// The datetime-local bridge, the same one post.js and queue.js use. The value
-// that reaches the model is LOCAL wall-clock, never an ISO Z string: see §W.
-function whenInput(value, oninput) {
-  const i = h('input', { class: 'field__input', type: 'datetime-local',
-    value: value || '' });
-  i.addEventListener('input', () => oninput(i.value));
-  return i;
-}
-
 // A clamped stepper. `lo`/`hi` are enforced here AND again in submit(), because
 // a number field accepts a pasted 99, a 0 and an empty box just as happily.
 // On commit the BOX snaps to the value the request will actually carry: a
@@ -243,16 +268,21 @@ function clampCount(v, lo, hi, fallback) {
   return Math.max(lo, Math.min(hi, n));
 }
 
-// The datetime-local bridge, plus one guard the bridge lacks: ECMA-262 ROLLS a
-// calendar-overflow date ('2026-02-29' parses as March 1) instead of failing,
-// and a rolled date would ride the payload as a real evening the therapist
-// never wrote. The written day must survive the round trip, or the value
-// drops to '' exactly like an unparsable one.
-function canonWhen(v) {
-  const s = String(v || '').trim();
-  const out = s ? toLocalInput(fromLocalInput(s)) : '';
-  return out && out.slice(0, 10) === s.slice(0, 10) ? out : '';
-}
+/* WHERE THE DATE GUARD WENT (v2.12, and read this before "restoring" it here).
+   v2.11 owned a `whenInput()` and a `canonWhen()` on this page, because the
+   workshop's date was TYPED here. It is not any more: spec 14 moved the date
+   into the program document, so the datetime-local input and the
+   calendar-overflow guard moved WITH it, verbatim, to app/js/program.js
+   (`valueControl` for the `when` field, `canonWhen` at save).
+
+   The guard itself is unchanged and still load-bearing: ECMA-262 ROLLS
+   '2026-02-29T19:00' to March 1 instead of failing, and a rolled date presented
+   as binding would put the wrong evening on every post. The written day must
+   survive the round trip or the value drops to ''. The READ side of the same
+   contract (workshopWhen) is still in scripts/fulfill.mjs and now runs over the
+   program's `when` field as well as an old inline payload's.
+
+   A second copy here would be a second thing to drift, so there is none. */
 
 /* ── §D: the image-generation switch (spec 09) ─────────────────────────────
    DEFAULT OFF, and it stays off unless someone deliberately turns it on: this
@@ -386,6 +416,7 @@ function postForm() {
       'אם אין התאמה, הוא רושם «רוצים איור חדש» — או, אם תדליקו את המתג למטה, ' +
       'מצייר איור חדש בקו של הלוח.'),
     generateToggle(p),
+    programPullField(p),
 
     submitBar('שליחה ליצירה'));
 }
@@ -435,7 +466,8 @@ function campaignForm() {
     field('מדף בספרייה', categorySelect(c.category, (v) => { c.category = v; })),
     field('איורים', textarea(c.illustrations, (v) => { c.illustrations = v; },
       'תיאור חופשי לכל הסדרה', 2)),
-    generateToggle(c));
+    generateToggle(c),
+    programPullField(c));
 
   const reviseWrap = h('div', {},
     field('איזה קמפיין', campaigns.length
@@ -465,64 +497,148 @@ function campaignForm() {
     submitBar(c.revise ? 'שליחת הרביזיה' : 'שליחה ליצירה'));
 }
 
-/* ── §W: the workshop intake (spec 13) ─────────────────────────────────────
-   A structured form, not a brief. The therapist types the event's real facts
-   once, and the factory writes the series from them. The row this produces is
-   an ordinary kind:'campaign' carrying payload.mode 'workshop', so campaign
-   revision, versions, the author shelf and «איך זה נוצר» all work the day it
-   lands, with no schema change and no new queue kind.
+/* ── §W: the workshop tab, v2.12 (spec 14) ─────────────────────────────────
+   A PICKER, not an intake. The facts of the event live on program.html; what
+   this tab asks for is which program, how many posts, where they land, and one
+   optional note that belongs to this request and not to the program.
 
    Every hint here describes a rule the fulfiller actually enforces (spec 13's
-   content rules, written into briefFor). If a rule changes there, change the
-   sentence here: a form that promises a rule the factory no longer keeps is
-   worse than a form that promises nothing. */
+   content rules, still written into briefFor, now fed from the program). If a
+   rule changes there, change the sentence here: a form that promises a rule the
+   factory no longer keeps is worse than a form that promises nothing. */
 
 const OPT = ' (לא חובה)';
 
+// The «אין תוכניות» state, shared by all three tabs. It never says "something
+// went wrong": there are exactly two reasons the list is empty, they need
+// different actions, and the person reading this can do one of them.
+function noProgramsNote() {
+  return programsMissing()
+    ? h('p', { class: 'ai-hint' },
+        'התוכניות עוד לא הופעלו בלוח הזה (מיגרציה 030), ולכן אי אפשר לבחור ' +
+        'תוכנית. המפעיל מריץ את זה בעצמו, וכל שאר הכלי עובד כרגיל.')
+    : h('p', { class: 'ai-hint' },
+        'עוד לא נוצרה תוכנית בלוח הזה. פותחים אחת בעמוד «יצירת תוכנית», ' +
+        'ממלאים מה שידוע, וחוזרים לכאן.');
+}
+
+/* ── §R: THE RECEIPT IS FROZEN AT PICK TIME ────────────────────────────────
+   `program_rev` is a RECEIPT: the version of the program the human was looking
+   at when they decided to send this request. The fulfiller compares it against
+   the live rev at claim and tells the therapist, in words, whether the details
+   moved in between. That alarm is the whole point of the column.
+
+   THE BUG THIS REPLACED, because it is subtle enough to be re-introduced by a
+   tidy-up. The rev used to be read at SUBMIT time, out of the `programs` array
+   that subscribe() refreshes every ten seconds. So: a therapist picks a program
+   whose option reads «גרסה 1»; a colleague changes the price and saves; the poll
+   quietly refreshes the array while the OPTION ON SCREEN still says «גרסה 1»;
+   the therapist presses send. The payload got rev 2, the fulfiller compared 2
+   against a live 2, and the brief said «לא היה שינוי בתוכנית בין שליחת הבקשה
+   לבין הכתיבה» — an affirmative all-clear, printed at the exact moment the
+   price had in fact changed behind the therapist's back. The alarm disarmed
+   itself precisely when it was needed.
+
+   So the rev is captured from the row that BACKS THE LABEL BEING RENDERED, and
+   never re-read afterwards:
+   · programSelect closes over a SNAPSHOT of the rows its <option>s were built
+     from, so a refresh between paint and click cannot substitute a newer rev;
+   · freezeRev() re-takes it whenever a form is (re)rendered, which is the only
+     moment a fresh label reaches the screen (renderForm runs on mode switch, on
+     pick and after submit — never on the background poll);
+   · submit() reads the frozen number and does not consult `programs` for it.
+   The receipt is therefore "what the human saw", by construction rather than by
+   luck. ────────────────────────────────────────────────────────────────── */
+
+// One picker, three tabs. `optional` decides whether the empty option means
+// «בלי תוכנית» (post/campaign) or «בחרו תוכנית…» (a workshop, where it is the
+// whole request). onchange receives (id, rev) where `rev` belongs to the row
+// whose label the person actually clicked.
+function programSelect(value, onchange, { optional } = {}) {
+  // The rows these options are rendered FROM. Held, not re-read: `programs` is
+  // replaced wholesale by every poll tick.
+  const shown = programs.slice();
+  const opts = [
+    { key: '', label: optional ? 'בלי תוכנית' : 'בחרו תוכנית…' },
+    ...shown.map((p) => ({
+      key: p.id,
+      label: `${String(p.title || 'ללא שם')} · גרסה ${p.rev || 1}`,
+    })),
+  ];
+  const s = h('select', { class: 'ai-select' },
+    opts.map((o) => h('option', { value: o.key, selected: o.key === value }, o.label)));
+  s.addEventListener('change', () => {
+    const row = shown.find((p) => String(p.id) === String(s.value)) || null;
+    onchange(s.value, revOf(row));
+  });
+  return s;
+}
+
+const revOf = (row) => {
+  const n = Math.round(Number(row && row.rev));
+  return Number.isFinite(n) && n >= 1 ? n : 1;
+};
+
+/* Re-freeze a form model's receipt from the row that is about to be RENDERED.
+   Called at the top of every form that carries a picker, which covers the edge
+   the pick handler cannot: switching to «קמפיין» and back re-paints a label
+   that may now read «גרסה 3», and the receipt has to move with the label or it
+   describes a screen nobody ever saw. A program that vanished from the board
+   drops the selection rather than leaving a pointer at nothing. */
+function freezeRev(model) {
+  if (!model.program_id) { model.program_rev = 0; return; }
+  const row = programById(model.program_id);
+  if (!row) { model.program_id = ''; model.program_rev = 0; return; }
+  model.program_rev = revOf(row);
+}
+
+// The frozen receipt, read at submit. Never `programById(...).rev`.
+function frozenRev(model) {
+  const n = Math.round(Number(model && model.program_rev));
+  return Number.isFinite(n) && n >= 1 ? n : 1;
+}
+
+// What the picked program actually holds, in one line, plus the way back to it.
+// A therapist who is about to spend the factory's time on a program deserves to
+// see that six of its ten fields are still empty BEFORE they press send.
+function programSummary(id) {
+  const p = programById(id);
+  if (!p) return null;
+  const fields = Array.isArray(p.fields) ? p.fields : [];
+  const filled = fields.filter((f) => String((f && f.value) || '').trim()).length;
+  return h('p', { class: 'ai-hint' },
+    `${filled} מתוך ${fields.length} שדות מלאים · גרסה ${p.rev || 1} · עודכן ` +
+      fmtDate(p.updated_at || p.created_at) + ' · ',
+    h('a', { href: pageLink('program.html', { id: p.id }) }, 'פתיחת התוכנית'),
+    ' (שדה ריק פשוט לא יופיע בפוסטים: אנחנו לא ממציאים תאריך, מחיר או פרטים ' +
+    'על המנחה.)');
+}
+
 function workshopForm() {
   const s = F.workshop;
-  const w = s.w;
+  // §R: the label about to be painted and the receipt must agree.
+  freezeRev(s);
+  const has = programs.length > 0;
 
   return h('div', { class: 'ai-formbody' },
     h('p', { class: 'ai-hint' },
-      'ממלאים כאן את הפרטים האמיתיים של הסדנה, והמפעל בונה מהם סדרת פוסטים ' +
-      'לגלריה. שדה שתשאירו ריק פשוט לא יופיע בפוסטים: אנחנו לא ממציאים ' +
-      'תאריך, מחיר או פרטים על המנחה.'),
+      'בוחרים תוכנית, והמפעל בונה ממנה סדרת פוסטים לגלריה. הפרטים נקראים ' +
+      'מהתוכנית ברגע שהמפעל מתחיל לכתוב, כך שעדכון שתעשו בתוכנית עד אז ייכנס ' +
+      'לפוסטים.'),
 
-    field('שם הסדנה', input(w.title, (v) => { w.title = v; },
-      'איך קוראים לסדנה')),
-    field('על מה הסדנה', textarea(w.about, (v) => { w.about = v; },
-      'כמה משפטים בשפה שלכם. למשל: ארבעה מפגשים להורים לילדים קטנים, על הרגעים ' +
-      'שבהם נגמרת הסבלנות ומה עושים איתם.', 5),
-      'שני השדות האלה חייבים להיות מלאים. כל השאר לא חובה.'),
+    has
+      ? field('איזו תוכנית',
+          programSelect(s.program_id, (v, rev) => {
+            s.program_id = v; s.program_rev = v ? rev : 0; renderForm();
+          }),
+          'התוכניות של הלוח הזה, החדשה למעלה.')
+      : field('איזו תוכנית', noProgramsNote()),
+    programSummary(s.program_id),
 
-    field('מי מנחה' + OPT, input(w.facilitator, (v) => { w.facilitator = v; },
-      'שם, ושורה אחת עליו או עליה'),
-      'ייכתב בדיוק כפי שתכתבו כאן. המפעל לא מוסיף תארים והסמכות מעצמו.'),
-
-    field('מתי' + OPT, whenInput(w.when, (v) => { w.when = v; }),
-      'תאריך ושעה לפי השעון המקומי שלכם. יום בשבוע והתאריך ייכתבו בפוסטים ' +
-      'מהערך הזה בלבד.'),
-    field('הערה על המועד' + OPT, input(w.when_note, (v) => { w.when_note = v; },
-      'למשל: סדרה של ארבעה מפגשים, או: המועד יתואם בהמשך'),
-      'אם עוד אין תאריך מדויק, כתבו כאן מה כן ידוע, וזה יופיע במקומו.'),
-
-    field('איפה' + OPT, input(w.where, (v) => { w.where = v; },
-      'זום, או כתובת')),
-    field('למי זה מיועד' + OPT, input(w.audience, (v) => { w.audience = v; },
-      'למשל: הורים לילדים עד גיל שש')),
-    field('עלות' + OPT, input(w.cost, (v) => { w.cost = v; },
-      'טקסט חופשי. למשל: 120 ש"ח למפגש')),
-    h('p', { class: 'ai-hint' },
-      'שדה העלות ריק פירושו שהפוסטים לא יזכירו מחיר בכלל. הם לא יכתבו «חינם» ' +
-      'ולא ינחשו סכום.'),
-
-    field('קישור להרשמה' + OPT, input(w.register_url, (v) => { w.register_url = v; },
-      'https://')),
-    field('מה משתתפים מקבלים' + OPT, textarea(w.takeaways, (v) => { w.takeaways = v; },
-      'למשל: כלים מעשיים לרגע הסערה, וקבוצה קטנה שאפשר לדבר בה', 3)),
-    field('דגשים לשיווק' + OPT, textarea(w.emphasis, (v) => { w.emphasis = v; },
-      'מה חשוב שיודגש, או מה עדיף לא לכתוב', 3)),
+    field('דגשים לבקשה הזאת' + OPT, textarea(s.note, (v) => { s.note = v; },
+      'מה חשוב דווקא בסדרה הזאת. למשל: להדגיש שיש עוד שני מקומות, או: בלי ' +
+      'להזכיר מחיר הפעם.', 3),
+      'ההערה הזאת שייכת לבקשה, לא לתוכנית: היא לא נשמרת בתוכנית ולא משנה אותה.'),
 
     field('כמה פוסטים', numberInput(s.count, 1, 5, (v) => { s.count = v; }),
       'ברירת המחדל היא שלושה: הכרזה, פוסט ערך, ותזכורת אחרונה לפני המועד. ' +
@@ -542,6 +658,24 @@ function workshopForm() {
     submitBar('שליחה ליצירה'));
 }
 
+// The OPTIONAL picker on «פוסט אחד» and «קמפיין». Hidden entirely when the board
+// has no programs, because an empty optional control is pure noise on a form
+// whose whole virtue is that one field is required and the rest are not.
+function programPullField(model) {
+  // §R, same reason as workshopForm: re-freeze from the row backing the label
+  // this call is about to render.
+  freezeRev(model);
+  if (!programs.length) return null;
+  return h('div', {},
+    field('משיכת פרטים מתוכנית' + OPT,
+      programSelect(model.program_id, (v, rev) => {
+        model.program_id = v; model.program_rev = v ? rev : 0; renderForm();
+      }, { optional: true }),
+      'העובדות של התוכנית ייקראו לבקשה הזאת כרקע. הן לא נכתבות אוטומטית ' +
+      'לפוסט: המפעל משתמש בהן רק כשהן רלוונטיות למה שביקשתם.'),
+    programSummary(model.program_id));
+}
+
 function submitBar(label) {
   const btn = h('button', { class: 'btn btn--primary', type: 'button', onclick: submit }, label);
   return h('div', { class: 'ai-submit' },
@@ -552,6 +686,21 @@ function submitBar(label) {
 }
 
 /* ── submit ── */
+
+/* The optional program pointer on a post or a campaign. MUTATES the payload,
+   and only when a program was actually chosen — that is the whole point. A
+   payload with no program must come out BYTE-IDENTICAL to the one v2.11 wrote,
+   because the fulfiller's old-shape briefs are byte-compared against it and
+   because a key that is present-but-empty reads downstream as "a program was
+   picked and then lost", which is a different and much worse fact. */
+function addProgram(payload, model) {
+  const prog = programById(model.program_id);
+  if (!prog) return payload;
+  payload.program_id = prog.id;
+  // §R: the FROZEN receipt, not prog.rev. prog is only consulted for existence.
+  payload.program_rev = frozenRev(model);
+  return payload;
+}
 
 async function submit() {
   if (submitting) return;
@@ -564,31 +713,20 @@ async function submit() {
 
   if (mode === 'workshop') {
     const s = F.workshop;
-    const w = s.w;
-    if (!w.title.trim()) { toast('כתבו קודם את שם הסדנה', 'err'); return; }
-    if (!w.about.trim()) { toast('כתבו על מה הסדנה', 'err'); return; }
-    // All eleven keys ride every time, empty ones included: the brief shows
-    // the session exactly which facts it was and was NOT given, and an absent
-    // key would look like a field this build forgot rather than a field the
-    // therapist left blank on purpose.
+    const prog = programById(s.program_id);
+    if (!prog) { toast('בחרו קודם תוכנית', 'err'); return; }
+    // THE v2.12 SHAPE. No `workshop:{…}` object: the facts are in the program,
+    // and the request carries a POINTER plus the rev it pointed at. The
+    // fulfiller re-reads the program live at claim, so a detail edited between
+    // this click and that claim is the detail that gets written; program_rev is
+    // what lets it say so out loud.
     payload = {
       mode: 'workshop',
-      workshop: {
-        title: w.title.trim(),
-        about: w.about.trim(),
-        facilitator: w.facilitator.trim(),
-        // Normalised through the bridge in both directions, so what lands is
-        // canonical local wall-clock; unparsable AND rolled-over values drop
-        // to '' (canonWhen).
-        when: canonWhen(w.when),
-        when_note: w.when_note.trim(),
-        where: w.where.trim(),
-        audience: w.audience.trim(),
-        cost: w.cost.trim(),
-        register_url: w.register_url.trim(),
-        takeaways: w.takeaways.trim(),
-        emphasis: w.emphasis.trim(),
-      },
+      program_id: prog.id,
+      // §R: the rev of the row whose label they picked, NOT prog.rev, which the
+      // background poll may have moved since they looked.
+      program_rev: frozenRev(s),
+      note: s.note.trim(),
       count: clampCount(s.count, 1, 5, 3),
       category: s.category,
       illustrations: s.illustrations.trim(),
@@ -611,6 +749,7 @@ async function submit() {
       // OFF, and an explicit false is the record of what the therapist chose.
       generate_images: !!p.generateImages,
     };
+    addProgram(payload, p);
   } else {
     const c = F.campaign;
     if (c.revise) {
@@ -630,6 +769,7 @@ async function submit() {
         // §D — in campaign mode the switch applies to every member post.
         generate_images: !!c.generateImages,
       };
+      addProgram(payload, c);
     }
   }
 
@@ -638,11 +778,12 @@ async function submit() {
     await ensureName();                 // the request carries who asked for it
     await createGenRequest({ kind, payload });
     toast('הבקשה נכנסה לתור ✓', 'ok');
-    // The workshop's EVENT fields reset, its settings do not: the next request
-    // is a different event, and leaving a facilitator or an address behind is
-    // how a second workshop gets announced with the first one's details. Count,
-    // shelf, illustrations and the image switch survive, like everywhere else.
-    if (mode === 'workshop') F.workshop.w = WORKSHOP_FIELDS();
+    // v2.12: the only per-REQUEST text a workshop still carries is the note, so
+    // that is what resets. The chosen program does NOT: a team usually sends two
+    // or three requests about the same workshop, and re-picking it every time
+    // was the friction spec 14 set out to remove. Count, shelf, illustrations
+    // and the image switch survive, like everywhere else.
+    if (mode === 'workshop') F.workshop.note = '';
     else if (kind === 'post') F.post.intent = '';
     else if (!F.campaign.revise) F.campaign.brief = '';
     else F.campaign.instruction = '';
@@ -791,13 +932,24 @@ function summarise(r) {
   const p = r.payload || {};
   if (r.kind === 'campaign') {
     if (p.revise) return `רביזיה ל־${p.revise.campaign_id}: ${p.revise.instruction || ''}`;
-    // §W. `workshop` is an OBJECT, so the campaign fallback below would print
-    // «[object Object]» the moment a workshop row reaches this list. It reads
-    // the title, and says how many posts were asked for.
+    // §W. Two shapes live here forever (see §W above): the v2.12 pointer
+    // {program_id, program_rev} and v2.11's inline `workshop` OBJECT — which the
+    // campaign fallback below would print as «[object Object]» the moment an old
+    // queued row reached this list. Both read the same way to a therapist: the
+    // name of the thing, and how many posts were asked for.
     if (p.mode === 'workshop') {
+      const n = Number(p.count) || 3;
+      if (p.program_id) {
+        const prog = programById(p.program_id);
+        // The row records which REV it was sent against; if the program has moved
+        // since, say so here rather than only in the fulfiller's notes.
+        const title = prog ? String(prog.title || 'ללא שם') : 'תוכנית שלא נמצאה';
+        const moved = prog && Number(prog.rev) !== Number(p.program_rev)
+          ? ` · התוכנית עודכנה מאז (גרסה ${p.program_rev} ⟵ ${prog.rev})` : '';
+        return `תוכנית «${title}» · ${n} פוסטים${moved}`;
+      }
       const w = p.workshop || {};
       const title = String(w.title || '').trim() || 'ללא שם';
-      const n = Number(p.count) || 3;
       return `סדנה «${title}» · ${n} פוסטים`;
     }
     return p.brief || 'קמפיין';

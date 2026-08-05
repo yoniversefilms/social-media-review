@@ -530,6 +530,55 @@ class SupabaseDriver {
     throw await restError(res);
   }
 
+  // ---- v2.12 programs (migration 030) ----
+  // Live rows are filtered CLIENT-side (live()), never with a
+  // `deleted_at=is.null` param — same 42703 reasoning as assets, photos and
+  // folders, and the column arrives in this very migration.
+  listPrograms() {
+    return this.select('sm_programs',
+      `select=*&board_key=eq.${enc(this.board)}&order=created_at.desc`);
+  }
+
+  insertProgram(row) {
+    return this.insert('sm_programs', row);
+  }
+
+  /* THE OPTIMISTIC GUARD, and the reason this is not `this.update()`.
+     `rev=eq.<expected>` rides the URL beside the id, so a save that lost a race
+     matches ZERO rows — and this returns null rather than a row. That null is
+     the whole conflict signal: PostgREST does not error on an empty match, so a
+     caller that only looked at "did it throw" would report success and the
+     other tab's edit would be gone. Same shape as savePostSlides'
+     expected_updated_at, one table over.
+     expectedRev null/undefined = an UNGUARDED stamp (the soft delete + undo
+     pair, which must work whatever the rev is doing).
+
+     THE SECOND HALF OF THE GUARD IS `deleted_at=is.null`, and it is not
+     decoration, it is the fix for a real hole: a program deleted while an editor
+     was open left that editor's rev still matching, so its next save PATCHed
+     straight into the tombstone, matched one row, and reported «נשמר ✓» for a
+     program nobody could see any more. softDeleteProgram's rev bump closes the
+     same hole from the other side; BOTH are here because they fail
+     independently, and because only this one also catches a delete that races
+     the save inside the same rev.
+
+     It rides ONLY with expectedRev, never on the unguarded stamps: on those it
+     would make restore impossible, since the row being restored is by
+     definition the deleted one.
+
+     `deleted_at` is created by the same migration as the table, so naming it
+     here cannot 42703 a board that HAS the table (the 019 trap does not reach
+     this call); on a board with no table at all the call never happens. */
+  async patchProgram(id, fields, expectedRev) {
+    let filter = `board_key=eq.${enc(this.board)}&id=eq.${enc(id)}`;
+    if (expectedRev !== null && expectedRev !== undefined) {
+      filter += `&rev=eq.${enc(expectedRev)}&deleted_at=is.null`;
+    }
+    const rows = await this.req('PATCH', `sm_programs?${filter}`, fields);
+    if (Array.isArray(rows)) return rows[0] || null;
+    return rows || null;
+  }
+
   // Studio reconcile: a plain bulk INSERT of the rows the board is missing.
   // The partial unique index (board_key, kind, name) where source='studio'
   // makes a racing second reconcile fail loudly instead of duplicating — 409
@@ -865,6 +914,26 @@ class LocalDriver {
 
   insertFolder(row) {
     return this.req('POST', '/folders', row);
+  }
+
+  // ---- v2.12 programs (serve.mjs /api/programs) ----
+  // serve.mjs has no filter language, so the rev guard rides the BODY as
+  // `expected_rev` and the server does the compare-and-set inside one turn of
+  // its single-threaded event loop — the same all-or-nothing the PostgREST
+  // `rev=eq.<n>` filter gives us in the cloud. A lost race answers 200 with
+  // `null`, which is the identical signal to the caller.
+  async listPrograms() {
+    return (await this.req('GET', '/programs')) || [];
+  }
+
+  insertProgram(row) {
+    return this.req('POST', '/programs', row);
+  }
+
+  patchProgram(id, fields, expectedRev) {
+    const body = { ...fields };
+    if (expectedRev !== null && expectedRev !== undefined) body.expected_rev = expectedRev;
+    return this.req('PATCH', `/programs/${enc(id)}`, body);
   }
 
   // ---- drafts (serve.mjs /api/drafts, v1.3) ----
@@ -2658,4 +2727,242 @@ export function assetChain(rows, id) {
     }
   }
   return { node, ancestors, descendants };
+}
+
+// ---------------------------------------------------------------- v2.12 programs
+/* «יצירת תוכנית» (spec 14). A PROGRAM is the one long-lived, team-editable
+   document on this board: a title plus an ORDERED list of {id, label, value}
+   rows. Spec 13's workshop intake was a form filled once; this is the same facts
+   as an object that keeps being true, and keeps being corrected.
+
+   Three properties the rest of the app leans on, all of them enforced here:
+
+   1. `rev` IS THE FRESHNESS CONTRACT. Every save sends rev = expected + 1 under
+      a `rev=eq.<expected>` guard. A lost race matches zero rows and this throws
+      an Error carrying `.conflict = true` — never a silent clobber. A generation
+      request stores {program_id, program_rev} at submit and the fulfiller
+      re-reads the program LIVE at claim, so the rev is what proves whether the
+      words were written from what the therapist saw.
+
+   2. DELETE IS SOFT and UNGUARDED. `deleted_at` is a stamp (029 discipline) and
+      the delete/undo pair deliberately skips the rev filter: an undo that fails
+      because somebody edited the row in between would be an undo that lies.
+
+   3. DEGRADATION IS SILENT ON READ, LOUD ON WRITE. Migration 030 is on the
+      operator's punch list, so until it lands `sm_programs` does not exist. The
+      list read answers [] and raises `programsMissing()`; the writes throw one
+      Hebrew sentence. NEVER a `deleted_at=is.null` query param — the 019 trap
+      (see the 029 wrappers above): naming a column that is not there 42703s the
+      whole list. */
+
+const MIGRATION_030 = 'התוכניות עוד לא הופעלו בשרת (מיגרציה 030)';
+
+// The seeded spec-13 keys. Listed here, not because this file renders them, but
+// because they are the ids fulfill.mjs maps to the spec-13 content rules — a
+// second surface minting a program must use these exact strings or the date
+// fidelity rule silently stops applying. `f-<hex>` is the custom-field shape and
+// can never collide with one of these.
+export const PROGRAM_SEED_IDS = [
+  'about', 'facilitator', 'when', 'when_note', 'where',
+  'audience', 'cost', 'register_url', 'takeaways', 'emphasis',
+];
+
+// Caps, enforced on the way IN so no surface can write a row the editor cannot
+// then open. Generous on purpose: a program's «על מה» is prose, and refusing at
+// 20k characters is a limit nobody meets by accident.
+const PROGRAM_MAX_FIELDS = 200;
+const PROGRAM_MAX_LABEL = 120;
+const PROGRAM_MAX_VALUE = 20000;
+const PROGRAM_MAX_TITLE = 200;
+
+let programsMissingSeen = false;
+
+// Did the last listPrograms() find the table? The program page shows a Hebrew
+// explanation instead of an empty state, and the pickers on create-ai/build hide
+// themselves rather than offering a list that can never fill.
+export function programsMissing() {
+  return programsMissingSeen;
+}
+
+function needsMigration030(e) {
+  if (!e) return false;
+  if (MIGRATION_CODES.has(String(e.code || ''))) return true;
+  const msg = String((e && e.message) || '');
+  return /sm_programs|\bprograms\b/i.test(msg) &&
+    (e.status === 400 || e.status === 401 || e.status === 403 || e.status === 404);
+}
+
+// Shape guard for the ordered field array. Ids are deduped rather than refused:
+// a duplicate id is invisible to the therapist and would break the editor's
+// keying, so a repeat gets a fresh one instead of an error nobody can act on.
+function normalizeProgramFields(rows) {
+  const list = Array.isArray(rows) ? rows : [];
+  if (list.length > PROGRAM_MAX_FIELDS) {
+    throw new Error(`אפשר עד ${PROGRAM_MAX_FIELDS} שדות בתוכנית אחת`);
+  }
+  const seen = new Set();
+  return list.map((r) => {
+    let id = String((r && r.id) || '').trim().slice(0, 64);
+    if (!id || seen.has(id)) id = 'f-' + randHex(8);
+    seen.add(id);
+    const label = String((r && r.label) != null ? r.label : '');
+    const value = String((r && r.value) != null ? r.value : '');
+    if (label.length > PROGRAM_MAX_LABEL) {
+      throw new Error(`שם שדה ארוך מדי (עד ${PROGRAM_MAX_LABEL} תווים)`);
+    }
+    if (value.length > PROGRAM_MAX_VALUE) {
+      throw new Error(`תוכן של שדה ארוך מדי (עד ${PROGRAM_MAX_VALUE} תווים)`);
+    }
+    return { id, label, value };
+  });
+}
+
+function cleanProgramTitle(t) {
+  const s = String(t == null ? '' : t).trim();
+  if (!s) throw new Error('צריך שם לתוכנית');
+  if (s.length > PROGRAM_MAX_TITLE) {
+    throw new Error(`שם התוכנית ארוך מדי (עד ${PROGRAM_MAX_TITLE} תווים)`);
+  }
+  return s;
+}
+
+// Every LIVE program on this board, newest first. Never throws for an unapplied
+// 030 — a missing table costs the app a feature, never a page.
+export async function listPrograms() {
+  try {
+    const rows = live(await need().listPrograms());
+    programsMissingSeen = false;
+    return rows.sort((a, b) => String(b.created_at).localeCompare(String(a.created_at)));
+  } catch (e) {
+    if (!needsMigration030(e)) throw e;
+    if (!programsMissingSeen) {
+      programsMissingSeen = true;
+      console.warn(
+        'listPrograms(): sm_programs is not there yet (migration 030 unapplied). ' +
+        'The program page explains itself and the pickers on «יצירה עם AI» and ' +
+        '«בונים פוסט» stay hidden until it is applied.');
+    }
+    return [];
+  }
+}
+
+// One live program by id, or null. Reads through the list wrapper on purpose:
+// the client-side deleted filter and the unapplied-030 degradation are defined
+// exactly once.
+export async function getProgram(id) {
+  if (!id) return null;
+  const rows = await listPrograms();
+  return rows.find((p) => String(p.id) === String(id)) || null;
+}
+
+export async function createProgram({ title, fields } = {}) {
+  const me = await ensureName();
+  const row = {
+    title: cleanProgramTitle(title),
+    fields: normalizeProgramFields(fields),
+    // `rev` and the timestamps are left to their column defaults: a client that
+    // sends rev:1 reads as if it owned the column, and one day it would send 2.
+    updated_by: me.name,
+  };
+  try {
+    return await need().insertProgram(row);
+  } catch (e) {
+    if (needsMigration030(e)) throw migrationError(MIGRATION_030);
+    throw e;
+  }
+}
+
+/* The guarded save. `expected_rev` is the rev the editor LOADED; the row it
+   writes carries expected_rev + 1, and the update only matches while the stored
+   rev is still the expected one.
+
+   The caller must handle `.conflict`: the honest recovery is to re-read the
+   program, tell the person somebody edited it in the meantime, and give them
+   back their own unsaved text. Silently retrying with the fresh rev would be
+   the clobber this guard exists to prevent. */
+export async function saveProgram(id, { title, fields, expected_rev } = {}) {
+  if (!id) throw new Error('חסר מזהה תוכנית');
+  const prev = Math.round(Number(expected_rev));
+  // Number('') is 0 and Number(undefined) is NaN — neither is nullish, so the
+  // `?? 1` idiom would be dead code here. Clamped explicitly instead.
+  if (!Number.isFinite(prev) || prev < 1) throw new Error('חסרה גרסת התוכנית לשמירה');
+  const me = await ensureName();
+  const fieldsOut = normalizeProgramFields(fields);
+  const titleOut = cleanProgramTitle(title);
+  let row;
+  try {
+    row = await need().patchProgram(id, {
+      title: titleOut, fields: fieldsOut, rev: prev + 1, updated_by: me.name,
+    }, prev);
+  } catch (e) {
+    if (needsMigration030(e)) throw migrationError(MIGRATION_030);
+    throw e;
+  }
+  if (!row) {
+    const e = new Error('מישהו ערך את התוכנית בינתיים');
+    e.conflict = true;
+    throw e;
+  }
+  return row;
+}
+
+/* Soft delete, and its undo. Deliberately NOT rev-GUARDED (an undo that failed
+   because somebody edited in between would be an undo that lies) — but both of
+   them BUMP the rev, and that is load-bearing.
+
+   WHY THE BUMP. `rev` is the whole freshness contract, and deleting a program IS
+   a change to it. Without the bump, an editor that was open when the delete
+   landed still held a matching rev, so its next save PATCHed into the tombstone,
+   matched one row, and toasted «נשמר ✓» over a program nobody could see. The bump
+   makes that save lose the race like any other stale save, which routes it into
+   the conflict path, which now tells the person their program was deleted and
+   hands their text back for copying. patchProgram's `deleted_at=is.null` filter
+   closes the same hole independently; a guard this cheap gets both halves.
+
+   The read is fresh rather than a caller-supplied rev on purpose: a delete
+   pressed from a list rendered thirty seconds ago would otherwise write a rev
+   that moves BACKWARDS. */
+async function stampProgram(id, fields, what) {
+  if (!id) throw new Error('חסר מזהה תוכנית');
+  const me = await ensureName();
+  try {
+    // Unfiltered by live(), because a restore's subject is the deleted row.
+    const all = await need().listPrograms();
+    const cur = (Array.isArray(all) ? all : []).find((p) => String(p.id) === String(id));
+    const rev = Math.round(Number(cur && cur.rev));
+    const next = Number.isFinite(rev) && rev >= 1 ? rev + 1 : undefined;
+    return await need().patchProgram(id,
+      { ...fields, updated_by: me.name, ...(next ? { rev: next } : {}) }, null);
+  } catch (e) {
+    if (needsMigration030(e)) throw migrationError(what);
+    throw e;
+  }
+}
+
+export function softDeleteProgram(id) {
+  return stampProgram(id, { deleted_at: new Date().toISOString() }, MIGRATION_030);
+}
+
+export function restoreProgram(id) {
+  return stampProgram(id, { deleted_at: null }, MIGRATION_030);
+}
+
+/* Program photos ride sm_assets with a `program:<id>` TAG — the exact pattern
+   the `folder:` tags use, and zero photo schema. A photo can therefore be in a
+   folder AND on a program at the same time (the tags do not collide: the two
+   prefixes are different and every consumer filters by its own).
+   The id is a uuid from the server, so the tag needs no escaping; it is built
+   through this one function anyway, so the string exists once. */
+export function programTag(program_id) {
+  return 'program:' + String(program_id || '');
+}
+
+// The live assets tagged onto one program, newest first. listAssets() already
+// applied the soft-delete filter, so a deleted photo leaves the program grid for
+// the same reason it leaves the library.
+export async function listProgramAssets(program_id) {
+  if (!program_id) return [];
+  const tag = programTag(program_id);
+  const rows = await listAssets();
+  return rows.filter((a) => (Array.isArray(a.tags) ? a.tags : []).includes(tag));
 }

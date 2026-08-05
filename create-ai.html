@@ -86,8 +86,12 @@ document.documentElement.dataset.theme=(t==='dark'||t==='light')?t:
   </section>
 
   <!-- spec 13: «סדנה» is a THIRD tab, not a checkbox inside «קמפיין», because
-       the intake it opens is a different form (an event's real facts) even
-       though the row it writes is an ordinary kind:'campaign'. -->
+       what it opens is a different thing (a real event) even though the row it
+       writes is an ordinary kind:'campaign'.
+       spec 14 (v2.12): the tab stopped carrying the eleven-field intake. The
+       event's facts live on program.html now, and this tab picks one and adds
+       the settings that belong to THIS request. The word stays «סדנה» because
+       that is what the first programs are; the payload calls it a program. -->
   <div class="ai-modes" role="tablist" aria-label="סוג הבקשה">
     <button class="ai-mode is-on" id="mode-post" type="button" role="tab" aria-selected="true">פוסט אחד</button>
     <button class="ai-mode" id="mode-campaign" type="button" role="tab" aria-selected="false">קמפיין</button>

@@ -1440,3 +1440,219 @@ hr, .rule {
   .upbar__fill { transition: none; }
   .upbar.is-active .upbar__fill { animation: none; }
 }
+
+/* ===== v2.12 program hub (spec 14) ===== */
+/* «יצירת תוכנית»: the list of living program documents (program.html) and the
+   editor inside one — title, ordered field rows, the lock that turns those rows
+   into drag handles, and the program's photo grid. RTL-first, same tokens as
+   everything above; nothing here overrides a shared class. */
+
+.pg-wrap { max-width: 1080px; margin: 0 auto; padding: 0 20px 64px; }
+
+.pg-head { padding: 22px 0 6px; max-width: 62ch; }
+.pg-head h1 { margin: 0 0 8px; font-size: 1.5rem; }
+.pg-lede { margin: 0 0 12px; color: var(--ink-soft); line-height: 1.6; }
+
+.pg-page { display: flex; flex-direction: column; gap: 18px; padding-top: 10px; }
+.pg-hint { margin: 6px 0 0; font-size: .8rem; color: var(--ink-soft); line-height: 1.5; }
+.pg-h2 { margin: 0 0 10px; font-size: 1.05rem; }
+
+/* ---- the list ---- */
+.pg-listbar { display: flex; align-items: center; gap: 14px; flex-wrap: wrap; }
+.pg-listbar .pg-hint { margin: 0; max-width: 52ch; }
+.pg-empty { max-width: 52ch; line-height: 1.6; }
+
+.pg-cards { display: grid; grid-template-columns: repeat(auto-fill, minmax(280px, 1fr)); gap: 14px; }
+.pg-card { padding: 14px; display: flex; flex-direction: column; gap: 8px; }
+.pg-card__title { font-weight: 700; font-size: 1.02rem; color: var(--ink); text-decoration: none; }
+.pg-card__title:hover { color: var(--accent); }
+.pg-card__meta {
+  margin: 0; display: flex; flex-wrap: wrap; gap: 4px 10px;
+  font-size: .78rem; color: var(--ink-soft);
+}
+.pg-card__acts { display: flex; gap: 8px; margin-top: auto; padding-top: 4px; }
+
+/* The version chip. A program's `rev` is the freshness contract with the
+   factory, so it is shown wherever a program is shown, never only in the
+   editor. */
+.pg-chip {
+  display: inline-block; padding: 2px 9px; border-radius: 999px;
+  background: color-mix(in srgb, var(--accent) 14%, transparent);
+  color: var(--accent); font-size: .76rem; font-weight: 600;
+}
+
+/* The unapplied-030 explanation, and the "no such program" card. Same plate as
+   the honest-latency note on create-ai: a page-level statement, not a toast. */
+.pg-mig { padding: 16px 18px; max-width: 62ch; }
+.pg-mig h2 { margin: 0 0 8px; font-size: 1.05rem; }
+.pg-mig p { margin: 0 0 8px; line-height: 1.6; }
+.pg-mig .btn { margin-top: 4px; }
+
+/* ---- the editor ---- */
+.pg-backbar { display: flex; align-items: center; gap: 12px; flex-wrap: wrap; }
+.pg-back { color: var(--ink-soft); text-decoration: none; font-size: .9rem; }
+.pg-back:hover { color: var(--accent); }
+.pg-backbar .pg-hint { margin: 0; }
+
+/* Somebody else saved while there is unsaved text here. Loud, because the next
+   save is going to open a merge dialog and a person who was not warned reads
+   that dialog as a failure. */
+.pg-stale {
+  padding: 10px 14px;
+  border-inline-start: 3px solid var(--accent);
+  border-radius: 0 var(--radius) var(--radius) 0;
+  background: color-mix(in srgb, var(--accent) 6%, var(--paper));
+  font-size: .9rem; line-height: 1.6;
+}
+
+.pg-title { margin: 0; max-width: 46ch; }
+
+.pg-lockbar { display: flex; align-items: center; gap: 12px; flex-wrap: wrap; }
+.pg-lockbar .pg-hint { margin: 0; max-width: 52ch; }
+.pg-lock.is-on { background: var(--accent); color: var(--solid-ink); border-color: var(--accent); }
+
+.pg-rows { display: flex; flex-direction: column; gap: 10px; }
+.pg-row {
+  padding: 10px 12px; border: 1px solid var(--line); border-radius: var(--radius);
+  background: var(--paper); display: flex; flex-direction: column; gap: 8px;
+}
+.pg-row__head { display: flex; align-items: center; gap: 8px; }
+.pg-row textarea, .pg-row .field__input { width: 100%; min-width: 0; }
+.pg-label { flex: 1 1 auto; font-weight: 600; }
+.pg-label--static { padding: 6px 0; }
+.pg-value--static { margin: 0; font-size: .9rem; line-height: 1.55; white-space: pre-wrap; }
+
+.pg-x {
+  appearance: none; border: none; background: none; cursor: pointer; font: inherit;
+  color: var(--ink-soft); padding: 4px 6px; border-radius: 6px;
+}
+.pg-x:hover { background: var(--line); color: var(--ink); }
+.pg-x:disabled { opacity: .3; cursor: default; }
+.pg-moves { display: flex; gap: 2px; }
+.pg-add { align-self: flex-start; }
+
+/* ---- reorder mode ----
+   `touch-action: none` is what makes a pointer drag possible AT ALL on a touch
+   screen: without it the browser claims the gesture for scrolling and the
+   pointermove stream stops after a few pixels. It is scoped to the unlocked
+   rows, so ordinary editing keeps normal scrolling.
+
+   The transform used while dragging is a plain translateY in PHYSICAL pixels
+   (program.js beginDrag) — no inset-inline-* anywhere, because Chromium
+   resolves those against the element's own direction and an RTL page then
+   snaps rows to the wrong slot. */
+.pg-rows.is-reorder .pg-row { user-select: none; }
+.pg-row.is-handle { cursor: grab; touch-action: none; }
+.pg-row.is-dragging {
+  cursor: grabbing; position: relative; z-index: 2;
+  border-color: var(--accent); box-shadow: var(--shadow);
+}
+.pg-grip { color: var(--ink-soft); font-size: 1.1rem; line-height: 1; }
+/* Rows slide to their new slot; the dragged row follows the pointer with no
+   transition of its own, or it would lag behind the finger. */
+.pg-rows.is-reorder .pg-row { transition: transform .14s ease; }
+.pg-row.is-dragging { transition: none; }
+@media (prefers-reduced-motion: reduce) {
+  .pg-rows.is-reorder .pg-row { transition: none; }
+}
+
+.pg-savebar { display: flex; align-items: center; gap: 14px; flex-wrap: wrap; }
+.pg-savebar .pg-hint { margin: 0; max-width: 46ch; }
+.pg-dirty { color: var(--accent); font-size: .85rem; }
+
+.pg-conflict { margin-top: 10px; }
+.pg-conflict ul { margin: 6px 0 0; padding-inline-start: 18px; font-size: .88rem; line-height: 1.6; }
+
+/* The same-field collision block. It carries the OTHER person's paragraph
+   verbatim, so it is the loudest thing in the dialog on purpose: a merge that
+   could not merge is exactly the moment a reader must not skim. */
+.pg-clash {
+  padding: 10px 12px;
+  border-inline-start: 3px solid var(--accent);
+  border-radius: 0 var(--radius) var(--radius) 0;
+  background: color-mix(in srgb, var(--accent) 7%, var(--paper));
+}
+.pg-clash > .pg-hint { margin-top: 4px; }
+.pg-clashrow {
+  margin-top: 10px; padding: 8px 10px;
+  border: 1px solid var(--line); border-radius: 10px; background: var(--paper);
+}
+.pg-clashrow__head { display: flex; align-items: center; gap: 8px; }
+.pg-clashrow__l { flex: 1 1 auto; min-width: 0; font-size: .86rem; }
+/* pre-wrap: the other person's line breaks ARE their text. Collapsing them
+   would hand back a paragraph they did not write. */
+.pg-clashrow__v {
+  margin: 6px 0 0; font-size: .88rem; line-height: 1.55;
+  white-space: pre-wrap; overflow-wrap: anywhere;
+}
+.pg-copy { padding: 3px 10px; font-size: .78rem; }
+
+/* The program was deleted under an open editor. Same plate as the stale banner
+   (it is the same class of news) with the no-colour treatment of a dead end. */
+.pg-gone { border-inline-start-color: var(--no); }
+.pg-gone .pg-back { margin-inline-start: 6px; }
+
+/* ---- program photos ----
+   Bytes and rows are ordinary sm_assets; the only thing that makes them the
+   program's is a `program:<id>` tag, so this grid is a filtered view of the
+   library and nothing else. */
+.pg-photosec { padding-top: 6px; }
+.pg-drop {
+  border: 2px dashed var(--line); border-radius: var(--radius);
+  padding: 18px; text-align: center; cursor: pointer;
+  display: flex; flex-direction: column; gap: 4px; align-items: center;
+  color: var(--ink-soft);
+}
+.pg-drop:hover, .pg-drop.over { border-color: var(--accent); color: var(--ink); }
+.pg-drop .pg-hint { max-width: 52ch; }
+
+.pg-photos {
+  display: grid; grid-template-columns: repeat(auto-fill, minmax(150px, 1fr));
+  gap: 12px; margin-top: 14px;
+}
+.pg-photo {
+  margin: 0; border: 1px solid var(--line); border-radius: 10px; overflow: hidden;
+  background: var(--paper);
+}
+.pg-photo img {
+  display: block; width: 100%; aspect-ratio: 1 / 1; object-fit: cover;
+  background: var(--art-bg);
+}
+.pg-photo figcaption {
+  display: flex; align-items: center; gap: 6px; padding: 6px 8px;
+  font-size: .76rem; color: var(--ink-soft); border-top: 1px solid var(--line);
+}
+.pg-photo figcaption bdi {
+  flex: 1 1 auto; min-width: 0; overflow: hidden;
+  text-overflow: ellipsis; white-space: nowrap;
+}
+
+/* ---- the read-only program rail (build.html) ----
+   The builder's job is assembly, so the rail is a REFERENCE CARD: the program's
+   label/value pairs with a copy button each, and nothing that writes into a
+   slot. Deeper prefill is a later spec, deliberately. */
+#rail { margin-top: 22px; }
+.b-rail {
+  border: 1px solid var(--line); border-radius: var(--radius);
+  background: var(--paper); padding: 10px 14px;
+}
+.b-rail > summary { cursor: pointer; font-weight: 600; font-size: .92rem; }
+.b-rail[open] > summary { margin-bottom: 10px; }
+.b-rail__inner { display: flex; flex-direction: column; gap: 10px; }
+.b-rail__inner .b-note { max-width: 60ch; }
+.b-rail__pairs { display: flex; flex-direction: column; gap: 8px; margin-top: 8px; }
+.b-pair {
+  border: 1px solid var(--line); border-radius: 10px; background: var(--paper);
+  padding: 8px 10px; display: flex; flex-direction: column; gap: 4px;
+}
+.b-pair__head { display: flex; align-items: center; gap: 8px; }
+.b-pair__label { flex: 1 1 auto; font-weight: 600; font-size: .84rem; }
+.b-pair__value { margin: 0; font-size: .84rem; line-height: 1.55; white-space: pre-wrap; }
+.b-rail__photos {
+  display: grid; grid-template-columns: repeat(auto-fill, minmax(72px, 1fr));
+  gap: 8px; margin-top: 8px;
+}
+.b-rail__photos img {
+  display: block; width: 100%; aspect-ratio: 1 / 1; object-fit: cover;
+  border: 1px solid var(--line); border-radius: 8px; background: var(--art-bg);
+}

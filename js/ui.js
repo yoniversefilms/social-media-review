@@ -14,7 +14,8 @@
 //   STAGES / CATEGORIES              ordered [{key, label}] arrays
 //   STAGE_LABELS / CATEGORY_LABELS   plain {key: label} maps
 //   navBar(active)                   shared top bar ('index'|'build'|'create-ai'|
-//                                    'discuss'|'assets'|'queue'|'backend') —
+//                                    'program'|'generate'|'discuss'|'assets'|
+//                                    'queue'|'backend') —
 //                                    carries the name chip AND the v2.3 role chip
 //   ROLE_LABELS                      {marketing, therapist} Hebrew chip labels
 //   injectFonts(assetUrlFn)          runtime @font-face for Assistant
@@ -309,6 +310,9 @@ export const CATEGORIES = [
   // (studio/art/). Membership is an explicit id list in ingest.mjs, not a
   // prefix rule — these posts keep their own series prefix.
   { key: 'pcv1',    label: 'יצירת פוסט v1' },
+  // v3 sample posts written under POST-RECIPE.md + LOOK.md (2026-08-03
+  // voice/format audit); membership is the id prefix rule in ingest.mjs.
+  { key: 'v3p',     label: 'פוסטים v3' },
 ];
 
 export const STAGE_LABELS = Object.fromEntries(STAGES.map((s) => [s.key, s.label]));
@@ -378,6 +382,11 @@ export function navBar(active, opts = {}) {
     // the other way round. The builder is "I'll assemble it"; this one is
     // "describe it and the factory writes it".
     { key: 'create-ai', href: 'create-ai.html' + q, label: 'יצירה עם AI' },
+    // v2.12 (spec 14) — beside «יצירה עם AI» because it is what that page now
+    // reads FROM: a program is the living document of a workshop or a series,
+    // and both creation flows pull their facts out of it instead of asking for
+    // them again on every request.
+    { key: 'program', href: 'program.html' + q, label: 'יצירת תוכנית' },
     // The same image-generation module that lives inside a post (generate.js),
     // hosted standalone: create drawings/photos for the library without
     // opening a post. generateTab({postId: null}) is a supported mount.

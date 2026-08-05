@@ -1,0 +1,46 @@
+<!doctype html>
+<html dir="rtl" lang="he">
+<head>
+<meta charset="utf-8">
+<link rel="icon" href="data:image/svg+xml,<svg xmlns=%27http://www.w3.org/2000/svg%27 viewBox=%270 0 100 100%27><text y=%27.9em%27 font-size=%2790%27>📘</text></svg>">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<meta name="robots" content="noindex, nofollow">
+<!-- The separator is a middot, not the em dash the other eight pages use in
+     their <title>. VOICE.md §0 bans «—» in every user-facing string and a
+     browser tab is one; spec 14 restates the ban for this build. The visible
+     inconsistency with the sibling titles is deliberate and flagged, not an
+     oversight: fixing the other eight is a copy pass of its own. -->
+<title>יצירת תוכנית · סקירת פוסטים</title>
+<!-- All page styling lives in the ONE «v2.12 program» section at the end of
+     css/app.css, not in a <style> block here: the field rows and the photo grid
+     are the same components the editor and the assets page use, and a second
+     copy would drift. -->
+<script>/* theme boot (dark mode 2026-08-02): stamp <html data-theme> BEFORE the
+stylesheet loads so first paint is already themed. 'smr:theme' is written by
+the nav toggle (ui.js); with nothing stored we follow the OS. */
+try{var t=localStorage.getItem('smr:theme');
+document.documentElement.dataset.theme=(t==='dark'||t==='light')?t:
+(matchMedia('(prefers-color-scheme: dark)').matches?'dark':'light');}catch(e){}</script>
+<link rel="stylesheet" href="./css/app.css">
+</head>
+<body>
+<div id="nav"></div>
+<div class="pg-wrap">
+
+  <header class="pg-head">
+    <h1>יצירת תוכנית</h1>
+    <p class="pg-lede">
+      תוכנית היא מסמך חי: כל מה שידוע על סדנה או על תוכנית אחת, במקום אחד,
+      שכל הצוות יכול לערוך. כשמשנים כאן פרט, המפעל יודע שהפרטים זזו וקורא
+      אותם מחדש בפעם הבאה שכותבים תוכן.
+    </p>
+  </header>
+
+  <main id="page" class="pg-page" aria-live="polite"></main>
+</div>
+
+<noscript><p style="text-align:center;padding:40px">הכלי דורש JavaScript.</p></noscript>
+<script src="./config.js"></script>
+<script type="module" src="./js/program.js"></script>
+</body>
+</html>
