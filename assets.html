@@ -214,6 +214,20 @@ document.documentElement.dataset.theme=(t==='dark'||t==='light')?t:
     background: var(--paper); border: 1px solid var(--line);
     border-radius: 8px; padding: 3px 4px; line-height: 0; cursor: pointer;
   }
+  /* v2.13 — a hidden card is only ever on screen while «מוסתרים» is on, and it
+     has to be legible as such at a glance. Opposite corner from «מפוסט» would
+     collide with the multi-select tick, so it takes the bottom-start corner and
+     a muted plate: it is a state, not an alert. */
+  .a-badge--hid {
+    inset-block-start: auto; inset-block-end: 6px;
+    background: var(--ink-soft); color: var(--paper);
+  }
+  /* The count on the «מוסתרים» chip. Same treatment as the gallery's .g-chip-n:
+     a Latin run inside a Hebrew chip needs isolation or it swaps sides. */
+  .a-chip-n {
+    opacity: .7; font-size: .82em; margin-inline-start: 5px;
+    unicode-bidi: isolate; direction: ltr;
+  }
   .a-pick--on { border-color: var(--accent); background: var(--accent); }
   .a-pick input { width: 16px; height: 16px; margin: 0; cursor: pointer; accent-color: var(--accent); }
   .a-pick--on input { accent-color: var(--solid-ink); }

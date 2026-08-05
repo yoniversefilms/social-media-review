@@ -132,6 +132,44 @@ function live(rows) {
   return (Array.isArray(rows) ? rows : []).filter((r) => !(r && r.deleted_at));
 }
 
+// ---------------------------------------------------------------- v2.13 posts + hide
+// Migration 031 (spec 13) does for sm_posts what 029 did for the media tables,
+// and adds a second, softer verb beside it.
+//
+// DELETED vs HIDDEN, and why they are two columns and not one enum: deleting is
+// «this post was a mistake», hiding is «not now». A deleted post leaves every
+// surface unconditionally and comes back only through the 10s undo; a hidden
+// post leaves the DEFAULT surfaces but the operator can still walk into the
+// «מוסתרים» view and bring it back a week later. Collapsing them would force one
+// of the two to lie about what it does.
+//
+// The degradation promise is 029's, unchanged: reads never NAME the new columns
+// (a `hidden_at=is.null` param would 42703 the whole gallery on an unapplied
+// board), so the filters are client-side, where a missing column is `undefined`
+// — which reads as neither deleted nor hidden, the honest answer there.
+const MIGRATION_031 = 'הפעולה עוד לא הופעלה בשרת (מיגרציה 031)';
+const MIGRATION_031_PREFS = 'העדפות הלוח עוד לא הופעלו בשרת (מיגרציה 031)';
+
+// Same SQLSTATE set as 029 (MIGRATION_CODES) — an unapplied migration looks the
+// same from here whichever one it is. What differs is the BELT: the names this
+// migration introduces, so an unrelated 400 mentioning `deleted_at` on some
+// other table is still recognised by needsMigration029 and not by this one.
+function needsMigration031(e) {
+  if (!e) return false;
+  if (MIGRATION_CODES.has(String(e.code || ''))) return true;
+  const msg = String((e && e.message) || '');
+  return /hidden_at|hidden_by|sm_prefs|deleted_at|deleted_by/i.test(msg) &&
+    (e.status === 400 || e.status === 401 || e.status === 403 || e.status === 404);
+}
+
+// A row is HIDDEN when it carries a truthy hidden_at. Absent column -> undefined
+// -> visible, exactly like live(). Kept separate from live() because the two
+// filters are applied at different strengths: deleted is unconditional, hidden
+// is opt-outable by the one view whose whole job is to show them.
+function shown(rows) {
+  return (Array.isArray(rows) ? rows : []).filter((r) => !(r && r.hidden_at));
+}
+
 // File extension for a storage path: the real one when the name carries a
 // sane one, otherwise derived from the MIME type. Never trusts the name for
 // anything but the suffix.
@@ -498,6 +536,58 @@ class SupabaseDriver {
       `board_key=eq.${enc(this.board)}&id=eq.${enc(id)}`, fields);
   }
 
+  // ---- v2.13 post stamps (migration 031) ----
+  // The stampAssets twin, and atomic for the same reason: one PATCH with
+  // `id=in.(…)` either stamps the whole selection or stamps none of it, so the
+  // undo toast can never restore 12 of 30 posts.
+  //
+  // board_key rides as an eq filter beside the id list, not because RLS would
+  // let a foreign row through (it would not), but because `id` is only unique
+  // WITH the board on this table — the primary key is (board_key, id). Without
+  // it the filter is a half-key.
+  //
+  // The fields are ONLY the two columns of the verb being performed. sm_posts'
+  // touch trigger bumps updated_at on any PATCH regardless (schema §2), which
+  // an open editor's savePostSlides will see as a conflict and rebase on; that
+  // is the documented cost of stamping this table, not something to be avoided
+  // by widening the write.
+  stampPosts(ids, fields) {
+    const list = (ids || []).map((id) => enc(id)).join(',');
+    return this.req('PATCH',
+      `sm_posts?board_key=eq.${enc(this.board)}&id=in.(${list})`, fields);
+  }
+
+  // ---- v2.13 board preferences (sm_prefs, migration 031) ----
+  // Row per key, so two writers touching two different preferences cannot
+  // clobber each other. `value` is jsonb and the only updatable column.
+  async selectPref(key) {
+    const rows = await this.select('sm_prefs',
+      `select=value&board_key=eq.${enc(this.board)}&key=eq.${enc(key)}`);
+    return (rows && rows[0]) ? rows[0] : null;
+  }
+
+  // Insert first, PATCH on 409. The unique (board_key, key) index is what makes
+  // the 409 mean «the row is already there», and a plain unique index (not a
+  // partial one, schema §25) is what makes that reading unconditional — there
+  // is no soft-deleted preference row that could be squatting on the key.
+  async upsertPref(key, value) {
+    const res = await fetch(this.rest + 'sm_prefs', {
+      method: 'POST',
+      headers: this.headers({
+        'Content-Type': 'application/json',
+        Prefer: 'return=representation',
+      }),
+      body: JSON.stringify({ board_key: this.board, key, value }),
+    });
+    if (res.ok) {
+      const rows = await res.json().catch(() => null);
+      return Array.isArray(rows) ? rows[0] : rows;
+    }
+    if (res.status !== 409) throw await restError(res);
+    return this.update('sm_prefs',
+      `board_key=eq.${enc(this.board)}&key=eq.${enc(key)}`, { value });
+  }
+
   // Live folders only. Deleted folder rows are filtered CLIENT-side (live()),
   // never with a `deleted_at=is.null` param — same 42703 reasoning as the
   // asset and photo lists, and the column is in this very migration.
@@ -737,7 +827,19 @@ class SupabaseDriver {
                       // v2.5 (spec 08): same caveat as sm_approvals — anon
                       // subscribers get nothing, the status of a generation
                       // request rides the 10s/60s poll below.
-                      'sm_gen_requests'];
+                      'sm_gen_requests',
+                      // v2.13 (spec 13): hiding a category tab is BOARD state,
+                      // so a second reviewer's chips have to change without them
+                      // reloading. MEASURED, not assumed: a header-scoped anon
+                      // subscriber receives ZERO sm_prefs events (SUBSCRIBED,
+                      // nothing in 26s — the same result sm_approvals and
+                      // sm_gen_requests get, references/supabase.md). What
+                      // actually carries a tab change is index.js re-reading
+                      // getPref() inside every refresh(), so propagation is the
+                      // ordinary ≤10s poll. This entry is listed anyway, and
+                      // costs nothing, so the day header-scoped delivery starts
+                      // working it needs no edit here.
+                      'sm_prefs'];
       for (const table of tables) {
         ch.on('postgres_changes',
           { event: '*', schema: 'public', table, filter: `board_key=eq.${this.board}` },
@@ -908,6 +1010,26 @@ class LocalDriver {
     return this.patch('photos', id, fields);
   }
 
+  // ---- v2.13 post stamps + prefs (serve.mjs routes) ----
+  // serve.mjs has no `in.(…)` filter language, so the id LIST rides in the body
+  // — the same shape /api/assets/stamp already uses, and the same all-or-nothing
+  // promise: the server resolves every id before it writes anything.
+  stampPosts(ids, fields) {
+    return this.req('PATCH', '/posts/stamp', { ids: ids || [], fields });
+  }
+
+  async selectPref(key) {
+    return (await this.req('GET', `/prefs?key=${enc(key)}`)) || null;
+  }
+
+  // The local route upserts in one call (single-threaded server, so the
+  // read-modify-write completes inside one turn of the event loop). The cloud
+  // twin needs two requests because PostgREST has no conditional insert; both
+  // hand the caller the same «the value is stored now» outcome.
+  upsertPref(key, value) {
+    return this.req('POST', '/prefs', { key, value });
+  }
+
   async listFolders() {
     return (await this.req('GET', '/folders')) || [];
   }
@@ -1066,10 +1188,19 @@ function byCreatedDesc(a, b) {
 // the gallery: listPosts drops the offending name and says so out loud (below).
 // That safety net is for a mistake, not a plan — a dropped column is a feature
 // missing from every list surface until someone fixes it.
+//
+// v2.13 (migration 031) adds deleted_at/deleted_by/hidden_at/hidden_by. They
+// are LISTED HERE AND FILTERED BELOW, never sent as a query param: naming
+// `deleted_at=is.null` in the filter would 42703 the whole gallery on a board
+// where 031 is unapplied — the 019 trap again — while naming the column in the
+// SELECT is recoverable, because the fallback underneath drops the offending
+// name and the list still loads. The two are not symmetric and the asymmetry is
+// the whole degradation strategy.
 const POST_LIST_COLS = [
   'board_key', 'id', 'category', 'title', 'caption', 'version',
   'slides', 'slide_count', 'asset_prefix', 'stage', 'origin', 'author', 'sort',
   'created_at', 'updated_at', 'updated_by',
+  'deleted_at', 'deleted_by', 'hidden_at', 'hidden_by',
 ];
 
 // PostgREST answers an unknown column name with HTTP 400 + SQLSTATE 42703 and
@@ -1102,11 +1233,27 @@ function reportListFallback(dropped) {
   toast('חלק מנתוני הפוסטים לא נטענו — עמודה חסרה בשרת. ייתכן שתגיות מסוימות לא יופיעו', 'err');
 }
 
-export async function listPosts() {
+// v2.13: the ONE wrapper every post-list surface already goes through, so the
+// two new filters land in every one of them without a single caller changing —
+// the gallery, the queue's schedule pool, the discussions hub, create-ai's post
+// picker, the translate/plan counts. That is the same trick listAssets used in
+// v2.9, and it is why post.js/queue.js/discuss.js are not in this build's diff.
+//
+//   DELETED is filtered UNCONDITIONALLY (live(), the 029 rule). There is no
+//     opt-in: a deleted post comes back through the undo toast or not at all.
+//   HIDDEN is filtered unless the caller asks for it, and exactly ONE caller
+//     does — the gallery's «מוסתרים» view, whose entire purpose is to show them
+//     and offer the way back.
+//
+// getPost() is deliberately NOT filtered: a reviewer with post.html open when
+// someone deletes the post must not have the tab 404 out from under them.
+export async function listPosts({ includeHidden = false } = {}) {
   const d = need();
+  const filter = (rows) => (includeHidden ? live(rows) : shown(live(rows)));
   if (isLocal) {
     const s = await d.state();
-    return [...(s.posts || [])].sort((a, b) => (a.sort - b.sort) || String(a.id).localeCompare(b.id));
+    return filter([...(s.posts || [])])
+      .sort((a, b) => (a.sort - b.sort) || String(a.id).localeCompare(b.id));
   }
   const q = `board_key=eq.${enc(boardKey)}&order=sort.asc,id.asc`;
   // The fallback is NARROW (only «that column does not exist») and it never
@@ -1121,7 +1268,12 @@ export async function listPosts() {
     try {
       const rows = await d.select('sm_posts', `select=${cols.join(',')}&${q}`);
       if (dropped.length) reportListFallback(dropped);
-      return rows;
+      // filter() runs on the ROWS, after the fallback has settled which columns
+      // exist. On an unapplied board the names were dropped from the select, so
+      // every row reads `undefined` for both stamps — neither deleted nor
+      // hidden, which is the only honest answer a board without the columns can
+      // give, and it leaves the gallery listing exactly what it listed before.
+      return filter(rows);
     } catch (e) {
       const missing = undefinedColumnName(e);
       if (!missing || !cols.includes(missing) || cols.length === 1) throw e;
@@ -1986,8 +2138,17 @@ function defaultKind(file) {
 // already goes through — the grid, the folder counts, the stacks, the export
 // selection, post.js's designAssets() feed into the editor picker. That is why
 // editor.js needed no edit at all to stop showing deleted assets.
-export async function listAssets() {
-  return live(await need().listAssets());
+//
+// v2.13: hidden assets are filtered HERE too, and by DEFAULT, which is what
+// makes «hidden leaves the editor's picker» true without editing post.js or
+// build.js — their designAssets() shims map whatever this returns, so a row
+// this wrapper drops does not exist over there. The assets PAGE is the one
+// caller that asks for them back (`includeHidden: true`), because its
+// «מוסתרים» toggle is the way home; it does its own per-view filtering in
+// visible(). Deleted stays unconditional either way.
+export async function listAssets({ includeHidden = false } = {}) {
+  const rows = live(await need().listAssets());
+  return includeHidden ? rows : shown(rows);
 }
 
 // Upload bytes + create the library row. `post_id` set = uploaded ON a post.
@@ -2101,6 +2262,156 @@ export async function restorePhoto(id) {
     return await need().stampPhoto(id, { deleted_at: null, deleted_by: null });
   } catch (e) {
     if (needsMigration029(e)) throw migrationError(MIGRATION_029);
+    throw e;
+  }
+}
+
+// ------------------------------------------------ v2.13 post + asset actions
+// Four verbs on posts (delete / restore / hide / unhide) and two on assets
+// (hide / unhide), all of them a stamp on two columns and nothing else.
+//
+// EVERY ONE OF THEM IS ALL-OR-NOTHING. The driver sends one PATCH for the whole
+// id list, so a bulk action either lands completely or does not land — which is
+// the only thing that makes the 10s «ביטול» honest. A loop of single PATCHes
+// would be simpler here and would make the undo a lie in exactly the case
+// (network trouble mid-batch) where someone most needs it.
+//
+// deleted_by / hidden_by is the reviewer's own name (ensureName), which is what
+// makes the action legible to the NEXT person looking at the board: they can
+// see who took the post away before they put it back.
+
+// The one place the id list is cleaned, so an empty or duplicated selection
+// cannot reach the network and a `id=in.()` with no members is impossible.
+function idList(ids) {
+  return [...new Set((ids || []).filter(Boolean))];
+}
+
+export async function deletePosts(ids) {
+  const list = idList(ids);
+  if (!list.length) return [];
+  const me = await ensureName();
+  try {
+    return await need().stampPosts(list, {
+      deleted_at: new Date().toISOString(),
+      deleted_by: me.name,
+    });
+  } catch (e) {
+    if (needsMigration031(e)) throw migrationError(MIGRATION_031);
+    throw e;
+  }
+}
+
+// Undo. Nulling the stamp is the WHOLE restore — the row never left, so every
+// vote, pin, reply, approval and version snapshot that referenced it is still
+// attached and still correct.
+export async function restorePosts(ids) {
+  const list = idList(ids);
+  if (!list.length) return [];
+  try {
+    return await need().stampPosts(list, { deleted_at: null, deleted_by: null });
+  } catch (e) {
+    if (needsMigration031(e)) throw migrationError(MIGRATION_031);
+    throw e;
+  }
+}
+
+export async function hidePosts(ids) {
+  const list = idList(ids);
+  if (!list.length) return [];
+  const me = await ensureName();
+  try {
+    return await need().stampPosts(list, {
+      hidden_at: new Date().toISOString(),
+      hidden_by: me.name,
+    });
+  } catch (e) {
+    if (needsMigration031(e)) throw migrationError(MIGRATION_031);
+    throw e;
+  }
+}
+
+export async function unhidePosts(ids) {
+  const list = idList(ids);
+  if (!list.length) return [];
+  try {
+    return await need().stampPosts(list, { hidden_at: null, hidden_by: null });
+  } catch (e) {
+    if (needsMigration031(e)) throw migrationError(MIGRATION_031);
+    throw e;
+  }
+}
+
+// Assets ride the EXISTING stampAssets driver method — the 029 route already
+// takes an arbitrary field object, so hiding an asset needed no new plumbing on
+// either driver, only the two new columns in the grant (schema §25).
+export async function hideAssets(ids) {
+  const list = idList(ids);
+  if (!list.length) return [];
+  const me = await ensureName();
+  try {
+    return await need().stampAssets(list, {
+      hidden_at: new Date().toISOString(),
+      hidden_by: me.name,
+    });
+  } catch (e) {
+    if (needsMigration031(e)) throw migrationError(MIGRATION_031);
+    throw e;
+  }
+}
+
+export async function unhideAssets(ids) {
+  const list = idList(ids);
+  if (!list.length) return [];
+  try {
+    return await need().stampAssets(list, { hidden_at: null, hidden_by: null });
+  } catch (e) {
+    if (needsMigration031(e)) throw migrationError(MIGRATION_031);
+    throw e;
+  }
+}
+
+// ------------------------------------------------ v2.13 board preferences
+// sm_prefs is a row per KEY, board-wide. The only key today is
+// 'hidden_categories' (a JSON array of category strings), and the gallery reads
+// it at render time rather than stamping the posts — which is what makes
+// unhiding a tab free and non-destructive: no post row is ever touched by tab
+// management, so nothing about hiding a tab can bump updated_at or knock an
+// open editor into its rebase path.
+
+let prefsMissingReported = false;
+
+// -> the stored value, or null. Does NOT throw when 031 is unapplied: a missing
+// preference must cost the gallery a feature (the tabs are simply all visible),
+// never a page. One console line per load, not per 10s poll tick.
+export async function getPref(key) {
+  const k = String(key || '');
+  if (!k) return null;
+  try {
+    const row = await need().selectPref(k);
+    return row ? (row.value ?? null) : null;
+  } catch (e) {
+    if (!needsMigration031(e)) throw e;
+    if (!prefsMissingReported) {
+      prefsMissingReported = true;
+      console.warn(
+        'getPref(): sm_prefs is not there yet (migration 031 unapplied). ' +
+        'Board preferences read as unset — the gallery shows every category tab, ' +
+        'which is the pre-v2.13 behaviour. Hiding a tab will refuse in Hebrew.');
+    }
+    return null;
+  }
+}
+
+// Upsert. This one DOES throw on an unapplied 031, and deliberately: a write
+// that silently does nothing would leave the operator looking at a tab they
+// just hid, wondering which of them is wrong.
+export async function setPref(key, value) {
+  const k = String(key || '');
+  if (!k) throw new Error('חסר מפתח להעדפה');
+  try {
+    return await need().upsertPref(k, value === undefined ? null : value);
+  } catch (e) {
+    if (needsMigration031(e)) throw migrationError(MIGRATION_031_PREFS);
     throw e;
   }
 }

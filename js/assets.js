@@ -61,10 +61,19 @@
 //     URL, so removing rows or bytes would break carousels already designed
 //     against them; a `deleted_at` stamp hides the row from every listing while
 //     the pixels stay where the slide expects them. Nothing here calls DELETE.
+//
+// v2.13 (spec 13) adds the second, softer verb beside delete: HIDE. Deleting
+// says «this was a mistake»; hiding says «not now» — a shoot that is finished
+// with, a set of drafts nobody should reach for. A hidden asset leaves the grid
+// and the editor's picker (store.js listAssets filters it by default, so no
+// picker code changed), keeps working wherever it is already placed in a slide,
+// and comes back through the «מוסתרים» toggle. Same soft-stamp shape as delete,
+// same all-or-nothing bulk, no bytes touched.
 import {
   initStore, assetUrl, listAssets, uploadAsset, updateAsset,
   reconcileStudioAssets, assetRowUrl, listPosts, subscribe, GEN_DIMS, dimByKey,
   deleteAssets, restoreAssets, listFolders, createFolder,
+  hideAssets, unhideAssets,
 } from './store.js';
 import { el, modal, toast, fmtDate, navBar, uploadProgress, undoToast, UNDO_MS } from './ui.js';
 import { zipStore } from './zip.js';
@@ -80,6 +89,12 @@ import {
 import { snapshotItems, normalizeWillDecode, isAcceptedImageType } from './imgprep.js';
 
 const $ = (id) => document.getElementById(id);
+
+/* ui.js's el() drops null/undefined/false children; Element.replaceChildren()
+   does NOT — it stringifies them, so a `cond ? el(…) : null` member renders the
+   literal text «null» between the buttons. Same helper, same reason, as the
+   gallery's; it cannot be shared because ui.js is not this build's to edit. */
+const kids = (...list) => list.flat(Infinity).filter((n) => n !== null && n !== undefined && n !== false);
 
 // OPERATOR CHANGE 2026-08-03: the one «איורים» tab split in two — «Simple» is
 // the hand-curated set (source 'studio' + reviewer uploads), «AI Generated» is
@@ -134,6 +149,13 @@ const S = {
   kind: 'all',
   q: '',
   onlyUploads: false,
+  // v2.13: is the «מוסתרים» toggle on? OFF, hidden assets are dropped by
+  // visible(); ON, they are listed BESIDE the visible ones (not instead of
+  // them) and each carries a «מוסתר» badge — which is what lets an operator
+  // see a hidden file in the context of the folder it belongs to before
+  // deciding to bring it back. Page state only, never persisted: it is a
+  // temporary lens, and a lens that survives a reload is a mode.
+  showHidden: false,
   // v2.9: WHERE WE ARE, not what is filtered. '' = the library root;
   // 'קמפיין/shoot' = two levels in. Mirrored to location.hash.
   path: '',
@@ -321,9 +343,20 @@ async function refresh({ reconcile = false, validatePath = false } = {}) {
   // unapplied (store.js warns once and degrades) — so the .catch here is for a
   // genuine network failure, and it degrades the same way: folders derived from
   // tags alone, which is exactly v2.6.
+  // includeHidden: this is the ONE page that must be able to show hidden rows,
+  // so it asks for all of them and does its own filtering in visible(). Every
+  // other listAssets() caller — the editor's picker feeds in post.js and
+  // build.js, the generate tab — gets them dropped by the store wrapper and
+  // needed no edit, exactly as v2.9 did for deleted rows.
   const [assets, posts, folders] = await Promise.all([
-    listAssets().catch(() => []),
-    listPosts().catch(() => []),
+    listAssets({ includeHidden: true }).catch(() => []),
+    // includeHidden HERE TOO, and only for the «בשימוש» scan: an asset placed
+    // in a post that is merely HIDDEN is still in use, and reporting it as
+    // «לא בשימוש עדיין» is how someone deletes a photo a live carousel needs.
+    // Deleted posts stay excluded — live() is unconditional in the store, and a
+    // deleted post is leaving the board, so what it referenced is genuinely
+    // free. That asymmetry is the whole difference between the two verbs.
+    listPosts({ includeHidden: true }).catch(() => []),
     listFolders().catch(() => []),
   ]);
   S.assets = assets;
@@ -405,9 +438,27 @@ function styleOf(a) {
 // current folder only, which is what makes the browser a browser.
 const searching = () => !!S.q;
 
+// v2.13: hidden rows are dropped HERE rather than at the store, because this
+// page is the only one that has a way to bring them back. Everywhere else the
+// store wrapper has already dropped them.
+const isHidden = (a) => !!(a && a.hidden_at);
+
+// How many hidden assets the CURRENT view would gain if the toggle were on.
+// The chip carries this number: a toggle that shows nothing is a toggle that
+// looks broken, and a board with nothing hidden should say so with a 0 rather
+// than with an empty grid.
+function hiddenHere() {
+  const was = S.showHidden;
+  S.showHidden = true;
+  const n = visible().filter(isHidden).length;
+  S.showHidden = was;
+  return n;
+}
+
 function visible() {
   const q = S.q;
   const list = S.assets.filter((a) => {
+    if (isHidden(a) && !S.showHidden) return false;
     if (!kindMatch(a)) return false;
     // Kind chips and «רק העלאות» still compose with everything, search included.
     if (!q && !atCurrent(a)) return false;
@@ -450,13 +501,30 @@ function renderToolbar() {
   }, 'רק העלאות'));
   chips.appendChild(el('button', {
     class: 'chip' + (S.selMode ? ' chip--on' : ''), type: 'button',
-    title: 'לסמן כמה נכסים ולייצא אותם יחד כקובץ ZIP',
+    title: 'לסמן כמה נכסים ולפעול עליהם יחד',
     onclick: () => {
       S.selMode = !S.selMode;
       if (!S.selMode) S.sel.clear();
       renderToolbar(); renderGrid();
     },
   }, 'בחירה מרובה'));
+  // v2.13 «מוסתרים». Beside «רק העלאות» because it is the same kind of control:
+  // one more AND inside visible(), not a mode of its own. The count is what the
+  // toggle will ADD to the current view, so it answers «is anything hidden
+  // here» before it is clicked.
+  const nHidden = hiddenHere();
+  chips.appendChild(el('button', {
+    class: 'chip' + (S.showHidden ? ' chip--on' : ''), type: 'button',
+    title: 'הצגת נכסים מוסתרים יחד עם השאר. נכס מוסתר נשאר בשקפים שכבר עוצבו איתו',
+    onclick: () => {
+      S.showHidden = !S.showHidden;
+      // A selection made while hidden rows were on screen must not survive
+      // hiding them again: acting on a row you can no longer see is how someone
+      // deletes the wrong thing.
+      S.sel.clear();
+      renderToolbar(); renderGrid();
+    },
+  }, 'מוסתרים', el('span', { class: 'a-chip-n' }, String(nHidden))));
 
   $('toolbar').replaceChildren(
     uploadDock(),
@@ -573,9 +641,35 @@ function folderTiles() {
 function updateSelBar() {
   const bar = $('selbar');
   if (!bar) return;
-  if (!S.selMode || !S.sel.size) { bar.replaceChildren(); return; }
+  if (!S.selMode) { bar.replaceChildren(); return; }
+
+  // «בחירת הכול» means the CURRENT FILTERED VIEW and nothing wider — the kind
+  // chips, the folder, the search box and the «מוסתרים» toggle all still apply.
+  // A select-all that quietly reaches rows the reviewer cannot see is how a
+  // bulk delete takes something nobody looked at.
+  const inView = visible();
+  const selectAll = el('button', {
+    class: 'btn btn--ghost', type: 'button',
+    title: 'בחירת כל הנכסים שמוצגים כרגע, לפי הסינון הנוכחי',
+    onclick: () => {
+      for (const a of inView) S.sel.add(a.id);
+      renderGrid(); updateSelBar();
+    },
+  }, `בחירת הכול (${inView.length})`);
+
   const rows = S.assets.filter((a) => S.sel.has(a.id));
-  bar.replaceChildren(
+  if (!rows.length) {
+    bar.replaceChildren(...kids(
+      el('span', { class: 'a-count' }, 'לא נבחר עדיין אף נכס'),
+      selectAll));
+    return;
+  }
+
+  // The two hide buttons are offered by what the selection ACTUALLY holds: a
+  // mixed selection gets both, and neither ever appears as a no-op.
+  const anyVisible = rows.some((a) => !isHidden(a));
+  const anyHidden = rows.some(isHidden);
+  bar.replaceChildren(...kids(
     el('span', { class: 'a-count' }, `נבחרו ${rows.length} נכסים`),
     el('button', {
       class: 'btn btn--primary', type: 'button',
@@ -585,15 +679,64 @@ function updateSelBar() {
       class: 'btn btn--ghost', type: 'button',
       onclick: () => moveDialog(rows),
     }, '📁 העברה לתיקייה'),
+    anyVisible
+      ? el('button', {
+          class: 'btn btn--ghost', type: 'button',
+          onclick: () => setAssetsHidden(rows.filter((a) => !isHidden(a)), true),
+        }, '🙈 הסתרה')
+      : null,
+    anyHidden
+      ? el('button', {
+          class: 'btn btn--ghost', type: 'button',
+          onclick: () => setAssetsHidden(rows.filter(isHidden), false),
+        }, '👁 ביטול הסתרה')
+      : null,
     el('button', {
       class: 'btn btn--ghost a-danger', type: 'button',
       onclick: () => deleteDialog(rows),
     }, '🗑 מחיקה'),
+    selectAll,
     el('button', {
       class: 'btn btn--ghost', type: 'button',
       onclick: () => { S.sel.clear(); renderGrid(); updateSelBar(); },
     }, 'ניקוי הבחירה'),
-  );
+  ));
+}
+
+/* ── hide / unhide (v2.13, spec 13) ──
+   No confirm modal, deliberately. A confirm is the price of an action you
+   cannot take back, and this one is a toggle: the «מוסתרים» chip above is the
+   way home and it carries a live count, so nothing can be hidden without the
+   page saying how much. Delete keeps its modal for exactly the opposite reason.
+
+   A STACK hides as a UNIT, same rule and same one place (expandStacks) as move
+   and delete: the card shows one version and stands for all of them, so hiding
+   «the card» while leaving two versions in the grid is not what anyone meant. */
+async function setAssetsHidden(picked, hide) {
+  const rows = expandStacks(picked);
+  if (!rows.length) return;
+  const ids = rows.map((a) => a.id);
+  try {
+    if (hide) await hideAssets(ids); else await unhideAssets(ids);
+  } catch (e) {
+    // One sentence, and the SAME sentence whichever unapplied-031 failure the
+    // server chose — store.js already collapsed them.
+    toast((e && e.message) || (hide ? 'ההסתרה נכשלה' : 'ביטול ההסתרה נכשל'), 'err');
+    return;
+  }
+  // The in-memory rows are stamped rather than refetched: a hide that takes a
+  // round-trip to become visible reads as a failure and gets clicked twice.
+  const stamp = hide ? new Date().toISOString() : null;
+  for (const a of rows) a.hidden_at = stamp;
+  // A row that just left the view cannot stay selected — the bar would offer
+  // «ביטול הסתרה» for something no longer on screen.
+  if (hide && !S.showHidden) for (const id of ids) S.sel.delete(id);
+  renderToolbar();
+  renderGrid();
+  const n = rows.length;
+  toast(hide
+    ? (n === 1 ? 'הנכס הוסתר · אפשר להחזיר אותו דרך «מוסתרים»' : `${n} נכסים הוסתרו · אפשר להחזיר אותם דרך «מוסתרים»`)
+    : (n === 1 ? 'הנכס חזר לספרייה' : `${n} נכסים חזרו לספרייה`), 'ok');
 }
 
 function updateCount() {
@@ -1479,6 +1622,12 @@ function cardBody(a, item, repaint) {
       })
     : el('img', { src: url, alt: a.label || a.name || 'נכס', loading: 'lazy' }));
   if (a.post_id) thumb.appendChild(el('span', { class: 'a-badge' }, 'מפוסט'));
+  // v2.13: a hidden card only ever appears while the «מוסתרים» toggle is on, and
+  // it has to say so — otherwise the grid looks the same with the toggle on and
+  // off except for a few extra cards nobody can account for.
+  if (isHidden(a)) {
+    thumb.appendChild(el('span', { class: 'a-badge a-badge--hid' }, 'מוסתר'));
+  }
   if (stacked) {
     thumb.appendChild(el('span', { class: 'a-vbadge' }, stackBadge(item)));
     thumb.appendChild(el('span', { class: 'a-vrot', 'aria-hidden': 'true' }, '↻'));
@@ -1531,6 +1680,15 @@ function cardBody(a, item, repaint) {
         el('button', { class: 'btn btn--ghost', type: 'button', onclick: () => moveDialog([a]) }, '📁 העברה'),
         el('button', { class: 'btn btn--ghost', type: 'button', onclick: () => exportDialog([a]) }, '⬇︎ ייצוא'),
         el('button', { class: 'btn btn--ghost', type: 'button', onclick: () => copyLink(url) }, 'העתקת קישור'),
+        // v2.13. Beside the other reversible actions and BEFORE «מחיקה», so the
+        // softer verb is the one the hand reaches first.
+        el('button', {
+          class: 'btn btn--ghost', type: 'button',
+          title: isHidden(a)
+            ? 'החזרת הנכס לספרייה ולבורר הנכסים בעורך'
+            : 'הנכס יֵצא מהספרייה ומבורר הנכסים בעורך. שקפים שכבר עוצבו איתו לא משתנים',
+          onclick: () => setAssetsHidden([a], !isHidden(a)),
+        }, isHidden(a) ? '👁 ביטול הסתרה' : '🙈 הסתרה'),
         // v2.9. Last in the row on purpose: it is the only action here that
         // takes something away, and it should not sit under a thumb where an
         // «open it bigger» reflex lands. A stacked card deletes every version,
