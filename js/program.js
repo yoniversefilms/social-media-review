@@ -54,9 +54,10 @@ const $ = (id) => document.getElementById(id);
    without renaming it there does not break anything loudly; it silently drops a
    content rule, which is worse. Change both.
 
-   The LABELS are ordinary editable text. A team that calls the facilitator
-   «מי מעביר» renames the row and nothing downstream cares, because the label
-   rides to the brief beside the value. */
+   The LABELS are read-only in the editor (operator directive, 2026-08-05):
+   a custom field is named once, in the «+ שדה» dialog, and keeps that name.
+   Downstream nothing cares either way, because the label rides to the brief
+   beside the value. */
 const SEED_FIELDS = () => ([
   { id: 'about',        label: 'על מה הסדנה',           value: '' },
   { id: 'facilitator',  label: 'מי מנחה',                value: '' },
@@ -423,10 +424,10 @@ function staleBanner() {
       'ואם שניכם כתבתם באותו שדה נראה לכם את הטקסט שלהם כדי שתחליטו מה נשאר.'));
 }
 
-/* The lock. Locked is the normal state: labels and values are editable, and a
-   pointer drag does nothing. Unlocked turns every row into a handle and freezes
-   the text, because a control that is both a text field and a drag target is a
-   control that eats one of the two on every device. */
+/* The lock. Locked is the normal state: values are editable (labels never
+   are), and a pointer drag does nothing. Unlocked turns every row into a
+   handle and freezes the text, because a control that is both a text field
+   and a drag target is a control that eats one of the two on every device. */
 function lockBar() {
   const btn = h('button', {
     class: 'btn btn--ghost pg-lock' + (locked ? '' : ' is-on'), type: 'button',
@@ -452,14 +453,12 @@ function fieldRow(f, i, box) {
     class: 'pg-grip', title: 'גרירה לסידור מחדש', 'aria-hidden': 'true',
   }, '⠿');
 
-  const labelEl = locked
-    ? (() => {
-        const inp = h('input', { class: 'field__input pg-label', type: 'text',
-          maxlength: '120', value: f.label, placeholder: 'שם השדה' });
-        inp.addEventListener('input', () => { f.label = inp.value; markDirty(); });
-        return inp;
-      })()
-    : h('div', { class: 'pg-label pg-label--static' }, f.label || 'שדה ללא שם');
+  // Labels are READ-ONLY in the editor (operator directive, 2026-08-05): a
+  // label is the field's name, set once when the field is created. Renaming a
+  // label mid-life silently re-labels the fact for every teammate and every
+  // brief that reads it, so the input that used to live here is gone.
+  const labelEl = h('div', { class: 'pg-label pg-label--static' },
+    h('bdi', {}, f.label || 'שדה ללא שם'));
 
   const valueEl = locked ? valueControl(f) : staticValue(f);
 
@@ -515,15 +514,34 @@ function staticValue(f) {
 }
 
 function addField() {
-  const id = 'f-' + newFieldId();
-  draft.fields.push({ id, label: '', value: '' });
-  markDirty();
-  renderEditor();
-  // Focus the label of the row that was just added: the useful next keystroke
-  // is naming it, and hunting for it in a 30-row program is not a feature.
-  const labels = document.querySelectorAll('.pg-label');
-  const last = labels[labels.length - 1];
-  if (last && last.focus) setTimeout(() => last.focus(), 0);
+  // The label is asked for HERE, once, because labels are read-only in the
+  // editor (operator directive, 2026-08-05). Naming happens at birth; after
+  // that the label is the field's identity.
+  const input = h('input', { class: 'field__input', type: 'text',
+    maxlength: '120', placeholder: 'למשל: מה להביא' });
+  input.addEventListener('keydown', (e) => { if (e.key === 'Enter') go(m.close); });
+  const go = (close) => {
+    const label = input.value.trim();
+    if (!label) { input.focus(); return false; }
+    draft.fields.push({ id: 'f-' + newFieldId(), label, value: '' });
+    markDirty();
+    if (close) close();
+    renderEditor();
+    // Focus the VALUE of the row that was just added: it has a name already,
+    // and the useful next keystroke is its content.
+    const rows = document.querySelectorAll('.pg-row textarea');
+    const last = rows[rows.length - 1];
+    if (last && last.focus) setTimeout(() => last.focus(), 0);
+    return true;
+  };
+  const m = modal('שדה חדש',
+    h('div', { class: 'field' },
+      h('label', { class: 'field__label' }, 'איך קוראים לשדה?'),
+      input,
+      h('p', { class: 'pg-hint' },
+        'השם נקבע פעם אחת וישמש את כל הצוות. את התוכן ממלאים אחר כך, בעורך.')),
+    { actions: [{ label: 'ביטול' }, { label: 'הוספה', primary: true, onClick: (c) => go(c) }] });
+  setTimeout(() => input.focus(), 60);
 }
 
 function newFieldId() {
