@@ -49,9 +49,25 @@
 //   initEditor(handle, slide, {onChange, manifest, photos, assets, postId,
 //                              assetUrl, photosEmptyText, uploadFile,
 //                              uploadAsset, onTextChange, sidebar,
-//                              removeBackground})
+//                              removeBackground, onTemplateSwap, startTab})
 //     -> {destroy, refresh, setPhotos, setAssets, getDesign, addPhotoExtra,
 //         dropFiles, startTextEdit, openTab}
+//
+// THE TEMPLATE SWITCHER (v2.14) — «תבנית», the fifth tab, and the only one
+// that is CONDITIONAL: it renders when and only when the host passes
+// opts.onTemplateSwap(newSlide, info). The reason is ownership. Every other
+// tab mutates `design`, which this editor owns and reports through onChange; a
+// template swap replaces the whole slide — template, vars and design together
+// — and that is a write only the host can make land (one audit row, one save,
+// a re-armed editor on the new template). So the editor decides nothing: it
+// lists the templates, resolves the target's sample vars and its composed
+// SHAPE, calls the pure swapSlide() in tplswap.js, and hands the result over.
+// build.js passes no callback and keeps its own template picker unchanged.
+// opts.startTab is the other half — the host re-arms on 'tpl' so the list is
+// still open under the reviewer's hand after the slide has changed underneath
+// it. Read tplswap.js's ORPHAN DESIGN KEYS block before touching the mapping:
+// render.mjs DIES on a design key naming something the target lacks, and that
+// verdict is measured, not assumed.
 //
 // Asset library (v2.0): opts.assets is the board's WHOLE library — reviewer
 // uploads and studio drawings alike, each row {id, kind, source, name, label,
@@ -186,7 +202,19 @@ import {
 // the exact string designAdjustFilter/designShadowFilter will emit on the next
 // re-compose, so the live drag, the preview and the PNG cannot drift. Every
 // host that mounts this editor already imports compose.js for the slide handle.
-import { designAdjustFilter, designShadowFilter } from './compose.js';
+// composeSlideHTML (v2.14) composes the SWAP TARGET off-screen so the «תבנית»
+// tab can read what that template actually has; mountSlide (v2.14.1) draws that
+// tab's live per-row previews — see renderTplPane.
+import {
+  designAdjustFilter, designShadowFilter, composeSlideHTML, mountSlide,
+} from './compose.js';
+// v2.14 the template switcher. tplswap.js is PURE (no DOM, no network, no
+// imports) — this file fetches the target's raw template and its composed
+// shape and hands both in. Same distance-keeping as stacks.js and imgprep.js:
+// the rules are testable under node, the fetching stays here.
+import {
+  swapSlide, templateShape, templateRequires, probeVars, droppedSummary,
+} from './tplswap.js';
 
 // dataTransfer MIME for photo drags that originate inside the app (grid
 // thumbnails → slide). Carrying the public URL means no re-upload on drop.
@@ -996,6 +1024,38 @@ function injectStyles() {
 .smr-edslide__n{position:absolute;inset-block-end:3px;inset-inline-start:3px;
   background:rgba(36,29,32,.72);color:#fff;border-radius:5px;padding:0 5px;
   font:600 11px/1.7 'Assistant',-apple-system,sans-serif}
+/* template switcher (v2.14 · live previews v2.14.1). Each row carries a real
+   composition of THIS slide in that template, so the row is the answer rather
+   than a description of one. The thumb box is sized in px and compose.js scales
+   its 1080×1350 iframe to whatever width it finds (ResizeObserver), exactly as
+   the builder's picker does — 4:5 is the slide's own ratio, so nothing crops. */
+.smr-edtpl{display:grid;gap:3px}
+.smr-edtpl__row{appearance:none;display:flex;align-items:center;gap:9px;width:100%;
+  border:1px solid transparent;border-radius:8px;padding:6px 8px;background:none;
+  cursor:pointer;font:inherit;text-align:start;min-height:34px}
+.smr-edtpl__row:hover{background:rgba(131,0,81,.05)}
+.smr-edtpl__row.on{border-color:var(--accent,#830051);background:rgba(131,0,81,.07)}
+.smr-edtpl__row[disabled]{cursor:progress;opacity:.6}
+.smr-edtpl__thumb{flex:none;width:56px;aspect-ratio:4/5;border-radius:5px;
+  overflow:hidden;background:var(--paper,#fffdf9);
+  border:1px solid var(--line,rgba(36,29,32,.12));line-height:0;
+  /* un-composed rows read as "loading", never as an empty template */
+  background-image:repeating-linear-gradient(45deg,
+    rgba(131,0,81,.05) 0 6px,transparent 6px 12px)}
+.smr-edtpl__thumb.is-on{background-image:none}
+.smr-edtpl__thumb.is-dead{background-image:none;
+  border-style:dashed;border-color:color-mix(in srgb,var(--accent,#830051) 45%,transparent)}
+.smr-edtpl__row.on .smr-edtpl__thumb{border-color:var(--accent,#830051)}
+.smr-edtpl__txt{flex:1;min-width:0;display:grid;gap:1px}
+.smr-edtpl__nm{font-size:.8rem;font-weight:700;direction:ltr;text-align:start;
+  overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
+.smr-edtpl__hint{font-size:.7rem;color:var(--ink-soft,#6b5f63);
+  overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
+.smr-edtpl__cur{font-size:.68rem;font-weight:700;color:var(--accent,#830051);flex:none}
+.smr-edtpl__more{appearance:none;border:1px dashed var(--line,rgba(36,29,32,.2));
+  border-radius:8px;background:none;cursor:pointer;font:inherit;font-size:.76rem;
+  padding:6px 8px;color:var(--ink-soft,#6b5f63)}
+.smr-edtpl__more:hover{border-color:var(--accent,#830051);color:var(--accent,#830051)}
 .smr-sb__body{flex:1;min-height:0;overflow-y:auto;padding:12px 13px 16px;
   display:grid;gap:10px;align-content:start}
 /* one scroller only (Canva's rule): panes stretch, the body scrolls */
@@ -1541,11 +1601,20 @@ export function initEditor(handle, slide, opts = {}) {
     Number(opts.deck.count) > 1) ? opts.deck : null;
   const slidesPane = el('div', { class: 'smr-sb__pane', hidden: true });
 
+  // v2.14 — the template switcher. The tab exists ONLY when the host declares
+  // it can absorb a swap: the editor holds one slide as a working copy and a
+  // swap replaces that whole slide, which is a write only the host can make
+  // land (audit row, save, re-arm). build.js keeps its own picker and passes
+  // nothing here, so nothing about the builder changes.
+  const onTemplateSwap = typeof opts.onTemplateSwap === 'function' ? opts.onTemplateSwap : null;
+  const tplPane = el('div', { class: 'smr-sb__pane', hidden: true });
+
   const TABS = [
     { key: 'props', icon: '✎', label: 'מאפיינים', title: 'מאפייני הבחירה', pane: propsPane },
     { key: 'lib', icon: '🖼', label: 'ספרייה', title: 'ספריית נכסים', pane: libPane },
     { key: 'bg', icon: '🎨', label: 'רקע', title: 'רקע השקף', pane: bgPanel },
     { key: 'layers', icon: '☰', label: 'שכבות', title: 'שכבות השקף', pane: layersPanel },
+    ...(onTemplateSwap ? [{ key: 'tpl', icon: '⇄', label: 'תבנית', title: 'תבנית השקף', pane: tplPane }] : []),
     ...(deck ? [{ key: 'slides', icon: '▤', label: 'שקפים', title: 'שקפי הקרוסלה', pane: slidesPane }] : []),
   ];
   let activeTab = 'props';
@@ -1673,6 +1742,7 @@ export function initEditor(handle, slide, opts = {}) {
       if (t.key === key) sbTitle.textContent = t.title;
     }
     if (key === 'slides') renderSlidesPane();
+    if (key === 'tpl') renderTplPane();
     if (key === 'lib') renderLibraryPane();
     if (key === 'bg') renderBgPanel();
     if (key === 'layers') renderLayersPanel();
@@ -1715,6 +1785,308 @@ export function initEditor(handle, slide, opts = {}) {
         'מעבר בין שקפי הקרוסלה בלי לצאת ממצב העריכה. העתקה מכאן והדבקה שם — ⌘C ואז ⌘V.'),
       el('div', { class: 'smr-edslides' }, kids),
     );
+  }
+
+  // ---------------- the template switcher (v2.14) ----------------
+  //
+  // «החלפת תבנית»: the reviewer keeps what they wrote and changes the frame
+  // around it. Everything about WHICH value goes where lives in tplswap.js
+  // (pure, unit-tested); this section is the list, the one fetch it needs, and
+  // the hand-off to the host.
+  //
+  // v2.14.1 — LIVE THUMBNAILS (operator: they want to see their own words in
+  // the new layout BEFORE committing to it). Each row composes the candidate
+  // from THIS SLIDE'S OWN mapped vars, through the same swapSlide() the click
+  // will run, so the picture is the answer and not an advertisement. That is
+  // also why there are no sample.json thumbnails and no pre-rendered PNGs: both
+  // would show a template full of somebody else's words, which is the confusion
+  // this whole revision exists to end.
+
+  const tplRaw = new Map();      // template name -> raw html | null (miss)
+  const tplReq = new Map();      // template name -> templateRequires() | null
+  const tplShapes = new Map();   // template name -> templateShape() | null
+  let tplShowAll = false;
+  let tplSeq = 0;                // rapid clicks: only the newest swap may land
+
+  const V3_FAMILY = /^v3-/;
+
+  // build.js's tplHint, same sentence for the same manifest row — the reviewer
+  // reads one description of a template whichever screen they are on.
+  function tplHintOf(t) {
+    const kinds = { text: 0, multiline: 0, ill: 0 };
+    for (const f of (t && t.fields) || []) kinds[f.kind] = (kinds[f.kind] || 0) + 1;
+    const bits = [];
+    if (kinds.multiline) bits.push(kinds.multiline === 1 ? 'פסקה אחת' : kinds.multiline + ' פסקאות');
+    if (kinds.text) bits.push(kinds.text === 1 ? 'שורת טקסט' : kinds.text + ' שורות טקסט');
+    if (kinds.ill) bits.push('איור לבחירה');
+    return bits.join(' · ') || 'תבנית קבועה';
+  }
+
+  // The target's own source. Needed because the manifest's `fields` is not the
+  // whole truth about which vars a template asks for — see templateRequires in
+  // tplswap.js for the measured case that forced this. compose.js caches the
+  // same file for its own composition, so on any board this is one fetch per
+  // template for the lifetime of the page.
+  async function tplRequires(name) {
+    if (tplReq.has(name)) return tplReq.get(name);
+    let body = null;
+    try {
+      const res = await fetch(assetUrl('studio/templates/' + name + '.html'));
+      if (res.ok) body = await res.text();
+    } catch { /* a template we cannot read is one we do not swap to */ }
+    tplRaw.set(name, body);
+    const req = body ? templateRequires(body) : null;
+    tplReq.set(name, req);
+    return req;
+  }
+
+  // What the TARGET actually has — photo slots, decorative elements, text
+  // blocks — read off its own composed document rather than from a second copy
+  // of the engine's tagging tables. See the ORPHAN DESIGN KEYS block in
+  // tplswap.js for why this has to be exact: render.mjs DIES on a design key
+  // naming something the template lacks, so a swap that guesses wrong hands the
+  // factory a slide that kills a render run.
+  async function tplShape(name) {
+    if (tplShapes.has(name)) return tplShapes.get(name);
+    let shape = null;
+    try {
+      const req = await tplRequires(name);
+      shape = templateShape(await composeSlideHTML({
+        template: name, vars: probeVars(man, name, req),
+      }));
+    } catch { /* a shape we could not read is a shape we do not trust */ }
+    tplShapes.set(name, shape);
+    return shape;
+  }
+
+  // The slide as swapSlide will see it. Read fresh every time: `design` is the
+  // LIVE object (drags write into it between re-composes) and `slide.vars` moves
+  // under in-place text editing, so a cached copy would make both the thumbnails
+  // and the swap itself describe a slide that is one gesture out of date.
+  function tplSourceSlide() {
+    const from = {
+      template: slide.template,
+      vars: { ...(slide.vars || {}) },
+      tplmem: slide.tplmem,
+    };
+    if (!isEmptyDesign(design)) from.design = deepCopy(design);
+    return from;
+  }
+
+  // Everything a thumbnail depends on. When this string moves, every composed
+  // preview in the pane is a lie about a slide that no longer exists — a text
+  // edit or a design nudge and the pictures still show the old words — so the
+  // cache is keyed on it and the mounts are thrown away when it changes.
+  function tplStateSig() {
+    const s = tplSourceSlide();
+    delete s.tplmem;   // the stash never shows up in a preview
+    return canonicalJSON(s);
+  }
+
+  // ---- the live previews -----------------------------------------------
+  //
+  // One mount element per template, kept in this map ACROSS pane re-renders and
+  // re-parented rather than rebuilt. compose.js keys its iframe off the
+  // container node (a WeakMap + a `container.contains(wrapper)` check), so
+  // reusing the node reuses the iframe and its ResizeObserver; building a fresh
+  // div every render would leak one of each per row per open.
+  const tplMounts = new Map();   // name -> {host, sig} — sig it was composed at
+  const tplQueue = [];           // names waiting for a compose slot
+  let tplInFlight = 0;
+  const TPL_PARALLEL = 3;        // compose slots; a slide is ~40 fetches cold
+  let tplIO = null;              // IntersectionObserver over the pane's scroller
+  let tplSig = '';               // the state every current mount was composed at
+
+  function tplMountHost(name) {
+    let m = tplMounts.get(name);
+    if (!m) {
+      // pointer-events:none is the whole "inert" contract: compose.js already
+      // sets it on the iframe, this stops the wrapper from eating the row's
+      // click. The preview is a picture, never a second thing to press.
+      m = {
+        host: el('div', {
+          class: 'smr-edtpl__thumb',
+          style: 'pointer-events:none',
+          'aria-hidden': 'true',
+        }),
+        sig: null,
+      };
+      tplMounts.set(name, m);
+    }
+    return m;
+  }
+
+  function tplPump() {
+    while (tplInFlight < TPL_PARALLEL && tplQueue.length) {
+      const name = tplQueue.shift();
+      tplInFlight++;
+      tplThumb(name).finally(() => { tplInFlight--; tplPump(); });
+    }
+  }
+
+  function tplWant(name) {
+    const m = tplMountHost(name);
+    if (m.sig === tplSig || m.pending) return;
+    m.pending = true;
+    tplQueue.push(name);
+    tplPump();
+  }
+
+  // Compose ONE candidate through the real mapping. Not the template's sample,
+  // not a stock render: swapSlide() with this slide's own words, which is
+  // exactly what the click would produce. The reviewer is looking at the
+  // outcome, including the placeholders where their text does not reach.
+  async function tplThumb(name) {
+    const m = tplMountHost(name);
+    const sig = tplSig;
+    try {
+      if (destroyed) return;
+      let preview;
+      if (name === slide.template) {
+        preview = tplSourceSlide();          // no swap to run: this IS the slide
+      } else {
+        const [req, shape, fromReq] = await Promise.all([
+          tplRequires(name), tplShape(name), tplRequires(slide.template),
+        ]);
+        if (destroyed || sig !== tplSig) return;
+        if (!shape) { m.host.classList.add('is-dead'); return; }
+        preview = swapSlide(tplSourceSlide(), name,
+          { manifest: man, requires: req, fromRequires: fromReq, shape }).slide;
+      }
+      delete preview.tplmem;
+      if (destroyed || sig !== tplSig) return;
+      await mountSlide(m.host, preview);
+      if (sig === tplSig) { m.sig = sig; m.host.classList.add('is-on'); }
+    } catch {
+      m.host.classList.add('is-dead');       // a preview we cannot draw says so
+    } finally {
+      m.pending = false;
+    }
+  }
+
+  // Lazy: only rows the reviewer can actually see compose, which is what keeps
+  // «כל התבניות» from composing 37 slides the moment it expands. The scroller
+  // is the sidebar body (`.smr-sb__body`), the one scrolling box in this panel.
+  function tplObserve(node) {
+    if (!tplIO) {
+      tplIO = new IntersectionObserver((entries) => {
+        for (const e of entries) {
+          if (e.isIntersecting && e.target.dataset.tpl) tplWant(e.target.dataset.tpl);
+        }
+      }, { root: sbBody, rootMargin: '240px 0px' });
+    }
+    tplIO.observe(node);
+  }
+
+  function tplRow(t, cur) {
+    const isCur = t.name === cur;
+    const b = el('button', {
+      class: 'smr-edtpl__row' + (isCur ? ' on' : ''), type: 'button',
+      title: isCur ? 'זו התבנית של השקף' : 'מעבר לתבנית ”' + t.name + '“',
+      'aria-pressed': isCur ? 'true' : 'false',
+      onclick: () => { if (!isCur) doTemplateSwap(t.name, b); },
+    },
+      tplMountHost(t.name).host,
+      el('span', { class: 'smr-edtpl__txt' },
+        el('span', { class: 'smr-edtpl__nm' }, t.name),
+        el('span', { class: 'smr-edtpl__hint' }, tplHintOf(t)),
+      ),
+      isCur ? el('span', { class: 'smr-edtpl__cur' }, '✓ נוכחית') : null,
+    );
+    b.dataset.tpl = t.name;
+    tplObserve(b);
+    return b;
+  }
+
+  function renderTplPane() {
+    if (!onTemplateSwap || tplPane.hidden) return;
+    const all = Array.isArray(man.templates) ? man.templates.filter((t) => t && t.name) : [];
+    if (!all.length) {
+      tplPane.replaceChildren(el('p', { class: 'smr-sb__empty' },
+        'רשימת התבניות לא נטענה מהסטודיו, אז אי אפשר להחליף תבנית עכשיו.'));
+      return;
+    }
+    // A text edit or a design change since the last open makes every composed
+    // preview stale. Drop the mounts rather than the map: a stale picture that
+    // still LOOKS finished is worse than no picture at all.
+    const sig = tplStateSig();
+    if (sig !== tplSig) {
+      tplSig = sig;
+      tplQueue.length = 0;
+      for (const m of tplMounts.values()) {
+        m.sig = null; m.pending = false;
+        m.host.replaceChildren();
+        m.host.classList.remove('is-on', 'is-dead');
+      }
+    }
+    const cur = slide.template;
+    const rec = all.filter((t) => t.builder === true || V3_FAMILY.test(t.name));
+    const recNames = new Set(rec.map((t) => t.name));
+    const rest = all.filter((t) => !recNames.has(t.name));
+    // the current template is always visible, even when it is one of the rest
+    const head = rec.some((t) => t.name === cur) || !all.some((t) => t.name === cur)
+      ? rec : [all.find((t) => t.name === cur), ...rec];
+
+    const kids = [
+      el('p', { class: 'smr-sb__hint' },
+        'כל תבנית מוצגת עם הטקסט שלכם בתוכה, כדי שתראו איך זה ייראה לפני שבוחרים. ' +
+        'הטקסט, התמונות והעיצוב עוברים איתכם, וחזרה לתבנית הקודמת מחזירה אותה בדיוק כפי שהייתה.'),
+      el('div', { class: 'smr-edtpl' }, head.map((t) => tplRow(t, cur))),
+    ];
+    if (rest.length) {
+      kids.push(tplShowAll
+        ? el('div', { class: 'smr-edtpl' }, rest.map((t) => tplRow(t, cur)))
+        : el('button', {
+            class: 'smr-edtpl__more', type: 'button',
+            onclick: () => { tplShowAll = true; renderTplPane(); },
+          }, 'כל התבניות (' + rest.length + ' נוספות)'));
+    }
+    tplPane.replaceChildren(...kids);
+  }
+
+  // One click = one swap. The fetches are awaited BEFORE anything is written,
+  // and a `seq` guard means a reviewer clicking five templates fast lands only
+  // the last one: an earlier fetch arriving late must never overwrite a newer
+  // choice with an older template.
+  async function doTemplateSwap(name, btn) {
+    if (destroyed || !onTemplateSwap) return;
+    const seq = ++tplSeq;
+    if (btn) btn.disabled = true;
+    let requires, shape, fromRequires;
+    try {
+      // the SOURCE's html too: without it `face` cannot be told from prose on
+      // the way out of a v3 template, and a class token becomes a headline
+      [requires, shape, fromRequires] = await Promise.all([
+        tplRequires(name), tplShape(name), tplRequires(slide.template),
+      ]);
+    } finally {
+      if (btn && btn.isConnected) btn.disabled = false;
+    }
+    if (destroyed || seq !== tplSeq) return;
+    if (!shape) {
+      toast('התבנית ”' + name + '“ לא נטענה מהסטודיו, אז לא החלפנו כלום', 'err');
+      return;
+    }
+    const from = tplSourceSlide();
+    let res;
+    try {
+      res = swapSlide(from, name, { manifest: man, requires, fromRequires, shape });
+    } catch (e) {
+      toast('החלפת התבנית נכשלה: ' + (e && e.message ? e.message : e), 'err');
+      return;
+    }
+    // The host owns the write: it commits, audits, saves and re-arms the
+    // editor on the new template. This controller is about to be destroyed, so
+    // nothing here touches `slide`, `design` or the mounted document.
+    onTemplateSwap(res.slide, {
+      placeholderFilled: res.placeholderFilled,
+      blank: res.blank,
+      restored: res.restored,
+      dropped: res.dropped,
+      droppedText: droppedSummary(res.dropped),
+      from: from.template,
+      to: name,
+    });
   }
 
   // ---------------- geometry ----------------
@@ -6445,7 +6817,16 @@ export function initEditor(handle, slide, opts = {}) {
   // open on «מאפיינים» with its empty state: the first thing the sidebar says
   // is what to do next (click something on the slide), not a wall of controls.
   // No {dock:true}: on mobile the dock arms COLLAPSED, slide fully in view.
-  openTab('props');
+  //
+  // v2.14 opts.startTab overrides it. A template swap destroys this controller
+  // and builds a new one on the new template, and landing that new editor back
+  // on «מאפיינים» would close the list mid-browse after every single click. An
+  // unknown key falls back to props rather than throwing — openTab already
+  // ignores keys that are not in TABS, and a host asking for a tab this editor
+  // does not have (no onTemplateSwap → no «תבנית») must still open somewhere.
+  const wantTab = typeof opts.startTab === 'string' &&
+    TABS.some((t) => t.key === opts.startTab) ? opts.startTab : 'props';
+  openTab(wantTab);
   dockQuickBar();
   syncPanelVar();
 
@@ -6471,6 +6852,26 @@ export function initEditor(handle, slide, opts = {}) {
       dockOpen = false;
       sidebar.classList.remove('is-dockopen');
       document.documentElement.style.removeProperty('--smr-panel-h');
+      // v2.14.1 — the «תבנית» previews. Ours are disconnected explicitly: the
+      // IntersectionObserver outlives the rows it watches unless told
+      // otherwise, and the queue would keep composing slides for a sidebar
+      // that is already gone. Emptying each host drops its iframe — and with it
+      // a whole composed document — now rather than at the next GC.
+      if (tplIO) { tplIO.disconnect(); tplIO = null; }
+      tplQueue.length = 0;
+      for (const m of tplMounts.values()) m.host.replaceChildren();
+      tplMounts.clear();
+      // The one thing NOT torn down here is the ResizeObserver compose.js
+      // creates per mount container. That is deliberate: it lives in a module
+      // -private WeakMap (compose.js:52) with no exported teardown, and
+      // compose.js is a parity twin this feature may not touch. Reaching into
+      // it would be worse than the leak — and there is no leak. The WeakMap is
+      // keyed by the container, a ResizeObserver holds only a WEAK reference to
+      // what it observes, and the lines above drop our last strong references
+      // to every container; sidebar.remove() drops the DOM's. Container, entry
+      // and observer become garbage together. Accepted-GC, measured by the
+      // inspector as no leak, and revisit only if compose.js ever exports an
+      // unmount.
       document.removeEventListener('keydown', onKey);
       window.removeEventListener('scroll', reposition, true);
       window.removeEventListener('resize', reposition);
@@ -6495,7 +6896,7 @@ export function initEditor(handle, slide, opts = {}) {
     addPhotoExtra,   // (url, xPct, yPct) — host fallback for off-overlay drops
     dropFiles,       // (files, xPct, yPct) — same, for file drops
     startTextEdit,   // (name, ev?) — in-place text editing entry point
-    openTab,         // ('props'|'lib'|'bg'|'layers'|'slides') — host tab switch
+    openTab,         // ('props'|'lib'|'bg'|'layers'|'tpl'|'slides') — host tab switch
     // v2.2: hosts bind their own document-level keys (post.js pages slides
     // with the arrows). They need to know whether an arrow press has anything
     // to nudge before they page away from it.

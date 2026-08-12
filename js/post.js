@@ -105,6 +105,10 @@ const S = {
   designCtrlIdx: -1,          // which slide the controller is armed on
   designMountEl: null,        // persistent compose container for the editor
   designEngineMissing: false, // compose handle doesn't expose update/doc yet
+  // v2.14: which sidebar tab the NEXT arm opens on ('tpl' after a template
+  // swap, so the list stays under the reviewer's hand). Read-and-cleared by
+  // mountDesign — it describes one re-arm, not a preference.
+  designStartTab: null,
   // v1.5 direct collaborative editing: every committed change lands in the
   // working slides copy and PATCHes sm_posts.slides for everyone.
   slides: [],           // deep working copy of S.post.slides (render source)
@@ -1399,6 +1403,28 @@ function savedDesignCanon(i) {
   return slide && slide.design ? canonicalJSON(slide.design) : '';
 }
 
+// v2.14 — the payload of a `slides.<i>.swap` audit row. A template swap is not
+// a field edit: it moves the template, every var and the whole design at once,
+// and splitting it into eight rows would produce an audit trail in which no
+// single row is true on its own (a var row whose old_text belongs to a
+// template that is no longer there). So ONE row carries the whole slide.
+//
+// `tplmem` rides along because it is part of what was saved — leaving it out
+// would make the replay guard in apply-edits.mjs compare against a shape the
+// board never held. Absent keys are OMITTED rather than written as null, so a
+// slide with no design and no stash canonicalizes to exactly what it did
+// before this feature existed.
+function slideSwapCanon(s) {
+  if (!s || typeof s !== 'object') return '';
+  const o = { template: s.template ?? null, vars: s.vars || {} };
+  if (s.design) o.design = s.design;
+  if (s.tplmem) o.tplmem = s.tplmem;
+  return canonicalJSON(o);
+}
+function savedSwapCanon(i) {
+  return slideSwapCanon((S.post.slides || [])[i]);
+}
+
 // old_text is captured once per save-cycle (the saved value); typing back to
 // the saved value cancels the pending entry.
 function notePending(field, old_text, new_text) {
@@ -1439,6 +1465,37 @@ function commitDesign(i, design, opts = {}) {
   scheduleSave(opts.delay);
 }
 
+// v2.14 — the template swap lands here. ONE commit, whatever state the slide
+// was in when the reviewer clicked.
+//
+// THE COLLAPSE, and why it is not optional. Pending entries are per FIELD, and
+// their old_text is the last-SAVED value of that field. A swap replaces the
+// slide wholesale, so every `slides.<i>.*` row still in flight is now a
+// half-truth: `slides.3.quote` claiming «"א" → "ב"» is a sentence about a
+// template that is no longer on this slide, and apply-edits would replay it
+// onto the wrong vars bag or refuse it as stale forever. So the swap DELETES
+// every pending row for slide i and writes one `slides.<i>.swap` in their
+// place, with old_text taken from the saved truth — which is where all those
+// rows started counting from. Type-then-swap-immediately therefore audits as
+// one honest before/after, not as an edit plus a contradiction.
+function commitSwap(i, next) {
+  const s = S.slides[i];
+  if (!s || !next) return false;
+  const field = `slides.${i}.swap`;
+  const oldCanon = savedSwapCanon(i);
+  const newCanon = slideSwapCanon(next);
+  if (oldCanon === newCanon && !S.pending.has(field)) return false;
+  // always: a swap is never folded into the drag or the keystroke before it
+  markUndoBoundary(field, { always: true });
+  for (const f of [...S.pending.keys()]) {
+    if (f.startsWith(`slides.${i}.`)) S.pending.delete(f);
+  }
+  S.slides[i] = next;
+  if (oldCanon !== newCanon) S.pending.set(field, { old_text: oldCanon, new_text: newCanon });
+  scheduleSave(400);
+  return true;
+}
+
 function destroyDesignEditor() {
   if (S.designCtrl) { S.designCtrl.destroy(); S.designCtrl = null; }
   S.designCtrlIdx = -1;
@@ -1471,6 +1528,10 @@ async function mountDesign() {
   // the working copy is the single render source — vars + design together
   const composed = { template: slide.template, vars: { ...slide.vars } };
   if (slide.design) composed.design = slide.design;
+  // v2.14: the template-swap stash rides along so «תבנית» can restore a
+  // previous template verbatim. compose.js ignores keys it does not know, so
+  // this changes nothing about what gets rendered.
+  if (slide.tplmem) composed.tplmem = slide.tplmem;
 
   // persistent mount container — re-mounting into it reuses the iframe, so
   // the armed editor survives var-level refreshes on the same slide
@@ -1496,9 +1557,15 @@ async function mountDesign() {
   if (S.designCtrl && S.designCtrlIdx === i) { S.designCtrl.refresh(); return; }
   destroyDesignEditor();
   const wasMissing = S.designEngineMissing;
+  // v2.14: read-and-clear. The «תבנית» tab only re-opens for the ONE re-arm
+  // that a swap causes; paging to another slide afterwards lands on מאפיינים
+  // like it always has.
+  const startTab = S.designStartTab;
+  S.designStartTab = null;
   try {
     S.designCtrl = initEditor(handle, composed, {
       manifest: manifest(),
+      startTab,
       photos: designPhotos(),
       assets: designAssets(),
       postId: S.post.id,
@@ -1539,6 +1606,12 @@ async function mountDesign() {
       // undo step, because "apply to all" is one action to the person who
       // pressed it.
       onApplyAll: (p) => applyToAllSlides(p),
+      // v2.14 «תבנית» — the editor hands over a finished slide; the write, the
+      // audit row, the save and the re-arm are ours. Passing this callback is
+      // what makes the tab appear at all (editor.js renders it only for a host
+      // that can absorb a swap), so an uploaded-image post never sees it: those
+      // slides drop out of design mode entirely (hasImageSlides above).
+      onTemplateSwap: (next, info) => onTemplateSwapped(i, next, info),
       // v1.5: a design mutation is a committed change — it writes into the
       // working slides and saves (debounced ~2s) straight to everyone.
       onChange: (design) => {
@@ -1579,6 +1652,49 @@ async function mountDesign() {
     console.warn('initEditor unavailable:', e && e.message);
   }
   if (wasMissing !== S.designEngineMissing && designMode()) renderViewer();
+}
+
+// -------------------------------------------- template swap (v2.14, spec 16)
+//
+// The re-arm is a TEARDOWN, not a refresh. mountDesign() reuses a live
+// controller when the slide index has not moved, and a swap keeps the same
+// index — so without destroying it first, the editor would keep pointing at
+// the previous template's DOM (its els keys, its slots, its text blocks) over
+// artwork that no longer has any of them. That is the zombie controller, and
+// it looks exactly like a working editor until the first click.
+function onTemplateSwapped(i, next, info = {}) {
+  if (!next || !S.slides[i]) return;
+  const from = info.from || S.slides[i].template;
+  if (!commitSwap(i, next)) return;
+  S.editAccEl = null;              // the עריכת טקסט panel is about to change shape
+  S.designStartTab = 'tpl';        // re-arm with the list still open
+  destroyDesignEditor();
+  mountDesignSoon(0);
+  renderDesignState();
+  if (S.tab === 'edit' || S.tab === 'trans') renderActiveTab(true);
+  toast(swapToast(from, info), 'ok');
+}
+
+// What the reviewer is told, in the order it matters: it worked, then which
+// fields are waiting for them, then what we could not carry. A restore says so
+// explicitly — «exactly as it was» is the promise the stash makes, and a
+// promise nobody hears is not kept.
+//
+// v2.14.1: the new template's spare fields carry PLACEHOLDER copy, never the
+// template's sample copy. The operator could not tell their own sentence from
+// the template's demo sentence, so a swap read as «the text is changing». The
+// slide now says «טקסט ממלא מקום» in as many words and this line names exactly
+// which fields did it.
+function swapToast(from, info) {
+  const to = info.to || '';
+  if (info.restored) return `חזרנו לתבנית ${to} בדיוק כפי שהייתה`;
+  const bits = [`התבנית הוחלפה: ${from} ← ${to}`];
+  const filled = Array.isArray(info.placeholderFilled) ? info.placeholderFilled : [];
+  const blank = Array.isArray(info.blank) ? info.blank : [];
+  if (filled.length) bits.push(`ממתינים לטקסט שלכם: ${filled.join(', ')}`);
+  if (blank.length) bits.push(`נשארו ריקים: ${blank.join(', ')}`);
+  if (info.droppedText) bits.push(`לא עברו לתבנית החדשה: ${info.droppedText} (יחזרו אם תחזרו לתבנית הקודמת)`);
+  return bits.join(' · ');
 }
 
 // -------------------------------------------- apply to every slide (v2.2)
@@ -1843,12 +1959,35 @@ function rebaseOnto(fresh) {
   let base = fresh.slides;
   if (typeof base === 'string') { try { base = JSON.parse(base); } catch { base = []; } }
   base = deepCopy(Array.isArray(base) ? base : []);
-  for (const [f, ch] of [...S.pending]) {
+  // v2.14: a `swap` row replaces the WHOLE slide, so it has to be re-applied
+  // before any var/design row for the same slide — otherwise a keystroke made
+  // after the swap would be written into the remote slide's old vars bag and
+  // then overwritten by the swap a moment later. The collapse in commitSwap
+  // already produces this order in practice; sorting makes it a property of
+  // the code rather than of Map insertion order.
+  const order = [...S.pending].sort((a, b) =>
+    (b[0].endsWith('.swap') ? 1 : 0) - (a[0].endsWith('.swap') ? 1 : 0));
+  for (const [f, ch] of order) {
     const m = /^slides\.(\d+)\.(.+)$/.exec(f);
     if (!m) { S.pending.delete(f); continue; }
     const s = base[+m[1]];
     if (!s) { S.pending.delete(f); continue; } // slide vanished remotely
-    if (m[2] === 'design') {
+    if (m[2] === 'swap') {
+      // The one field whose new_text is a whole slide. It MUST be handled
+      // before the generic var branch below or the regex would fall through
+      // and write `s.vars.swap = "<json>"` — a var no template has, which
+      // composes as a red banner on the preview and kills a factory render.
+      ch.old_text = slideSwapCanon(s);
+      let payload = null;
+      try { payload = JSON.parse(ch.new_text); } catch { /* handled below */ }
+      if (!payload || typeof payload !== 'object' || Array.isArray(payload)) {
+        S.pending.delete(f); continue;
+      }
+      s.template = payload.template;
+      s.vars = payload.vars || {};
+      if (payload.design) s.design = payload.design; else delete s.design;
+      if (payload.tplmem) s.tplmem = payload.tplmem; else delete s.tplmem;
+    } else if (m[2] === 'design') {
       ch.old_text = s.design ? canonicalJSON(s.design) : '';
       if (ch.new_text) {
         try { s.design = JSON.parse(ch.new_text); } catch { S.pending.delete(f); continue; }
@@ -2361,6 +2500,18 @@ function rebuildPendingFromDiff() {
   for (let i = 0; i < n; i++) {
     const cur = S.slides[i] || {};
     const was = saved[i] || {};
+    // v2.14: undoing across a template swap. Without this the diff can only
+    // describe vars and design, so reverting a swap between two templates that
+    // happen to share their field names produced NO pending row at all — the
+    // page showed the old template back, nothing was saved, and a reload
+    // brought the swap straight back. The whole slide moved, so the whole
+    // slide is the row, exactly as commitSwap writes it.
+    if ((cur.template ?? null) !== (was.template ?? null) ||
+        canonicalJSON(cur.tplmem ?? null) !== canonicalJSON(was.tplmem ?? null)) {
+      const a = slideSwapCanon(was), b = slideSwapCanon(cur);
+      if (a !== b) S.pending.set(`slides.${i}.swap`, { old_text: a, new_text: b });
+      continue;   // the swap row already carries this slide's vars and design
+    }
     const keys = new Set([...Object.keys(cur.vars || {}), ...Object.keys(was.vars || {})]);
     for (const k of keys) {
       const a = String((was.vars || {})[k] ?? '');
@@ -3313,12 +3464,32 @@ function fieldLabel(field) {
   // rides an sm_edits row under this field name (store.uploadRenderVersion).
   if (field === 'version.upload') return 'הערה על גרסה שהועלתה';
   const m = /^slides\.(\d+)\.(.+)$/.exec(field || '');
-  if (m) return `שקף ${Number(m[1]) + 1} · ${m[2]}`;
+  if (m) return `שקף ${Number(m[1]) + 1} · ${m[2] === 'swap' ? 'החלפת תבנית' : m[2]}`;
   return field || '';
 }
 
 function isDesignEdit(ed) {
   return /^slides\.\d+\.design$/.test(ed.field || '');
+}
+
+// v2.14 — a swap row's old/new are whole slides. Printing the raw JSON in the
+// history list would bury the one thing anybody reads it for, so the line says
+// which template it was and what else came along; the «JSON מלא» details still
+// carries the payload verbatim for anyone checking the replay.
+function isSwapEdit(ed) {
+  return /^slides\.\d+\.swap$/.test(ed.field || '');
+}
+function swapSummary(text) {
+  const raw = String(text ?? '').trim();
+  if (!raw) return 'אין שקף';
+  let s = null;
+  try { s = JSON.parse(raw); } catch { return 'תבנית (JSON לא תקין)'; }
+  if (!s || typeof s !== 'object') return 'תבנית (מבנה לא מוכר)';
+  const parts = ['תבנית: ' + (s.template || '—')];
+  const nVars = s.vars && typeof s.vars === 'object' ? Object.keys(s.vars).length : 0;
+  if (nVars) parts.push(nVars === 1 ? 'שדה טקסט אחד' : nVars + ' שדות טקסט');
+  if (s.design) parts.push(designSummary(s.design));
+  return parts.join(' · ');
 }
 
 // v1.5: the proposal/triage list is gone — edits apply immediately, and this
@@ -3332,6 +3503,7 @@ function renderEditHistory() {
     el('h4', null, `היסטוריית עריכות (${edits.length})`),
     edits.map((ed) => {
       const design = isDesignEdit(ed);
+      const swap = isSwapEdit(ed);
       const m = /^slides\.(\d+)\./.exec(ed.field || '');
       const nameEl = el('span', { class: 'field-name', title: m ? 'מעבר לשקף' : '' }, fieldLabel(ed.field));
       if (m) { nameEl.style.cursor = 'pointer'; nameEl.addEventListener('click', () => goTo(Number(m[1]))); }
@@ -3346,9 +3518,11 @@ function renderEditHistory() {
           el('time', null, fmtDate(ed.created_at)),
           legacy,
         ),
-        el('span', { class: 'diff-old' }, design ? designSummary(ed.old_text) : (ed.old_text || '—')),
-        el('span', { class: 'diff-new' }, design ? designSummary(ed.new_text) : (ed.new_text || '—')),
-        design ? el('details', { class: 'dz-raw' },
+        el('span', { class: 'diff-old' },
+          swap ? swapSummary(ed.old_text) : design ? designSummary(ed.old_text) : (ed.old_text || '—')),
+        el('span', { class: 'diff-new' },
+          swap ? swapSummary(ed.new_text) : design ? designSummary(ed.new_text) : (ed.new_text || '—')),
+        (design || swap) ? el('details', { class: 'dz-raw' },
           el('summary', null, 'JSON מלא'),
           el('pre', null, ed.new_text || '(איפוס)'),
         ) : null,
